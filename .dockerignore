@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/dist-types/
+.git/
+.github/
+client/
+tests/
+**/.env
+**/.env.*
+!**/.env.example

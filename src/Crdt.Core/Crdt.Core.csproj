@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- PROJECT_SPEC.md §4: references nothing but the BCL.
+       Adding any ProjectReference or PackageReference here breaks the
+       assembly-reference test in tests/Crdt.Core.Tests. That is intentional. -->
+
+</Project>

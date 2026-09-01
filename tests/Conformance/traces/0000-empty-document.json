@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "name": "empty-document",
+  "description": "A document with no operations renders as the empty string. The trivial base case: it pins the trace envelope and the empty-traversal behaviour of both implementations.",
+  "ops": [],
+  "expected": {
+    "text": "",
+    "versionVector": {}
+  }
+}
