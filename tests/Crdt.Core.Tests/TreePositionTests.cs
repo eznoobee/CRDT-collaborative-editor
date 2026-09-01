@@ -21,6 +21,14 @@ public sealed class TreePositionTests
 
     private static Rune R(char c) => new(c);
 
+    private static void Deliver(Replica from, Replica to)
+    {
+        foreach (var op in from.OperationsSince(to.VersionVector))
+        {
+            to.Apply(op);
+        }
+    }
+
     private static void Sync(params Replica[] replicas)
     {
         for (var pass = 0; pass < 2; pass++)
@@ -124,6 +132,47 @@ public sealed class TreePositionTests
         Assert.Equal(13, a.Values.Count);
         Assert.Equal(0, a.PendingCount);
         Assert.Equal(0, b.PendingCount);
+    }
+
+    [Fact]
+    public void Orders_right_siblings_whose_right_origins_are_ancestor_and_descendant()
+    {
+        // The case that drives the comparator's depth normalisation and its
+        // ancestor detection. Two right children of the same parent only ever
+        // have DIFFERENT right origins when their authors disagreed about what
+        // follows that parent, and the smallest such disagreement is a second
+        // left child of Q that one replica has and the other does not. The two
+        // right origins are then Q and a child of Q — an ancestor pair.
+        var r1 = New(1);
+        var r2 = New(2);
+        var r3 = New(3);
+
+        r1.Insert(0, R('Q'));
+        Sync(r1, r2, r3);
+
+        // P and Z both become left children of Q, concurrently, so Q ends up
+        // with two left children ordered by element id.
+        r1.Insert(0, R('P'));
+        r2.Insert(0, R('Z'));
+
+        // r3 learns of both; r1 never learns of Z before it types again.
+        Deliver(r1, r3);
+        Deliver(r2, r3);
+        Assert.Equal("PZQ", r3.Text);
+        Assert.Equal("PQ", r1.Text);
+
+        // Both insert immediately after P, so both become right children of P.
+        // r1 believes P is followed by Q; r3 knows it is followed by Z.
+        r1.Insert(1, R('x'));
+        r3.Insert(1, R('y'));
+
+        Sync(r1, r2, r3);
+
+        Assert.Equal(r1.Text, r3.Text);
+        Assert.Equal(r1.Text, r2.Text);
+        Assert.Equal(5, r1.Values.Count);
+        Assert.StartsWith("P", r1.Text, StringComparison.Ordinal);
+        Assert.EndsWith("Q", r1.Text, StringComparison.Ordinal);
     }
 
     [Fact]
