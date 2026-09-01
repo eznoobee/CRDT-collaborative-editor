@@ -93,6 +93,39 @@ public sealed class ReplicaIdTests
     }
 
     [Fact]
+    public void Strict_operators_are_false_for_equal_ids()
+    {
+        // The difference between < and <=. Without this the two are
+        // indistinguishable, and a comparator that called equal ids "less than"
+        // would order same-id siblings arbitrarily.
+        var a = ReplicaId.Parse("00000000-0000-0000-0000-00000000000a");
+        var same = ReplicaId.Parse("00000000-0000-0000-0000-00000000000a");
+
+        Assert.False(a < same);
+        Assert.False(a > same);
+        Assert.True(a <= same);
+        Assert.True(a >= same);
+    }
+
+    [Fact]
+    public void Parse_rejects_null()
+    {
+        Assert.Throws<ArgumentNullException>(() => ReplicaId.Parse(null!));
+    }
+
+    [Fact]
+    public void Errors_name_what_was_wrong()
+    {
+        // The messages are part of the contract: a malformed replica id arrives
+        // over the wire (§7), and "invalid" alone is not a diagnosis.
+        var format = Assert.Throws<FormatException>(() => ReplicaId.Parse("nope"));
+        Assert.Contains("nope", format.Message, StringComparison.Ordinal);
+
+        var argument = Assert.Throws<ArgumentException>(() => new ReplicaId(new byte[4]));
+        Assert.Contains("16", argument.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Equality_is_by_value()
     {
         var a = ReplicaId.Parse("00000000-0000-0000-0000-0000000000aa");

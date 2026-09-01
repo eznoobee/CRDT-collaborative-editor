@@ -36,6 +36,15 @@ public sealed class ElementIdTests
     }
 
     [Fact]
+    public void Strict_operators_are_false_for_equal_ids()
+    {
+        Assert.False(Id(1, 1) < Id(1, 1));
+        Assert.False(Id(1, 1) > Id(1, 1));
+        Assert.True(Id(1, 1) <= Id(1, 1));
+        Assert.True(Id(1, 1) >= Id(1, 1));
+    }
+
+    [Fact]
     public void Equality_is_by_value()
     {
         Assert.Equal(Id(1, 1), Id(1, 1));

@@ -192,6 +192,47 @@ public sealed class ReplicaTests
     }
 
     [Fact]
+    public void Collect_treats_the_frontier_as_strictly_exclusive()
+    {
+        var replica = New(1);
+        foreach (var c in "abcd")
+        {
+            replica.Insert(replica.Values.Count, R(c));
+        }
+
+        // Elements a..d hold seqs 0..3; the three deletes take 4..6.
+        replica.Delete(1);
+        replica.Delete(1);
+        replica.Delete(1);
+
+        // A frontier of 3 means "operations 0,1,2 are stable everywhere", so
+        // element d at seq 3 is not yet stable. d is the only leaf of the
+        // tombstone run, so nothing can go.
+        Assert.Equal(0, replica.Collect(new Dictionary<ReplicaId, ulong> { [replica.Id] = 3 }));
+
+        // At 4, d becomes stable and collectable, and c becomes a leaf behind
+        // it. The boundary is exactly one operation wide.
+        Assert.Equal(2, replica.Collect(new Dictionary<ReplicaId, ulong> { [replica.Id] = 4 }));
+        Assert.Equal("a", replica.Text);
+    }
+
+    [Fact]
+    public void Collect_ignores_replicas_absent_from_the_frontier()
+    {
+        var a = New(1);
+        var b = New(2);
+        a.Insert(0, R('a'));
+        a.Insert(1, R('b'));
+        Deliver(a, b);
+        b.Delete(1);
+        Deliver(b, a);
+
+        // The frontier says nothing about replica 2, whose delete created the
+        // tombstone; an unknown replica is not a stable one.
+        Assert.Equal(0, a.Collect(new Dictionary<ReplicaId, ulong> { [a.Id] = 99 }));
+    }
+
+    [Fact]
     public void Collect_does_not_change_the_visible_text()
     {
         var replica = New(1);
