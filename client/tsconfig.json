@@ -6,7 +6,7 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
 
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "node"],
 
     /* PROJECT_SPEC.md §9: TypeScript strict mode. The extra flags below are
        the ones that actually matter for a CRDT port: indexed access and

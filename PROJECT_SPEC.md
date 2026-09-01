@@ -790,8 +790,10 @@ across two languages:
 - Non-ASCII characters emitted **literally**, never as `\uXXXX`. C# escapes
   non-ASCII by default and JavaScript does not; both must be configured to emit
   literal UTF-8.
-- Only `/`, `"`, `\` and the C0 controls are escaped, using the shortest form
-  JSON allows (`\n`, `\t`, … and `\u00XX` otherwise).
+- Only `"`, `\` and the C0 controls are escaped, using the shortest form
+  JSON allows (`\n`, `\t`, `\r`, `\b`, `\f`, and `\u00XX` otherwise). `/` is
+  left literal: escaping it is legal JSON but never required, and the two
+  languages disagree by default.
 - The `implementation` field is excluded from the comparison — it is the one
   field that is legitimately different.
 

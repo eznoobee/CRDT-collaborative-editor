@@ -47,6 +47,28 @@ jobs:
           CI: "true"
         run: ./scripts/run-tests.sh
 
+  conformance:
+    name: Cross-implementation conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      # PROJECT_SPEC.md §9: any divergence between the two cores fails the build.
+      - run: ./scripts/conformance.sh
+
   client:
     name: Client lint, typecheck and test
     runs-on: ubuntu-latest
