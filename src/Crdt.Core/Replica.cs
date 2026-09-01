@@ -254,41 +254,54 @@ public sealed class Replica
         ArgumentNullException.ThrowIfNull(stableFrontier);
 
         var collected = 0;
-        var referenced = ReferencedAsRightOrigin();
-        var order = InOrder();
+        bool progressed;
 
-        for (var i = 0; i < order.Count; i++)
+        // Iterated to a fixpoint. Forward typing builds a chain of right
+        // children, so each element in a deleted run is its successor's parent
+        // and only the tail is a leaf. One pass would collect that tail and
+        // stop; repeating collapses the run to its leading tombstone, which is
+        // what §5 says this rule does.
+        do
         {
-            var node = order[i];
+            progressed = false;
+            var referenced = ReferencedAsRightOrigin();
+            var order = InOrder();
 
-            if (!node.IsDeleted
-                || node.LeftChildren.Count > 0
-                || node.RightChildren.Count > 0
-                || referenced.Contains(node)
-                || !IsCausallyStable(node, stableFrontier))
+            for (var i = 0; i < order.Count; i++)
             {
-                continue;
+                var node = order[i];
+
+                if (!node.IsDeleted
+                    || node.LeftChildren.Count > 0
+                    || node.RightChildren.Count > 0
+                    || referenced.Contains(node)
+                    || !IsCausallyStable(node, stableFrontier))
+                {
+                    continue;
+                }
+
+                // Retain the first tombstone of every run of consecutive
+                // tombstones. A future insert names as its right origin the
+                // first node after a visible left origin, so only that leading
+                // tombstone is reachable; the ones behind it can never be named
+                // again. Collecting the leader would promote the next tombstone
+                // into reachable position, so it stays. See §5.
+                if (i == 0 || !order[i - 1].IsDeleted)
+                {
+                    continue;
+                }
+
+                var siblings = node.Side == Side.Left
+                    ? node.Parent!.LeftChildren
+                    : node.Parent!.RightChildren;
+
+                siblings.Remove(node);
+                _byId.Remove(node.Id);
+                collected++;
+                progressed = true;
             }
-
-            // Retain the first tombstone of every run of consecutive tombstones.
-            // A future insert names as its right origin the first node after a
-            // visible left origin, so only that leading tombstone is reachable;
-            // the ones behind it can never be named again. Collecting the leader
-            // would promote the next tombstone into reachable position, so it
-            // stays. See §5.
-            if (i == 0 || !order[i - 1].IsDeleted)
-            {
-                continue;
-            }
-
-            var siblings = node.Side == Side.Left
-                ? node.Parent!.LeftChildren
-                : node.Parent!.RightChildren;
-
-            siblings.Remove(node);
-            _byId.Remove(node.Id);
-            collected++;
         }
+        while (progressed);
 
         return collected;
     }

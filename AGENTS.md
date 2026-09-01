@@ -66,9 +66,12 @@ misreading would agree with itself.
 - **`ElementId` ordering is load-bearing.** It breaks sibling ties, so a
   C#/TypeScript disagreement reorders user text. Compare the pair
   `(ReplicaId, Seq)`: the replica's 16 bytes in RFC 4122 big-endian order, then
-  `Seq`. Never `Guid.CompareTo`, never string forms, never Postgres `uuid`
-  collation. Comparing `ReplicaId` alone happens to give the same answer — the
-  authors' reference implementation does that — but §5 follows the paper. (§5)
+  `Seq`. Keep the comparator hand-written — not because `Guid.CompareTo` is
+  wrong (on .NET 10 it agrees; §13.8 records that the old claim to the contrary
+  was false) but because nothing guarantees it will, and TypeScript has no
+  `Guid` to agree with. Never string forms, never Postgres `uuid` collation.
+  Comparing `ReplicaId` alone happens to give the same answer — the authors'
+  reference implementation does that — but §5 follows the paper. (§5)
 - **There is no Lamport clock, on purpose.** Nothing in the comparator is a
   causal clock: the tie-break compares identities, which is why a dense
   per-replica counter suffices where RGA needed a Lamport timestamp. `Seq`

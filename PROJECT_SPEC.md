@@ -162,10 +162,14 @@ more: §9 requires the C# and TypeScript implementations to agree byte for byte,
 and id order is what breaks sibling ties, so a disagreement here reorders user
 text. Fixing the byte order is therefore a project requirement, not a paper one.
 
-- Do **not** use `System.Guid.CompareTo`. .NET compares `_a` (int32), `_b`
-  (int16), `_c` (int16), then bytes `_d`–`_k` individually, which does not match
-  big-endian byte order.
-- Do **not** compare string forms, and do not rely on Postgres `uuid` collation.
+- Do **not** delegate to `System.Guid.CompareTo`. Not because it is wrong — on
+  .NET 10 it agrees with unsigned big-endian order in every case tested,
+  including the signed boundaries where an earlier draft of this section
+  wrongly claimed it diverged (§13.8) — but because nothing specifies that it
+  must, TypeScript has no equivalent to agree with, and a rule that reorders
+  user text should not rest on a framework comparison happening to match.
+- Do **not** compare string forms, and do not rely on Postgres `uuid` collation,
+  which is a third ordering again.
 - Implement `ReplicaId` as a wrapper over 16 bytes on both sides with a
   hand-written comparator, and pin it with a conformance trace whose expected
   output changes if the comparator changes.
@@ -1054,6 +1058,32 @@ One survivor found along the way is genuine rather than tooling: flipping the
 `Seq` half of the `ElementId` comparison changes nothing observable, because two
 same-side siblings of one parent can never share a replica id (§13.5). It is an
 equivalent mutant, and evidence that §13.5's reasoning is sound.
+
+### 13.8 The stated reason for avoiding Guid.CompareTo was wrong
+
+From the very first review, §5 justified the hand-written `ReplicaId` comparator
+by asserting that `System.Guid.CompareTo` "compares `_a` (int32), `_b` (int16),
+`_c` (int16), then bytes `_d`–`_k` individually, which does not match big-endian
+byte order". The `replica-id-byte-ordering` conformance trace repeated it, and so
+did `AGENTS.md`.
+
+It is false on .NET 10. Measured across the signed boundaries where it should
+have diverged — `7fffffff`/`80000000` in each of the first three groups, and
+`01000000`/`ff000000` — `Guid.CompareTo` agrees with unsigned big-endian byte
+order every time.
+
+The claim was carried for the whole of Phase 0 and Phase 1 without being run. It
+survived because everything downstream of it was correct: the comparator is
+hand-written, the ordering is right, the trace passes. Only writing a unit test
+that asserted the divergence exposed it — the test failed, because the
+divergence does not exist.
+
+The decision itself stands, on better grounds: nothing specifies that
+`Guid.CompareTo` must order this way, TypeScript has no `Guid` to agree with,
+and Postgres `uuid` collation is a third ordering. A rule whose violation
+reorders user text should not depend on a framework comparison continuing to
+match by coincidence. What changed is that the specification now says something
+true about why.
 
 ### 13.5 Where the papers and the reference implementation differ
 
