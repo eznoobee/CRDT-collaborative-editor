@@ -234,6 +234,24 @@ implementation does exactly that. Compare the full `ElementId` anyway: it is wha
 the paper specifies, it costs nothing, and it does not silently depend on that
 invariant holding. Assert the invariant separately.
 
+### Sequence numbers cover deletes too
+
+The paper increments its counter only on insert, because it has no operation log.
+This project does: §6 keys `document_ops` on `(document_id, replica_id, seq)` for
+both operation types, and §7 rejects any operation whose `Seq` is not the next
+dense value for that replica.
+
+So **every operation consumes a `Seq`**, inserts and deletes alike. An insert's
+id both names the operation and identifies the element it creates; a delete's id
+names the operation, and a separate `Target` field names the element being
+tombstoned.
+
+The consequence is that element ids are not contiguous per replica — a replica
+that deletes between two inserts leaves a gap in the ids it has assigned to
+elements. Nothing requires element-id contiguity; ids only need to be unique and
+totally ordered. What must stay dense is the **version vector**, which counts
+operations, and it does.
+
 ### Causal delivery
 
 An operation is **ready** when every id it references exists locally:
