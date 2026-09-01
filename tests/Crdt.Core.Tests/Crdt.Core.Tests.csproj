@@ -8,12 +8,16 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
-    <PackageReference Include="xunit.runner.visualstudio" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Crdt.Core/Crdt.Core.csproj" />
+    <!-- Referenced so ArchitectureTests can inspect its assembly. -->
+    <ProjectReference Include="../../src/Editor.Domain/Editor.Domain.csproj" />
   </ItemGroup>
 
 </Project>

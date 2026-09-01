@@ -1,0 +1,17 @@
+<Project>
+
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+
+    <!-- Underscored method names are the readable convention for test names
+         (Given_When_Then). CA1707 is an API-naming rule and is suppressed here
+         only; it stays enforced across src/. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+
+    <!-- Test assemblies are not a public API surface. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>
