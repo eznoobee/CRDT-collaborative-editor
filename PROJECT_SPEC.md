@@ -1075,3 +1075,17 @@ implementation and the paper is what governs.
 
 Where the two ever genuinely conflict, the papers govern, and the conflict gets
 recorded here rather than resolved silently.
+
+**A known equivalent mutant follows from point 1.** Reversing the `Seq` half of
+`ElementId.CompareTo` changes no observable behaviour, and mutation testing
+reports it as a survivor. That is correct, not a gap in the suite: the `Seq`
+component of a sibling comparison is only reached when two same-side siblings of
+one parent share a replica id, which the placement rule makes impossible. It is
+the same fact that lets the authors' reference implementation compare only the
+replica component.
+
+Do not "fix" this survivor. Narrowing the comparison to match — dropping `Seq`
+from `ElementId.CompareTo` — would contradict the paper, which specifies
+lexicographic order on whole ids, and would make correctness depend silently on
+an invariant holding rather than on a comparison being total. The survivor is
+evidence the reasoning above is sound.

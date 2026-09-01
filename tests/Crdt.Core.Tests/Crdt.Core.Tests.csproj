@@ -1,19 +1,24 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- xunit v2 on VSTest, unlike the other two test projects. See AGENTS.md:
+       Stryker drives VSTest and cannot run Microsoft.Testing.Platform
+       (stryker-net#3094), and the mutation gate on Crdt.Core is worth the
+       split. Revert to xunit.v3 when that issue is resolved. -->
+
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
   </ItemGroup>
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="Xunit.Abstractions" />
   </ItemGroup>
 
   <ItemGroup>

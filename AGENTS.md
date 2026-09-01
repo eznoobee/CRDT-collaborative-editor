@@ -151,11 +151,28 @@ curl http://localhost:8080/health/live
   by a runner that quietly lost its daemon. The switch is the `CI` environment
   variable.
 - **`dotnet format --verify-no-changes` runs in CI.** Run it before pushing.
-- **`Crdt.Core.Tests` carries a VSTest adapter as well as xunit.v3's own
-  runner.** Stryker drives VSTest directly and does not support
-  Microsoft.Testing.Platform (stryker-net#3094), so without the adapter it
-  discovers zero tests and exits 0 — a green gate measuring nothing. Do not
-  remove those two package references thinking they are leftovers.
+- **There are two test stacks, on purpose.**
+
+  | Project | Framework | Runner | Invoked by |
+  |---|---|---|---|
+  | `Crdt.Core.Tests` | xunit **v2** | VSTest | `dotnet test` |
+  | `Editor.Api.Tests` | xunit.v3 | Microsoft.Testing.Platform | `dotnet run` |
+  | `Conformance` | xunit.v3 | Microsoft.Testing.Platform | `dotnet run` |
+
+  `Crdt.Core.Tests` is the odd one out because Stryker drives VSTest and cannot
+  run Microsoft.Testing.Platform (stryker-net#3094). Mutation score is the only
+  check on `Crdt.Core` that is not self-referential — the conformance harness
+  compares two implementations written from one paper, the invariants are ours,
+  and the generator has already been caught measuring itself — so the runner
+  follows the tool.
+
+  `scripts/run-tests.sh` dispatches on whether a project references `xunit.v3`.
+  **`global.json` deliberately pins no test runner**: pinning one forbids mixing
+  the two, and the mix is the point.
+
+  **Revert condition:** when stryker-net#3094 is resolved, move
+  `Crdt.Core.Tests` back to xunit.v3, restore the runner pin in `global.json`,
+  and simplify `scripts/run-tests.sh` to a single invocation.
 - **`CRDT_PROPERTY_CASES` lowers the per-property case count.** It exists for
   mutation runs, which execute the suite once per mutant. The full 10,000-case
   gate runs unconditionally in CI, so the override cannot weaken what the build
