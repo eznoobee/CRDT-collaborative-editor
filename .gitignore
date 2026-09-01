@@ -1,0 +1,31 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+artifacts/
+TestResults/
+StrykerOutput/
+*.trx
+*.coverage
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Environment / secrets — see PROJECT_SPEC.md §7
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Editors
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.DS_Store
