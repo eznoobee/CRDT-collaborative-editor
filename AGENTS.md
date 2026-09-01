@@ -49,23 +49,33 @@ before the implementation exists (§5):
 5. Intention preservation · 6. No resurrection · 7. GC safety ·
 8. No interleaving
 
-Invariant 8 is why the algorithm is FugueMax and not RGA. Test it **from its
-definition** — generate two concurrent runs at the same position, in both
-directions, and assert each appears as a contiguous block. Never assert a
-specific tree shape, and never derive the expectation from the implementation:
-the conformance harness compares two implementations written by the same author
-from the same paper, so a misreading would agree with itself.
+Invariant 8 is **maximal non-interleaving**, not "runs never interleave" — that
+stronger property is impossible for any algorithm (arXiv Theorem 5). Forward
+runs never interleave, unconditionally. Backward runs interleave only where the
+Lemma 5 exception applies, which needs three concurrent replicas. Read §5's
+scope note before writing the test; the generator has to respect that boundary
+rather than demanding a property the algorithm is not permitted to satisfy.
+
+Test it **from its definition**. Never assert a specific tree shape, and never
+derive the expectation from the implementation: the conformance harness compares
+two implementations written by the same author from the same paper, so a
+misreading would agree with itself.
 
 ## Things that are easy to get wrong
 
-- **`ReplicaId` ordering is load-bearing.** It is the sole tie-break in the
-  sibling comparator, so a C#/TypeScript disagreement reorders user text. Compare
-  the 16 bytes in RFC 4122 big-endian order. Never `Guid.CompareTo`, never string
-  forms, never Postgres `uuid` collation. (§5)
-- **There is no Lamport clock, on purpose.** FugueMax's comparator never consults
-  a timestamp. `Seq` is a dense per-replica counter for identity and version
-  vectors only. Adding an ordering timestamp would add a field nothing reads —
+- **`ElementId` ordering is load-bearing.** It breaks sibling ties, so a
+  C#/TypeScript disagreement reorders user text. Compare the pair
+  `(ReplicaId, Seq)`: the replica's 16 bytes in RFC 4122 big-endian order, then
+  `Seq`. Never `Guid.CompareTo`, never string forms, never Postgres `uuid`
+  collation. Comparing `ReplicaId` alone happens to give the same answer — the
+  authors' reference implementation does that — but §5 follows the paper. (§5)
+- **There is no Lamport clock, on purpose.** Nothing in the comparator is a
+  causal clock: the tie-break compares identities, which is why a dense
+  per-replica counter suffices where RGA needed a Lamport timestamp. `Seq`
+  starts at **0**. Adding an ordering timestamp would add a field nothing reads —
   see the decision log, §13.2.
+- **The root sentinel has a `null` id**, not `(ReplicaId.Empty, 0)` — the latter
+  is a legal element id and would collide. (§5)
 - **64-bit values are decimal strings on the wire.** JSON numbers are doubles and
   do not round-trip above 2^53. TypeScript parses them as `BigInt`. (§6)
 - **Inserts have two causal dependencies**, not one: `Parent`, and `RightOrigin`

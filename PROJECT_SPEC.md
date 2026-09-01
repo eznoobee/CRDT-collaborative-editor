@@ -92,9 +92,13 @@ resolve operations.
 
 ## 5. The CRDT
 
-Implement **FugueMax** for a sequence of Unicode code points, as described in
-"The Art of the Fugue: Minimizing Interleaving in Collaborative Text Editing"
-(Weidner & Kleppmann, 2023).
+Implement **FugueMax** for a sequence of Unicode code points, as defined in
+Weidner & Kleppmann, "The Art of the Fugue: Minimizing Interleaving in
+Collaborative Text Editing", *IEEE TPDS* 36(11), 2025 — Algorithm 1 plus
+Definition 6. Both papers are committed under `docs/references/`; the TPDS
+paper is normative, and the arXiv v1 extended version supplies the appendices.
+
+Section references below are to the TPDS paper unless marked arXiv.
 
 FugueMax replaces RGA, which was specified here originally. The reason is
 recorded in §13.1: RGA cannot satisfy invariant 8.
@@ -115,8 +119,12 @@ Node:
   IsDeleted   bool               tombstone flag
 ```
 
-A single root sentinel node exists implicitly in every replica with
-`Id = (ReplicaId.Empty, 0)`. It is always tombstoned and is never transmitted.
+A single root sentinel node exists implicitly in every replica. Its id is a
+**distinct `null` value, not a representable `ElementId`** — the paper's id type
+is `(RID x N) union {null}` (Algorithm 1, line 3) and the root is
+`(null, ⊥, null, null)` (line 10). Do not encode it as `(ReplicaId.Empty, 0)`:
+with `Seq` starting at 0 that is a legal element id and could collide with a
+real one. The root is always tombstoned and is never transmitted.
 
 **Traversal.** In-order: for each node, emit its left children in sibling order,
 then the node's own value if not tombstoned, then its right children in sibling
@@ -126,18 +134,21 @@ order.
 
 Each node carries an immutable `ElementId` of `(ReplicaId: ReplicaId, Seq: ulong)`.
 
-`Seq` is a **dense, per-replica, monotonic counter** starting at 1. Dense means
-gapless: a replica's operations are numbered 1, 2, 3, … with no holes. This is
-what makes a compact version vector `{ReplicaId → maxSeq}` sound — `maxSeq = n`
-implies every operation 1..n from that replica has been observed.
+`Seq` is a **dense, per-replica, monotonic counter starting at 0** (Algorithm 1,
+lines 11 and 22: the counter is initially 0, and each insert assigns then
+increments). Dense means gapless: a replica's operations are numbered 0, 1, 2, …
+with no holes. This is what makes a compact version vector `{ReplicaId → maxSeq}`
+sound — `maxSeq = n` implies every operation 0..n from that replica has been
+observed.
 
-There is no Lamport clock and no ordering timestamp. FugueMax's sibling
-comparator never consults `Seq`; ordering comes from tree position,
-`RightOrigin`, and `ReplicaId` alone. Do not add one "for safety" — it would be
-a field nothing reads. See §13.2.
+There is **no Lamport clock and no ordering timestamp**. FugueMax orders siblings
+by tree position and `RightOrigin`, falling back to the element id; none of that
+is a causal clock. Do not add one "for safety" — it would be a field nothing
+reads. See §13.2.
 
-`Seq` participates in identity and in version vectors. It must never be used to
-order siblings.
+`Seq` does participate in sibling ordering, as the second component of the
+`ElementId` tie-break below. That is a lexicographic comparison of an identity,
+not a happens-before relation, and nothing about it needs to respect causality.
 
 ### ReplicaId comparison — normative
 
@@ -145,9 +156,11 @@ order siblings.
 its 16 bytes in RFC 4122 big-endian order**, unsigned, most significant byte
 first.
 
-This is load-bearing: `ReplicaId` ordering is the sole tie-break in FugueMax's
-sibling comparator, so any disagreement between the C# and TypeScript
-implementations directly reorders user text.
+The paper says only that "the exact construction of IDs and their order is not
+important" (§4), because it needs nothing beyond *some* total order. We need
+more: §9 requires the C# and TypeScript implementations to agree byte for byte,
+and id order is what breaks sibling ties, so a disagreement here reorders user
+text. Fixing the byte order is therefore a project requirement, not a paper one.
 
 - Do **not** use `System.Guid.CompareTo`. .NET compares `_a` (int32), `_b`
   (int16), `_c` (int16), then bytes `_d`–`_k` individually, which does not match
@@ -170,28 +183,56 @@ There is no `originId` and no index. Indices are meaningless across replicas.
 node to the left, or the root sentinel at the start of the document) and the
 position after it:
 
-- If `L` has **no right children**, the new node becomes a **right child of `L`**
-  (`Parent = L.Id`, `Side = 'R'`), and `RightOrigin` is set to the next node
-  after `L` in traversal order that is not a descendant of `L`, or `null` if
-  none exists.
-- Otherwise, the new node becomes a **left child of `R`** (`Parent = R.Id`,
-  `Side = 'L'`, `RightOrigin` unset), where `R` is the next node after `L` in
-  traversal order **including tombstones**.
+First compute both origins, unconditionally and in this order (Algorithm 1,
+lines 23–24):
+
+- `leftOrigin` — the node of the visible value at index `i-1`, or the root if
+  `i = 0`.
+- `rightOrigin` — **the next node after `leftOrigin` in the traversal that
+  includes tombstones**, or `null` if none exists (arXiv §5.1 calls this
+  `end`). This is computed once, before the branch below, not per branch.
+
+Then place the node (Algorithm 1, lines 25–28):
+
+- If `leftOrigin` has **no right children**, the new node becomes a **right
+  child of `leftOrigin`** (`Parent = leftOrigin.Id`, `Side = 'R'`) and is
+  **tagged with `RightOrigin`** (Definition 6, change 1).
+- Otherwise, the new node becomes a **left child of `rightOrigin`**
+  (`Parent = rightOrigin.Id`, `Side = 'L'`), carrying **no** `RightOrigin`.
+
+In the first branch `leftOrigin` has no right children and its left children are
+traversed before it, so the next node in traversal order is necessarily not a
+descendant of `leftOrigin`; the reference implementation's `nextNonDescendant`
+is an equivalent restatement, not a different rule.
 
 **Sibling ordering — normative.**
 
-- **Right children** of a node are ordered by the **reverse traversal order of
-  their `RightOrigin`**, ties broken by `ReplicaId` **ascending**.
-- **Left children** of a node are ordered by `ReplicaId` **ascending**.
+Per Definition 6 and Algorithm 1 lines 32–37:
+
+- **Right children** of a node are ordered by their `RightOrigin` in **reverse
+  list order** — node `X` precedes sibling `Y` when `X.RightOrigin` comes *later*
+  in the current list order than `Y.RightOrigin` — with ties broken by
+  **`ElementId` ascending**.
+- **Left children** of a node are ordered by **`ElementId` ascending**.
+
+`ElementId` compares lexicographically as the pair `(ReplicaId, Seq)`: `ReplicaId`
+first by the byte rule above, then `Seq` numerically. The paper's rule is
+"lexicographic order of their IDs", and an id is the pair — **not `ReplicaId`
+alone**.
 
 Comparing two `RightOrigin` values is a comparison of tree positions, not of
 ids: walk both nodes up to their common parent, then compare — a left-side
 ancestor precedes a right-side ancestor, and same-side siblings compare by their
 index in the parent's child list.
 
-Two nodes from the same replica cannot collide as same-parent, same-side,
-same-`RightOrigin` siblings; the placement rule prevents it. Assert this as an
-invariant in the implementation rather than adding `Seq` as a further tie-break.
+Two nodes from the same replica cannot become same-parent, same-side siblings:
+a replica never creates a node where it already has a same-side sibling (§4), so
+after its first insert at a position the placement rule sends the next one down
+the other branch. Comparing `ReplicaId` alone would therefore give the same
+answer in every reachable state — which is why the authors' reference
+implementation does exactly that. Compare the full `ElementId` anyway: it is what
+the paper specifies, it costs nothing, and it does not silently depend on that
+invariant holding. Assert the invariant separately.
 
 ### Causal delivery
 
@@ -261,13 +302,49 @@ property tests before writing the implementation.
    text produced by any subsequent legal operation sequence. "Legal" means an
    operation from a non-retired replica referencing an id above the watermark;
    operations below the watermark are rejected, not silently mishandled.
-8. **No interleaving** — when two replicas concurrently insert runs of
-   characters at the same position, the merged result contains each run as a
-   contiguous block, in one order or the other. This holds for runs typed in
-   either direction (left-to-right and right-to-left).
+8. **Maximal non-interleaving** — the three conditions of Definition 4, which
+   FugueMax satisfies (Theorem 9):
 
-Invariant 8 is why the algorithm is FugueMax and not RGA. RGA satisfies it only
-for left-to-right runs; see §13.1.
+   a. **Forward.** If A is the left origin of B, and B appears earlier in the
+      list than every other element with left origin A, then A and B are
+      consecutive. By Lemma 3 this implies the run-level property: two runs
+      typed **left to right** concurrently at the same position never
+      interleave — each appears as a contiguous block. Unconditional.
+   b. **Backward, with exceptions.** The mirror statement over right origins,
+      *except* where the Lemma 5 exception applies (see the scope note below).
+   c. **Same origins.** Two elements sharing both a left origin and a right
+      origin are ordered by ascending `ElementId`.
+
+**Scope — read this before writing the test.** Invariant 8 was originally
+written as "runs never interleave, in either direction". That is not
+achievable, and not just by FugueMax: arXiv Theorem 5 proves **no algorithm
+satisfying the strong list specification can satisfy both forward and backward
+non-interleaving.** Its counterexample (arXiv Appendix B, Fig. 7) starts from
+`a`; two replicas concurrently insert `b` and `c` after it; two replicas in
+state `ac` insert `e` and `g`; then `d` between `b` and `e` and `f` between `b`
+and `g`. Forward non-interleaving forces `a < b < (d,f) < (e,g) < c`, whose four
+permitted orders all interleave `de` with `fg`, while backward
+non-interleaving demands `defg` or `fgde`. The two cannot both hold.
+
+So the honest statement of what this project guarantees is:
+
+- Forward runs never interleave. **Unconditional, any number of replicas.**
+- Backward runs never interleave **unless** the Lemma 5 exception applies: B is
+  A's right origin and A is the last element with right origin B, but A and B
+  have different left origins and some C satisfies `A.leftOrigin < C < B` with C
+  not a descendant of `A.leftOrigin` in the left-origin tree.
+- Where that exception bites, FugueMax still produces **the** correct order:
+  Theorem 10 shows maximal non-interleaving uniquely determines the list order,
+  so any maximally non-interleaving algorithm is semantically equivalent to
+  FugueMax. There is no better answer to reach for.
+
+The exception needs a third mutually-concurrent insertion, so it cannot arise
+with two concurrent replicas. **That last step is an inference from Lemma 5's
+preconditions, not a theorem stated in either paper** — treat it as the
+generator's boundary, not as proven fact, and see the testing rules below.
+
+Invariant 8 is why the algorithm is FugueMax and not RGA: RGA satisfies 8(a)
+but not 8(b) at all. See §13.1.
 
 ### Testing approach
 
@@ -283,12 +360,28 @@ for left-to-right runs; see §13.1.
   non-negotiable — a non-reproducible CRDT bug is unfixable.
 - **Shrinking:** on failure, minimize the operation trace before reporting.
 - **Invariant 8 must be tested from its definition, not from the algorithm.**
-  Generate two concurrent insertion runs at the same position, in both
-  directions, and assert each run appears as a contiguous block. Do not assert
-  a specific tree shape and do not derive the expectation from the
+  Do not assert a specific tree shape and do not derive the expectation from the
   implementation. The conformance harness compares two implementations written
   by the same author from the same paper, so a misreading would agree with
   itself; a definitional test is the only thing that catches that.
+
+  Assert it at two levels, and keep them distinct:
+
+  1. **Definition 4, directly** — conditions (a), (b) and (c) above, evaluated
+     against the resulting list order for any generated execution, with the
+     Lemma 5 exception encoded as an exception rather than assumed away. This is
+     exact and applies to every execution the generator can produce.
+  2. **Run-level contiguity** — the property users actually care about.
+     Unconditional for forward runs. For backward runs, assert it **only in
+     executions with at most two replicas inserting concurrently at the
+     position**; above that the algorithm is not permitted to satisfy it, and a
+     generator that produces such cases and demands contiguity is testing a
+     false proposition.
+
+  The generator must therefore know how many concurrent replicas an execution
+  puts at a position, and must scope the level-2 backward assertion
+  accordingly. It must **not** avoid generating 3-replica backward cases —
+  those are exactly where level 1 earns its keep.
 - **Coverage:** ≥85% **mutation score** on `Crdt.Core`, measured with
   Stryker.NET. Line coverage is not a goal and is not tracked — it is trivially
   satisfiable by tests that assert nothing interesting about a CRDT.
@@ -663,10 +756,17 @@ already observed. A second amendment then split identity from ordering
 are sparse and a sparse counter makes a compact version vector unsound.
 
 **Adopting FugueMax obsoleted both.** FugueMax's sibling comparator uses tree
-position, `RightOrigin`, and `ReplicaId` — it never consults a timestamp. With
-no ordering role, there is nothing for a Lamport clock to order, and `Seq`
+position, `RightOrigin`, and the element id — it never consults a timestamp.
+With no ordering role, there is nothing for a Lamport clock to order, and `Seq`
 returns to being a single dense per-replica counter, which is exactly what a
 compact version vector needs.
+
+An earlier draft of this log overstated the point, claiming `Seq` is never used
+to order siblings at all. It is: the id tie-break is lexicographic on the pair
+`(ReplicaId, Seq)`. The distinction that matters is that this is a comparison of
+identities, not of causal clocks — nothing requires it to respect happens-before,
+which is precisely why a dense counter suffices where RGA needed a Lamport
+timestamp.
 
 The `ReplicaId` byte-ordering requirement (§5) was *strengthened* by the same
 change rather than obsoleted: under RGA the id comparison was a rare tie-break
@@ -680,11 +780,52 @@ The original §3 pinned .NET 9, which reached end of support on 2026-05-12. It i
 absent from Microsoft's package feed and cannot be installed or verified. .NET 10
 is LTS through November 2028. C# 13 becomes C# 14.
 
-### 13.4 Open items
+### 13.4 Verification of §5 against the papers
 
-- The FugueMax placement and sibling-ordering rules in §5 were reconstructed
-  from the paper's abstract, secondary sources, and the authors' reference
-  implementation (`mweidner037/fugue`, `fugue-max-simple`), because the paper
-  PDF is not reachable from the build environment. Before Phase 1 implementation
-  begins, they must be checked against the paper itself, along with the worked
-  examples required for the conformance corpus (§9).
+§5 was originally reconstructed from secondary sources and the authors'
+reference implementation, because no copy of the paper was reachable from the
+build environment. Both papers are now committed under `docs/references/`, and
+§5 has been **re-derived from Algorithm 1 and Definition 6 directly** rather
+than spot-checked. Every reconstructed rule resolves below. No rule is left
+unverified.
+
+| # | Rule | Resolution | Reference |
+|---|---|---|---|
+| 1 | Tree of `(id, value, parent, side)` nodes | CONFIRMED | Alg 1, line 7 |
+| 2 | In-order traversal; tombstones skipped but descendants still traversed | CONFIRMED | Alg 1, lines 14–20 |
+| 3 | No right children → right child of `leftOrigin`; else left child of `rightOrigin` | CONFIRMED | Alg 1, lines 25–28 |
+| 4 | `rightOrigin` = next node after `leftOrigin` in the traversal *including tombstones* | **CORRECTED** — computed once, unconditionally, before the branch. §5 had described it per branch, using "next non-descendant" in the right-child case. Equivalent there, but a restatement rather than the rule. | Alg 1, line 24 |
+| 5 | `RightOrigin` carried on right children only | CONFIRMED | Def 6, change 1 |
+| 6 | `RightOrigin` null means end of document | CONFIRMED — the paper's `end` symbol | arXiv §5.1 |
+| 7 | Right siblings ordered by reverse *list order* of `RightOrigin` | CONFIRMED — `≻` is explicitly the existing list order, not an id comparison | Def 6, change 2 |
+| 8 | Right-sibling tie-break | **CORRECTED** — the tie-break is the full `ElementId` `(ReplicaId, Seq)`, not `ReplicaId` alone | Def 6; Alg 1, line 33 |
+| 9 | Left siblings ordered by `ReplicaId` ascending | **CORRECTED** — ordered by full `ElementId` ascending | Alg 1, line 36 |
+| 10 | Root sentinel id | **CORRECTED** — the root's id is a distinct `null`, not `(ReplicaId.Empty, 0)`. With `Seq` from 0 the latter is a legal element id and could collide. | Alg 1, lines 3 and 10 |
+| 11 | `Seq` starts at 1 | **CORRECTED** — the counter is initially 0 and is assigned before incrementing, so the first id is `Seq = 0` | Alg 1, lines 11, 22 |
+| 12 | "`Seq` must never order siblings" | **CORRECTED** — false. `Seq` is the second component of the id tie-break. The surviving claim is narrower: no *Lamport clock* is needed, because the tie-break compares identities rather than causal clocks. See §13.2. | Def 6 |
+| 13 | Two causal dependencies per insert (`Parent`, `RightOrigin`) | CONFIRMED | Alg 1, line 29; Def 6 |
+| 14 | Deletes buffer until their target exists | CONFIRMED in substance — the paper assumes causal broadcast; our pending set is how that assumption is discharged over an untrusted network | Alg 1, lines 39–44 |
+| 15 | A replica cannot create two same-side siblings of one parent | CONFIRMED | §4 |
+| 16 | `ReplicaId` byte ordering is normative | CONFIRMED as compatible, but it is **our** requirement, not the paper's: the paper says id construction and order "is not important". §9 needs it for cross-implementation determinism. | §4 |
+| 17 | Invariant 8 holds in both directions | **CORRECTED** — unachievable by any algorithm. Rewritten as maximal non-interleaving with an explicit scope note. | arXiv Thm 5; Def 4; Thm 9 |
+
+### 13.5 Where the papers and the reference implementation differ
+
+Two places. Neither is a contradiction — in both the implementation is a sound
+specialisation — but they are recorded because the earlier §5 followed the
+implementation and the paper is what governs.
+
+1. **Sibling tie-break.** The paper orders siblings by full id; the reference
+   implementation compares only the replica component. These agree in every
+   reachable state, because a replica never creates two same-side siblings of one
+   parent (§4), so a tie between two ids sharing a replica cannot occur. §5
+   follows the paper: comparing the full id costs nothing and does not depend on
+   that invariant silently holding.
+2. **`rightOrigin` in the right-child branch.** The paper computes "next node in
+   the traversal including tombstones" once; the implementation computes
+   `nextNonDescendant(leftOrigin)`. Equal in that branch, since a node with no
+   right children has no descendant following it in traversal order. §5 follows
+   the paper's formulation because it is the one the proofs use.
+
+Where the two ever genuinely conflict, the papers govern, and the conflict gets
+recorded here rather than resolved silently.
