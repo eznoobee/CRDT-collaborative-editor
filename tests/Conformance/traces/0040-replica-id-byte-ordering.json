@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "name": "replica-id-byte-ordering",
+  "description": "Two replicas whose ids are ordered differently by unsigned big-endian byte comparison than by System.Guid.CompareTo, inserting concurrently at the same position.",
+  "replicas": [
+    { "index": 0, "id": "01000000-0000-0000-0000-000000000000" },
+    { "index": 1, "id": "ff000000-0000-0000-0000-000000000000" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "a" },
+    { "op": "insert", "replica": 1, "index": 0, "value": "b" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "text": "ab",
+    "forbidden": ["ba"],
+    "rationale": "PROJECT_SPEC.md section 5: ElementId compares by unsigned big-endian bytes, so 01... precedes ff... and 'a' comes first. System.Guid.CompareTo reads the first group as a signed Int32, making ff... negative and therefore first, which would yield 'ba'. Both elements share a left origin (start) and right origin (end), so Def. 4 condition (3) fixes the answer."
+  }
+}

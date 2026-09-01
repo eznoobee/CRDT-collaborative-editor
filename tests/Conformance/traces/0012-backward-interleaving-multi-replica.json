@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "name": "backward-interleaving-multi-replica",
+  "description": "Backward insertion spanning two replicas: replica 2 inserts 'b', replica 0 receives it and prepends 'a', while replica 1 concurrently inserts 'x' into a document it has not yet synced. Yjs produces axb here.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" },
+    { "index": 2, "id": "00000000-0000-0000-0000-000000000003" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 2, "index": 0, "value": "b" },
+    { "op": "deliver", "from": 2, "to": 0 },
+    { "op": "insert", "replica": 0, "index": 0, "value": "a" },
+    { "op": "insert", "replica": 1, "index": 0, "value": "x" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "oneOf": ["abx", "xab"],
+    "forbidden": ["axb"],
+    "rationale": "Backward non-interleaving, multi-replica. Yjs 13.5.44 yields axb here (arXiv A.1.9); Table 1 proves Fugue does not."
+  }
+}

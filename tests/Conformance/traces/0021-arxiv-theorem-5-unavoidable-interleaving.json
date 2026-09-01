@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "name": "arxiv-theorem-5-unavoidable-interleaving",
+  "description": "The counterexample proving no algorithm can satisfy both forward and backward non-interleaving. Every permitted order interleaves 'de' with 'fg'.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" },
+    { "index": 2, "id": "00000000-0000-0000-0000-000000000003" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "a" },
+    { "op": "sync" },
+    { "op": "insert", "replica": 1, "index": 1, "value": "b" },
+    { "op": "insert", "replica": 2, "index": 1, "value": "c" },
+    { "op": "deliver", "from": 2, "to": 0 },
+    { "op": "insert", "replica": 0, "index": 1, "value": "e" },
+    { "op": "insert", "replica": 2, "index": 1, "value": "g" },
+    { "op": "deliver", "from": 1, "to": 0 },
+    { "op": "deliver", "from": 1, "to": 2 },
+    { "op": "insert", "replica": 0, "index": 2, "value": "d" },
+    { "op": "insert", "replica": 2, "index": 2, "value": "f" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "oneOf": ["abdfegc", "abdfgec", "abfdegc", "abfdgec"],
+    "rationale": "arXiv Thm 5 / Appendix B: forward non-interleaving forces a < b < (d,f) < (e,g) < c, whose four permitted orders ALL interleave de with fg, while backward non-interleaving would demand defg or fgde. This trace exists to pin that FugueMax lands in the permitted set - it must NOT be 'fixed' by demanding contiguity, which is provably unachievable here."
+  }
+}
