@@ -69,6 +69,33 @@ jobs:
       # PROJECT_SPEC.md §9: any divergence between the two cores fails the build.
       - run: ./scripts/conformance.sh
 
+  mutation:
+    name: Crdt.Core mutation score
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - run: dotnet tool restore
+
+      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage. The
+      # reduced case count keeps a per-mutant suite run to seconds; the full
+      # 10,000-case gate runs in the dotnet job above.
+      - name: Stryker
+        env:
+          CRDT_PROPERTY_CASES: "150"
+        run: ./scripts/mutation.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: StrykerOutput/**/reports/*.html
+          if-no-files-found: ignore
+
   client:
     name: Client lint, typecheck and test
     runs-on: ubuntu-latest

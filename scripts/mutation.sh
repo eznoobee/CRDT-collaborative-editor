@@ -2,15 +2,14 @@
 # Mutation testing for Crdt.Core (PROJECT_SPEC.md §5: >=85% mutation score,
 # which replaced line coverage).
 #
-# CURRENTLY BLOCKED. Stryker does not support Microsoft.Testing.Platform
-# (stryker-net#3094). With a VSTest adapter present it discovers the tests, but
-# its per-mutant runs never observe a failure: a full run reports every one of
-# 227 tested mutants as Survived, for a score of 0.00%. That is not a real score
-# — the same suite kills those mutations when they are injected by hand. See
-# PROJECT_SPEC.md §13.7.
+# Stryker drives VSTest and does not support Microsoft.Testing.Platform
+# (stryker-net#3094), which is why Crdt.Core.Tests runs on xunit v2 while the
+# other test projects run on xunit.v3. See AGENTS.md and PROJECT_SPEC.md §13.7.
 #
-# The guards below exist so this can never be mistaken for a passing gate. Run
-# it to check whether the upstream issue has been fixed.
+# The guards below are permanent. Before the migration a full run reported every
+# one of 227 tested mutants as Survived — a score of 0.00% that the tool exited
+# 0 on, while the same suite killed those mutations when they were injected by
+# hand. A gate that cannot fail loudly is not a gate.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

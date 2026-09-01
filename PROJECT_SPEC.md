@@ -437,8 +437,8 @@ but not 8(b) at all. See §13.1.
   Fig. 7 shape was generated is roughly 89%.
 - **Coverage:** ≥85% **mutation score** on `Crdt.Core`, measured with
   Stryker.NET. Line coverage is not a goal and is not tracked — it is trivially
-  satisfiable by tests that assert nothing interesting about a CRDT.
-  **This gate is currently unenforceable; see §13.7.**
+  satisfiable by tests that assert nothing interesting about a CRDT. Enforced in
+  CI; the runner split that makes it possible is recorded in §13.7.
 
 ### Insertion runs — direction terminology
 
@@ -1021,7 +1021,7 @@ because the exception depends on the shape of the execution rather than on a
 count of replicas. And a near-100% hold rate is read as evidence that the
 generator is missing a shape, not as evidence that a property holds.
 
-### 13.7 The mutation gate cannot run yet
+### 13.7 The mutation gate, and what it cost to get one
 
 Stryker.NET 4.16.0 — the current release — does not support
 Microsoft.Testing.Platform (stryker-net#3094), which .NET 10 requires and which
@@ -1046,13 +1046,29 @@ injected by hand:
 
 So the suite kills load-bearing mutations and Stryker is not observing it.
 
-Consequently there is **no mutation job in CI**: a job that always failed would
-block the branch for a tooling reason, and one that passed would be the vacuous
-gate described above. `scripts/mutation.sh` carries both guards — no tests found,
-and nothing killed — so the truth is available on demand and cannot be mistaken
-for a pass. Phase 1's mutation requirement is therefore **not met**, and the
-options are to wait for upstream, or to migrate `Crdt.Core.Tests` to xunit v2 on
-VSTest and accept two test stacks in the repository.
+**Resolved by migrating `Crdt.Core.Tests` to xunit v2 on VSTest**, which Stryker
+can drive. That means two test stacks in the repository, documented in
+`AGENTS.md` with the condition for reverting. It also means `global.json` can no
+longer pin a test runner: pinning one makes the SDK reject every VSTest project
+in the solution, so `scripts/run-tests.sh` dispatches per project instead.
+
+The first credible score was **54.63%**, and closing the gap took four rounds:
+
+| Round | Score | What moved it |
+|---|---|---|
+| 1 | 54.63% | first score after the migration |
+| 2 | 76.86% | unit tests for `ReplicaId` and `ElementId`, whose parsing and formatting only the Conformance project exercised |
+| 3 | 76.86% | **nothing** — deep-tree tests that built nesting but never made two right siblings disagree about their right origin |
+| 4 | 81.22% | the ancestor case, constructed by reasoning about when that disagreement is possible at all |
+| 5 | **86.46%** | comparison operators at equality, argument validation, and the GC frontier boundary |
+
+Round 3 is the instructive one: four plausible tests, written against the right
+file, moved coverage by exactly zero. Reaching the branch needed an argument
+about when the code could execute, not more scenarios.
+
+`scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
+permanently. They are what caught the false 0.00%, and a gate that cannot fail
+loudly is not a gate.
 
 One survivor found along the way is genuine rather than tooling: flipping the
 `Seq` half of the `ElementId` comparison changes nothing observable, because two
