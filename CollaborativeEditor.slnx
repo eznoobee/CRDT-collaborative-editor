@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Crdt.Core/Crdt.Core.csproj" />
+    <Project Path="src/Editor.Api/Editor.Api.csproj" />
+    <Project Path="src/Editor.Domain/Editor.Domain.csproj" />
+    <Project Path="src/Editor.Infrastructure/Editor.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Conformance/Conformance.csproj" />
+    <Project Path="tests/Crdt.Core.Tests/Crdt.Core.Tests.csproj" />
+    <Project Path="tests/Editor.Api.Tests/Editor.Api.Tests.csproj" />
+  </Folder>
+</Solution>
