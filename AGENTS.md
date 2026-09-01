@@ -100,6 +100,26 @@ assemblies catches a forbidden package that is actually used, and parsing the
 project files catches a declared reference the compiler elided because nothing
 used it. Both live in `tests/Crdt.Core.Tests/ArchitectureTests.cs`.
 
+## What Phase 1 learned the hard way
+
+Four things were wrong and were only found by running something, not by reading:
+
+- **Definition 4 is over the full element order, tombstones included.** Checking
+  it against the visible order is systematically wrong the moment anything is
+  deleted, because a tombstoned origin simply vanishes from the analysis.
+- **Left origin comes from the visible order; right origin from the order
+  including tombstones.** That asymmetry is the paper's (Algorithm 1 lines 23-24,
+  arXiv §5.1). Taking both from one list silently redefines the property.
+- **Causal stability does not license collecting a tombstone.** It means everyone
+  saw the delete, not that nobody will reference the element — right origins can
+  name tombstones. See §5's four collection conditions.
+- **Backward run contiguity has no replica-count threshold.** §13.6 records the
+  measurement that disproved the one this project used to assert.
+
+A near-100% pass rate on an observed property usually means the generator is not
+reaching the interesting shape. That is how the false boundary above survived
+its first measurement.
+
 ## Running things
 
 Requires the .NET 10 SDK, Node 22, and Docker.
@@ -131,6 +151,15 @@ curl http://localhost:8080/health/live
   by a runner that quietly lost its daemon. The switch is the `CI` environment
   variable.
 - **`dotnet format --verify-no-changes` runs in CI.** Run it before pushing.
+- **`Crdt.Core.Tests` carries a VSTest adapter as well as xunit.v3's own
+  runner.** Stryker drives VSTest directly and does not support
+  Microsoft.Testing.Platform (stryker-net#3094), so without the adapter it
+  discovers zero tests and exits 0 — a green gate measuring nothing. Do not
+  remove those two package references thinking they are leftovers.
+- **`CRDT_PROPERTY_CASES` lowers the per-property case count.** It exists for
+  mutation runs, which execute the suite once per mutant. The full 10,000-case
+  gate runs unconditionally in CI, so the override cannot weaken what the build
+  enforces.
 - **TypeScript is pinned to 5.x** even though 7.x exists (§3). Do not bump a
   pinned dependency without asking.
 

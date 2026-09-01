@@ -41,7 +41,20 @@ public sealed class Observation(string name)
 public static class PropertyRunner
 {
     /// <summary>Cases per property. PROJECT_SPEC.md §11, Phase 1 done-when.</summary>
-    public const int DefaultCases = 10_000;
+    /// <remarks>
+    /// 10,000 unless <c>CRDT_PROPERTY_CASES</c> overrides it. The override exists
+    /// for mutation testing, which runs the whole suite once per mutant: at the
+    /// full count a Stryker run takes hours and tells you nothing the first few
+    /// hundred cases did not. The 10,000-case gate still runs unconditionally in
+    /// CI, so lowering it here cannot weaken what the build enforces.
+    /// </remarks>
+    public static int DefaultCases { get; } =
+        int.TryParse(
+            Environment.GetEnvironmentVariable("CRDT_PROPERTY_CASES"),
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var configured) && configured > 0
+            ? configured
+            : 10_000;
 
     /// <summary>
     /// Checks <paramref name="property"/> on each generated scenario. The first
@@ -50,10 +63,11 @@ public static class PropertyRunner
     public static void Check(
         string name,
         Action<Scenario, SimulationResult> property,
-        int cases = DefaultCases,
+        int? cases = null,
         int firstSeed = 0)
     {
-        for (var seed = firstSeed; seed < firstSeed + cases; seed++)
+        var total = cases ?? DefaultCases;
+        for (var seed = firstSeed; seed < firstSeed + total; seed++)
         {
             var scenario = ScenarioGenerator.Generate(seed);
 

@@ -8,6 +8,11 @@
 
   <ItemGroup Label="Testing">
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
+    <!-- VSTest adapter, referenced only by Crdt.Core.Tests so Stryker can
+         discover tests. Stryker drives VSTest directly and does not yet support
+         Microsoft.Testing.Platform (stryker-net#3094). -->
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
   </ItemGroup>
 
   <ItemGroup Label="Integration testing">

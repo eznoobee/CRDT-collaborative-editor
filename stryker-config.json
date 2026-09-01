@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-net/master/src/Stryker.Core/Stryker.Core/Schemas/stryker-config.schema.json",
+  "stryker-config": {
+    "project": "Crdt.Core.csproj",
+    "test-projects": ["tests/Crdt.Core.Tests/Crdt.Core.Tests.csproj"],
+    "solution": "CollaborativeEditor.slnx",
+    "reporters": ["progress", "html", "json", "cleartext"],
+    "thresholds": {
+      "high": 90,
+      "low": 85,
+      "break": 85
+    },
+    "mutation-level": "Standard",
+    "concurrency": 4
+  }
+}
