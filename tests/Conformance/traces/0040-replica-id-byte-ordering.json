@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "name": "replica-id-byte-ordering",
+  "description": "Two replicas inserting concurrently at the same position, with ids chosen so that any ordering other than unsigned big-endian byte order changes the result.",
+  "replicas": [
+    {
+      "index": 0,
+      "id": "01000000-0000-0000-0000-000000000000"
+    },
+    {
+      "index": 1,
+      "id": "ff000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "ops": [
+    {
+      "op": "insert",
+      "replica": 0,
+      "index": 0,
+      "value": "a"
+    },
+    {
+      "op": "insert",
+      "replica": 1,
+      "index": 0,
+      "value": "b"
+    },
+    {
+      "op": "sync"
+    }
+  ],
+  "expected": {
+    "text": "ab",
+    "forbidden": [
+      "ba"
+    ],
+    "rationale": "PROJECT_SPEC.md section 5: ElementId compares by unsigned big-endian bytes, so 01... precedes ff... and 'a' comes first. Both elements share a left origin (start) and a right origin (end), so Def. 4 condition (3) fixes the answer, making this trace sensitive to the comparator alone. An earlier version of this rationale claimed System.Guid.CompareTo would yield 'ba' here; that is false on .NET 10 and is corrected in section 13.8."
+  }
+}

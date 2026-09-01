@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "name": "tpds-figure-6-forced-order",
+  "description": "Three replicas concurrently insert A, B and C into an empty document. One of them then receives C but not B and inserts X between A and C, before finally receiving B.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" },
+    { "index": 2, "id": "00000000-0000-0000-0000-000000000003" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "A" },
+    { "op": "insert", "replica": 1, "index": 0, "value": "B" },
+    { "op": "insert", "replica": 2, "index": 0, "value": "C" },
+    { "op": "deliver", "from": 2, "to": 0 },
+    { "op": "insert", "replica": 0, "index": 1, "value": "X" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "text": "AXBC",
+    "rationale": "TPDS Fig. 6 and the paragraph preceding Def. 4: with A < B < C the only order satisfying maximal non-interleaving is AXBC. A, B and C share a left origin (start) and a right origin (end), so Def. 4 condition (3) orders them by ascending ElementId; replica ids are assigned ascending to make the paper's WLOG hold. X and C are not consecutive despite X being the only element with right origin C - the permitted exception in condition (2)."
+  }
+}

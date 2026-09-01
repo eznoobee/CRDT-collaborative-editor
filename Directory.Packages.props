@@ -7,7 +7,18 @@
   </PropertyGroup>
 
   <ItemGroup Label="Testing">
+    <!-- Two test stacks on purpose; AGENTS.md explains which is which.
+         Editor.Api.Tests and Conformance run on xunit.v3 under
+         Microsoft.Testing.Platform, which is what .NET 10 expects. -->
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
+
+    <!-- Crdt.Core.Tests runs on xunit v2 under VSTest, because Stryker drives
+         VSTest and does not support Microsoft.Testing.Platform
+         (stryker-net#3094). Mutation score is the only check on Crdt.Core that
+         is not self-referential, so the runner follows the tool. -->
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
   </ItemGroup>
 
   <ItemGroup Label="Integration testing">

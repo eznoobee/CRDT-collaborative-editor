@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "name": "kleppmann-interleaving-test",
+  "description": "Two replicas concurrently type a ten-character run between angle brackets. The canonical interleaving test from ept/insert-interleaving.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "<" },
+    { "op": "insert", "replica": 0, "index": 1, "value": ">" },
+    { "op": "sync" },
+    { "op": "insert", "replica": 0, "index": 1, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 2, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 3, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 4, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 5, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 6, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 7, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 8, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 9, "value": "-" },
+    { "op": "insert", "replica": 0, "index": 10, "value": "-" },
+    { "op": "insert", "replica": 1, "index": 1, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 2, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 3, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 4, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 5, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 6, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 7, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 8, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 9, "value": "#" },
+    { "op": "insert", "replica": 1, "index": 10, "value": "#" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "oneOf": ["<----------##########>", "<##########---------->"],
+    "rationale": "Two concurrent forward runs at the same position must each stay contiguous (arXiv Lemma 3 / TPDS Lemma 3). Any interleaved result such as <#---##--###--##---##> is a forward non-interleaving failure."
+  }
+}

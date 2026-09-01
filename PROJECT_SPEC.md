@@ -162,10 +162,14 @@ more: §9 requires the C# and TypeScript implementations to agree byte for byte,
 and id order is what breaks sibling ties, so a disagreement here reorders user
 text. Fixing the byte order is therefore a project requirement, not a paper one.
 
-- Do **not** use `System.Guid.CompareTo`. .NET compares `_a` (int32), `_b`
-  (int16), `_c` (int16), then bytes `_d`–`_k` individually, which does not match
-  big-endian byte order.
-- Do **not** compare string forms, and do not rely on Postgres `uuid` collation.
+- Do **not** delegate to `System.Guid.CompareTo`. Not because it is wrong — on
+  .NET 10 it agrees with unsigned big-endian order in every case tested,
+  including the signed boundaries where an earlier draft of this section
+  wrongly claimed it diverged (§13.8) — but because nothing specifies that it
+  must, TypeScript has no equivalent to agree with, and a rule that reorders
+  user text should not rest on a framework comparison happening to match.
+- Do **not** compare string forms, and do not rely on Postgres `uuid` collation,
+  which is a third ordering again.
 - Implement `ReplicaId` as a wrapper over 16 bytes on both sides with a
   hand-written comparator, and pin it with a conformance trace whose expected
   output changes if the comparator changes.
@@ -234,6 +238,24 @@ implementation does exactly that. Compare the full `ElementId` anyway: it is wha
 the paper specifies, it costs nothing, and it does not silently depend on that
 invariant holding. Assert the invariant separately.
 
+### Sequence numbers cover deletes too
+
+The paper increments its counter only on insert, because it has no operation log.
+This project does: §6 keys `document_ops` on `(document_id, replica_id, seq)` for
+both operation types, and §7 rejects any operation whose `Seq` is not the next
+dense value for that replica.
+
+So **every operation consumes a `Seq`**, inserts and deletes alike. An insert's
+id both names the operation and identifies the element it creates; a delete's id
+names the operation, and a separate `Target` field names the element being
+tombstoned.
+
+The consequence is that element ids are not contiguous per replica — a replica
+that deletes between two inserts leaves a gap in the ids it has assigned to
+elements. Nothing requires element-id contiguity; ids only need to be unique and
+totally ordered. What must stay dense is the **version vector**, which counts
+operations, and it does.
+
 ### Causal delivery
 
 An operation is **ready** when every id it references exists locally:
@@ -261,10 +283,28 @@ version vector shows it has been observed. Track a per-document version vector.
 GC runs as a background job, never on the request path. If you cannot prove an
 element is causally stable, keep it.
 
-A tombstone that is still referenced as another live node's `Parent` or
-`RightOrigin` cannot be collected outright; collect its value and mark it a
-structural placeholder, or skip it. Correctness first — a lower reclamation rate
-is acceptable, a broken tree is not.
+**Causal stability is necessary but not sufficient.** It guarantees every replica
+has *observed* the delete; it does not guarantee nobody will *reference* the
+element again. A tombstone remains a valid anchor: `rightOrigin` is the next node
+in the traversal *including tombstones*, so a fully up-to-date replica can name a
+long-dead element in a brand-new insert. Collecting on stability alone strands
+that insert as an undeliverable dependency — found by invariant 7, not by
+reading.
+
+A tombstone may be collected only when all of these hold:
+
+1. It is causally stable.
+2. It is a leaf — no left or right children.
+3. No node references it as `Parent` or `RightOrigin`.
+4. **It is unreachable as a future right origin.** A new insert names as its
+   right origin the first node after a *visible* left origin, so only the
+   leading tombstone of a run of consecutive tombstones can be named. Retain
+   that leader; the tombstones behind it can never be named again. Collecting
+   the leader would simply promote the next one into reachable position.
+
+Rule 4 collapses a run of tombstones to one, which is where the reclamation
+actually is: a deleted paragraph becomes a single anchor. Correctness first — a
+lower reclamation rate is acceptable, a broken tree is not.
 
 **Replica retirement.** Causal stability over an open-ended replica set never
 converges: one browser tab that never returns blocks GC forever. A replica is
@@ -338,10 +378,12 @@ So the honest statement of what this project guarantees is:
   so any maximally non-interleaving algorithm is semantically equivalent to
   FugueMax. There is no better answer to reach for.
 
-The exception needs a third mutually-concurrent insertion, so it cannot arise
-with two concurrent replicas. **That last step is an inference from Lemma 5's
-preconditions, not a theorem stated in either paper** — treat it as the
-generator's boundary, not as proven fact, and see the testing rules below.
+An earlier draft of this section claimed the exception "cannot arise with two
+concurrent replicas". **That was wrong, and measurement disproved it** — see
+§13.6. There is no replica-count threshold beyond which backward runs are safe:
+the exception depends on the shape of the execution, not on how many replicas
+insert at a position. Backward run contiguity is therefore never asserted, at
+any concurrency. Definition 4 is what holds, and Definition 4 is what is tested.
 
 Invariant 8 is why the algorithm is FugueMax and not RGA: RGA satisfies 8(a)
 but not 8(b) at all. See §13.1.
@@ -372,19 +414,31 @@ but not 8(b) at all. See §13.1.
      Lemma 5 exception encoded as an exception rather than assumed away. This is
      exact and applies to every execution the generator can produce.
   2. **Run-level contiguity** — the property users actually care about.
-     Unconditional for forward runs. For backward runs, assert it **only in
-     executions with at most two replicas inserting concurrently at the
-     position**; above that the algorithm is not permitted to satisfy it, and a
-     generator that produces such cases and demands contiguity is testing a
-     false proposition.
+     **Forward runs: asserted unconditionally**, at any number of replicas, on
+     the strength of Lemma 3. **Backward runs: observed, never asserted.** The
+     papers give no backward analogue of Lemma 3 at any replica count, and
+     Theorem 5 is the reason there cannot be one.
 
-  The generator must therefore know how many concurrent replicas an execution
-  puts at a position, and must scope the level-2 backward assertion
-  accordingly. It must **not** avoid generating 3-replica backward cases —
-  those are exactly where level 1 earns its keep.
+  The generator must still produce backward runs, and must produce the layered
+  shape of arXiv Fig. 7 — two rounds of concurrency separated by a partial
+  delivery, with the interleaving pairs typed right to left across both rounds.
+  That shape is the only one in which the Lemma 5 exception arises; a single
+  round of concurrent runs cannot produce it however many replicas take part.
+
+- **Backward contiguity is measured, and the measurement is load-bearing.**
+  Evaluate it on every backward run: compute it, never fail on violation, count
+  how often it holds, and report the rate. Violations are the algorithm behaving
+  correctly.
+
+  Read the number, and read it as a check on the generator as much as on the
+  algorithm. A rate at or near 100% means the generator is not reaching the
+  Lemma 5 shape and the corpus is weaker than it looks — that is how the false
+  boundary above survived its first measurement. The rate observed once the
+  Fig. 7 shape was generated is roughly 89%.
 - **Coverage:** ≥85% **mutation score** on `Crdt.Core`, measured with
   Stryker.NET. Line coverage is not a goal and is not tracked — it is trivially
-  satisfiable by tests that assert nothing interesting about a CRDT.
+  satisfiable by tests that assert nothing interesting about a CRDT. Enforced in
+  CI; the runner split that makes it possible is recorded in §13.7.
 
 ### Insertion runs — direction terminology
 
@@ -635,19 +689,135 @@ and then throwing it away without warning is a data-loss bug, not a limitation.
 
 ### Conformance testing
 
-`tests/Conformance/` holds shared JSON operation traces. A test runner feeds each
-trace through the C# implementation and the TypeScript implementation and
-asserts byte-identical output text and identical version vectors. Any divergence
-fails the build.
+`tests/Conformance/traces/` holds shared JSON traces. Both implementations replay
+every trace and write a normalised result file; a separate comparison step
+asserts the two files are byte-identical. Any divergence fails the build.
 
-The corpus is built in this order:
+**Two runners, one corpus.** The C# runner is an xUnit project; the TypeScript
+runner is a vitest suite. Neither invokes the other — coupling the .NET test run
+to a Node toolchain buys nothing and makes each side harder to run alone. The
+comparison is a third step over two artefacts.
 
-1. **Transcribed fixed traces first.** The worked examples from the Fugue paper,
-   including the backward-run case, transcribed by hand before any generated
-   trace exists. Also the canonical interleaving test (two replicas concurrently
-   insert `----------` and `##########` between `<` and `>`; the result must be
-   `<----------##########>` or `<##########---------->`, never interleaved) and
-   a trace pinning `ReplicaId` byte ordering (§5).
+Because the comparison is byte-for-byte, **both the trace schema and the result
+format are specified here, in full, before either runner is written.** Neither
+may be inferred from whichever implementation happens to exist first.
+
+#### Trace schema (v1)
+
+Traces are **scripted executions in user-level terms** — insert at an index,
+delete at an index, deliver — never raw CRDT nodes. A trace that named parents,
+sides and origins would encode one implementation's tree shape and could bake in
+a misreading; expressing intent instead makes each implementation derive the
+structure itself, which is the thing under test.
+
+```jsonc
+{
+  "v": 1,
+  "name": "rga-backward-interleaving",     // kebab-case, matches the filename stem
+  "description": "prose, free-form",
+  "replicas": [                            // fixed ids so ordering is deterministic
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" }
+  ],
+  "ops": [
+    { "op": "insert",  "replica": 0, "index": 0, "value": "b" },
+    { "op": "insert",  "replica": 0, "index": 0, "value": "a" },
+    { "op": "insert",  "replica": 1, "index": 0, "value": "x" },
+    { "op": "delete",  "replica": 0, "index": 1 },
+    { "op": "deliver", "from": 0, "to": 1 },   // flush 0's outbox into 1
+    { "op": "sync" }                           // deliver everywhere until quiescent
+  ],
+  "expected": {
+    "oneOf": ["abx", "xab"],
+    "forbidden": ["axb"],
+    "versionVector": { "00000000-0000-0000-0000-000000000001": "2" },
+    "rationale": "FugueMax must not backward-interleave two replicas; axb is the RGA anomaly (arXiv A.1.8)."
+  }
+}
+```
+
+`expected` carries **at least one** of:
+
+- `text` — the exact output, for traces where a paper fixes the answer.
+- `oneOf` — the set of permitted outputs, where the papers constrain the result
+  without determining it.
+- `forbidden` — outputs that would demonstrate a violation.
+
+The runner asserts, for each implementation: output equals `text` if present;
+output is in `oneOf` if present; output is not in `forbidden` if present. The
+comparison step additionally asserts **both implementations chose the same
+member of `oneOf`** — agreeing on a permitted answer is a separate requirement
+from each being permitted.
+
+`rationale` is **required on every trace**: one line saying what the trace proves
+and the paper section it comes from. A trace that fails must not be fixable by
+editing its expectation without the editor seeing, in the diff, that they are
+contradicting a cited paper.
+
+`versionVector` is optional and maps replica id to a decimal-string `Seq` high
+water mark (§6).
+
+#### Normalised result format (v1)
+
+Each runner writes exactly this, and the comparison is `diff` over the bytes:
+
+```jsonc
+{
+  "v": 1,
+  "implementation": "csharp",              // or "typescript"; EXCLUDED from comparison
+  "results": [
+    {
+      "name": "rga-backward-interleaving",
+      "text": "abx",                        // final text after the last op
+      "replicaTexts": {                     // every replica's final text
+        "00000000-0000-0000-0000-000000000001": "abx",
+        "00000000-0000-0000-0000-000000000002": "abx"
+      },
+      "versionVector": { "00000000-0000-0000-0000-000000000001": "2" }
+    }
+  ]
+}
+```
+
+`replicaTexts` is present so convergence is visible in the artefact itself rather
+than asserted only inside a runner: a trace where replicas disagree is a failure
+you can see in the diff.
+
+Serialisation is pinned, because "byte-identical" is otherwise not well defined
+across two languages:
+
+- UTF-8, LF line endings, one trailing newline.
+- Two-space indentation, one key or array element per line.
+- Object keys sorted ascending by Unicode **code point**. Not by UTF-16 code
+  unit — the two differ above the BMP, and C# and JavaScript disagree by default.
+- `results` sorted by `name`, ordinal.
+- Replica ids as lowercase canonical hyphenated UUIDs.
+- Non-ASCII characters emitted **literally**, never as `\uXXXX`. C# escapes
+  non-ASCII by default and JavaScript does not; both must be configured to emit
+  literal UTF-8.
+- Only `"`, `\` and the C0 controls are escaped, using the shortest form
+  JSON allows (`\n`, `\t`, `\r`, `\b`, `\f`, and `\u00XX` otherwise). `/` is
+  left literal: escaping it is legal JSON but never required, and the two
+  languages disagree by default.
+- The `implementation` field is excluded from the comparison — it is the one
+  field that is legitimately different.
+
+#### Corpus order
+
+1. **Transcribed fixed traces first**, by hand, from the papers, before any
+   generated trace exists:
+   - arXiv A.1 forward canonical — `a` then `b` concurrent with `x`; `axb` is
+     the forward anomaly.
+   - arXiv A.1 backward canonical — `b` then prepend `a`, concurrent with `x`;
+     `axb` is the backward anomaly, and is what RGA produces (A.1.8).
+   - arXiv A.1.9 multi-replica backward.
+   - TPDS Fig. 6 — three replicas, forced result `AXBC`.
+   - arXiv Thm 5 / Appendix B counterexample — four permitted orders, all of
+     which interleave; the case where interleaving is unavoidable.
+   - The Kleppmann interleaving test: two replicas concurrently insert
+     `----------` and `##########` between `<` and `>`; permitted results are
+     `<----------##########>` and `<##########---------->`.
+   - A trace pinning `ReplicaId` byte ordering (§5).
 2. **Generated traces**, from the property-test generator, so the corpus grows
    with the fuzzer.
 
@@ -761,12 +931,31 @@ With no ordering role, there is nothing for a Lamport clock to order, and `Seq`
 returns to being a single dense per-replica counter, which is exactly what a
 compact version vector needs.
 
-An earlier draft of this log overstated the point, claiming `Seq` is never used
-to order siblings at all. It is: the id tie-break is lexicographic on the pair
-`(ReplicaId, Seq)`. The distinction that matters is that this is a comparison of
-identities, not of causal clocks — nothing requires it to respect happens-before,
-which is precisely why a dense counter suffices where RGA needed a Lamport
-timestamp.
+**The claim this log originally made was wrong, and it is left on the record
+rather than quietly replaced.** It read:
+
+> FugueMax's sibling comparator never consults `Seq`; ordering comes from tree
+> position, `RightOrigin`, and `ReplicaId` alone. […] `Seq` participates in
+> identity and in version vectors. It must never be used to order siblings.
+
+`Seq` is in fact the second component of the sibling tie-break, which is
+lexicographic on the pair `(ReplicaId, Seq)` (Definition 6; Algorithm 1, lines
+33 and 36). The corrected claim is narrower: nothing in the comparator is a
+*causal clock*. It compares identities, and nothing requires it to respect
+happens-before — which is precisely why a dense counter suffices where RGA
+needed a Lamport timestamp.
+
+Why it survived is the part worth keeping visible. The claim was written from
+the authors' reference implementation, which compares only the replica component
+of an id — and that implementation is *correct*, because a replica can never
+create two same-side siblings of one parent, so the components below `ReplicaId`
+are never reached. Every observable behaviour agreed with the false claim.
+Reading the paper to check it would have found the sentence "breaking ties using
+the lexicographic order of their IDs" and, having already concluded ties break
+on `ReplicaId`, read straight past it. A spot-check confirms what it sets out to
+confirm; only re-deriving the rule from Definition 6 without the previous answer
+in hand surfaced it. That is the reason §5 is re-derived rather than reviewed
+whenever a source changes.
 
 The `ReplicaId` byte-ordering requirement (§5) was *strengthened* by the same
 change rather than obsoleted: under RGA the id comparison was a rare tie-break
@@ -809,6 +998,109 @@ unverified.
 | 16 | `ReplicaId` byte ordering is normative | CONFIRMED as compatible, but it is **our** requirement, not the paper's: the paper says id construction and order "is not important". §9 needs it for cross-implementation determinism. | §4 |
 | 17 | Invariant 8 holds in both directions | **CORRECTED** — unachievable by any algorithm. Rewritten as maximal non-interleaving with an explicit scope note. | arXiv Thm 5; Def 4; Thm 9 |
 
+### 13.6 The replica-count boundary for backward runs was wrong
+
+§5 claimed the Lemma 5 exception "cannot arise with two concurrent replicas",
+inferred from the exception's preconditions and labelled as an inference rather
+than a theorem. Observational mode was added to measure it. It is false.
+
+The first measurement reported backward contiguity holding in 6581 of 6581
+applicable cases — 100.00%. That looked like confirmation that the boundary was
+merely too generous. It was not: the generator only produced a single round of
+concurrency, and the Lemma 5 exception cannot arise in that shape at all. The
+measurement was of the generator, not the algorithm.
+
+Adding the arXiv Fig. 7 shape — two rounds separated by a partial delivery, with
+the interleaving pairs typed right to left across both rounds — immediately
+produced a violated backward run at **concurrency two**, inside a four-replica
+execution. Definition 4 held throughout, so the algorithm was right and the
+boundary was wrong.
+
+Two things follow. Backward contiguity is now never asserted at any concurrency,
+because the exception depends on the shape of the execution rather than on a
+count of replicas. And a near-100% hold rate is read as evidence that the
+generator is missing a shape, not as evidence that a property holds.
+
+### 13.7 The mutation gate, and what it cost to get one
+
+Stryker.NET 4.16.0 — the current release — does not support
+Microsoft.Testing.Platform (stryker-net#3094), which .NET 10 requires and which
+xunit.v3 uses. The failure is quiet in two stages, and both are worth knowing.
+
+Pointed at the test projects as they were, Stryker found **zero** tests, reported
+nothing, and **exited 0**. A passing gate that measured nothing.
+
+Giving `Crdt.Core.Tests` a VSTest adapter alongside xunit.v3's own runner
+restored discovery — 12 tests, 321 mutants created, 227 tested. The score was
+**0.00%**: every tested mutant reported as Survived, none killed, after Stryker
+logged that coverage capture had failed.
+
+That score is not real. The same suite kills those mutations when they are
+injected by hand:
+
+| Injected mutation | Result |
+|---|---|
+| Reverse right-sibling ordering (`byOrigin > 0` → `< 0`) | 1 invariant fails |
+| Left siblings descending instead of ascending | 1 invariant fails |
+| Ignore the right-origin tie-break condition | 6 invariants fail |
+
+So the suite kills load-bearing mutations and Stryker is not observing it.
+
+**Resolved by migrating `Crdt.Core.Tests` to xunit v2 on VSTest**, which Stryker
+can drive. That means two test stacks in the repository, documented in
+`AGENTS.md` with the condition for reverting. It also means `global.json` can no
+longer pin a test runner: pinning one makes the SDK reject every VSTest project
+in the solution, so `scripts/run-tests.sh` dispatches per project instead.
+
+The first credible score was **54.63%**, and closing the gap took four rounds:
+
+| Round | Score | What moved it |
+|---|---|---|
+| 1 | 54.63% | first score after the migration |
+| 2 | 76.86% | unit tests for `ReplicaId` and `ElementId`, whose parsing and formatting only the Conformance project exercised |
+| 3 | 76.86% | **nothing** — deep-tree tests that built nesting but never made two right siblings disagree about their right origin |
+| 4 | 81.22% | the ancestor case, constructed by reasoning about when that disagreement is possible at all |
+| 5 | **86.46%** | comparison operators at equality, argument validation, and the GC frontier boundary |
+
+Round 3 is the instructive one: four plausible tests, written against the right
+file, moved coverage by exactly zero. Reaching the branch needed an argument
+about when the code could execute, not more scenarios.
+
+`scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
+permanently. They are what caught the false 0.00%, and a gate that cannot fail
+loudly is not a gate.
+
+One survivor found along the way is genuine rather than tooling: flipping the
+`Seq` half of the `ElementId` comparison changes nothing observable, because two
+same-side siblings of one parent can never share a replica id (§13.5). It is an
+equivalent mutant, and evidence that §13.5's reasoning is sound.
+
+### 13.8 The stated reason for avoiding Guid.CompareTo was wrong
+
+From the very first review, §5 justified the hand-written `ReplicaId` comparator
+by asserting that `System.Guid.CompareTo` "compares `_a` (int32), `_b` (int16),
+`_c` (int16), then bytes `_d`–`_k` individually, which does not match big-endian
+byte order". The `replica-id-byte-ordering` conformance trace repeated it, and so
+did `AGENTS.md`.
+
+It is false on .NET 10. Measured across the signed boundaries where it should
+have diverged — `7fffffff`/`80000000` in each of the first three groups, and
+`01000000`/`ff000000` — `Guid.CompareTo` agrees with unsigned big-endian byte
+order every time.
+
+The claim was carried for the whole of Phase 0 and Phase 1 without being run. It
+survived because everything downstream of it was correct: the comparator is
+hand-written, the ordering is right, the trace passes. Only writing a unit test
+that asserted the divergence exposed it — the test failed, because the
+divergence does not exist.
+
+The decision itself stands, on better grounds: nothing specifies that
+`Guid.CompareTo` must order this way, TypeScript has no `Guid` to agree with,
+and Postgres `uuid` collation is a third ordering. A rule whose violation
+reorders user text should not depend on a framework comparison continuing to
+match by coincidence. What changed is that the specification now says something
+true about why.
+
 ### 13.5 Where the papers and the reference implementation differ
 
 Two places. Neither is a contradiction — in both the implementation is a sound
@@ -829,3 +1121,17 @@ implementation and the paper is what governs.
 
 Where the two ever genuinely conflict, the papers govern, and the conflict gets
 recorded here rather than resolved silently.
+
+**A known equivalent mutant follows from point 1.** Reversing the `Seq` half of
+`ElementId.CompareTo` changes no observable behaviour, and mutation testing
+reports it as a survivor. That is correct, not a gap in the suite: the `Seq`
+component of a sibling comparison is only reached when two same-side siblings of
+one parent share a replica id, which the placement rule makes impossible. It is
+the same fact that lets the authors' reference implementation compare only the
+replica component.
+
+Do not "fix" this survivor. Narrowing the comparison to match — dropping `Seq`
+from `ElementId.CompareTo` — would contradict the paper, which specifies
+lexicographic order on whole ids, and would make correctness depend silently on
+an invariant holding rather than on a comparison being total. The survivor is
+evidence the reasoning above is sound.
