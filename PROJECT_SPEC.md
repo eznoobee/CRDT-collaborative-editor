@@ -484,6 +484,40 @@ document_replicas  (document_id, replica_id, user_id, last_seen_at, max_seq,
   retirement (§5). `retired_at` is set by the background job after `T_retire`.
 - Snapshot every N operations (configurable, default 500). Loading a document
   reads the latest snapshot plus operations after its `server_seq`.
+
+### Snapshot encoding
+
+`document_snapshots.state` holds **the normalised JSON of §9** — the same format
+the conformance runners emit.
+
+The reason is not tidiness. Sharing the format makes a snapshot directly
+comparable against a conformance run, which extends the cross-implementation
+check into persistence at no cost: if the C# server and the TypeScript client
+ever disagree about how a document serialises, a snapshot and a conformance
+artefact stop matching, and that is a build failure rather than a support
+ticket.
+
+JSON is larger and slower than a binary encoding, and §8 asks a document of
+100k live characters and 500k tombstones to load in under 500 ms server-side.
+**Measure it, do not assume it.** Phase 2 carries a test that builds a
+100k-element document, snapshots it, and *reports* serialised size and load time
+as metrics — no threshold, no assertion. The point is to know the number before
+the format is baked into the client's IndexedDB schema, not to discover it in
+Phase 7. If JSON turns out to be far off the target, that is a Phase 2 fact and
+the decision to change format is cheap; after Phase 4 it is not.
+
+### Serialisation lives in Editor.Infrastructure
+
+`Crdt.Core` references nothing but the BCL (§4), so the mapping from its types to
+database rows and to the wire lives in `Editor.Infrastructure`.
+
+That mapping is now a **second implementation of the same encoding**, alongside
+the TypeScript serialiser, and the two must agree for the same reason the two
+algorithm cores must. §9's corpus therefore includes at least one trace that
+round-trips through the **serialised form** on both sides rather than only
+through the algorithm, so an encoding divergence fails the build exactly as an
+algorithm divergence does. A shared format that nothing checks is a shared format
+that drifts.
 - `document_ops` is partitioned by `document_id` hash. Include the migration.
   The partition key is part of the primary key, as Postgres requires.
 - All writes through parameterized commands. Zero string-concatenated SQL
@@ -818,6 +852,10 @@ across two languages:
      `----------` and `##########` between `<` and `>`; permitted results are
      `<----------##########>` and `<##########---------->`.
    - A trace pinning `ReplicaId` byte ordering (§5).
+   - A trace exercising the **serialised** round trip: operations encoded to the
+     wire form, decoded, and replayed, on both implementations. This checks the
+     encoding rather than the algorithm, and is what keeps the
+     `Editor.Infrastructure` mapping in step with the TypeScript serialiser (§6).
 2. **Generated traces**, from the property-test generator, so the corpus grows
    with the fuzzer.
 
