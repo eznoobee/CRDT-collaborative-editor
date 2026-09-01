@@ -434,6 +434,7 @@ but not 8(b) at all. See §13.1.
 - **Coverage:** ≥85% **mutation score** on `Crdt.Core`, measured with
   Stryker.NET. Line coverage is not a goal and is not tracked — it is trivially
   satisfiable by tests that assert nothing interesting about a CRDT.
+  **This gate is currently unenforceable; see §13.7.**
 
 ### Insertion runs — direction terminology
 
@@ -1015,6 +1016,44 @@ Two things follow. Backward contiguity is now never asserted at any concurrency,
 because the exception depends on the shape of the execution rather than on a
 count of replicas. And a near-100% hold rate is read as evidence that the
 generator is missing a shape, not as evidence that a property holds.
+
+### 13.7 The mutation gate cannot run yet
+
+Stryker.NET 4.16.0 — the current release — does not support
+Microsoft.Testing.Platform (stryker-net#3094), which .NET 10 requires and which
+xunit.v3 uses. The failure is quiet in two stages, and both are worth knowing.
+
+Pointed at the test projects as they were, Stryker found **zero** tests, reported
+nothing, and **exited 0**. A passing gate that measured nothing.
+
+Giving `Crdt.Core.Tests` a VSTest adapter alongside xunit.v3's own runner
+restored discovery — 12 tests, 321 mutants created, 227 tested. The score was
+**0.00%**: every tested mutant reported as Survived, none killed, after Stryker
+logged that coverage capture had failed.
+
+That score is not real. The same suite kills those mutations when they are
+injected by hand:
+
+| Injected mutation | Result |
+|---|---|
+| Reverse right-sibling ordering (`byOrigin > 0` → `< 0`) | 1 invariant fails |
+| Left siblings descending instead of ascending | 1 invariant fails |
+| Ignore the right-origin tie-break condition | 6 invariants fail |
+
+So the suite kills load-bearing mutations and Stryker is not observing it.
+
+Consequently there is **no mutation job in CI**: a job that always failed would
+block the branch for a tooling reason, and one that passed would be the vacuous
+gate described above. `scripts/mutation.sh` carries both guards — no tests found,
+and nothing killed — so the truth is available on demand and cannot be mistaken
+for a pass. Phase 1's mutation requirement is therefore **not met**, and the
+options are to wait for upstream, or to migrate `Crdt.Core.Tests` to xunit v2 on
+VSTest and accept two test stacks in the repository.
+
+One survivor found along the way is genuine rather than tooling: flipping the
+`Seq` half of the `ElementId` comparison changes nothing observable, because two
+same-side siblings of one parent can never share a replica id (§13.5). It is an
+equivalent mutant, and evidence that §13.5's reasoning is sound.
 
 ### 13.5 Where the papers and the reference implementation differ
 
