@@ -26,3 +26,12 @@ trim_trailing_whitespace = false
 
 [Makefile]
 indent_style = tab
+
+# EF Core rewrites the migration directory on every `migrations add`, so holding
+# it to the repository's style rules means re-fixing the same findings forever.
+# The hand-authored SQL inside these files still matters and is reviewed; the
+# scaffolding around it is not ours to format.
+[**/Migrations/*.cs]
+generated_code = true
+dotnet_diagnostic.IDE0161.severity = none
+dotnet_diagnostic.CA1861.severity = none
