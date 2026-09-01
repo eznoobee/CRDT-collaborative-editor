@@ -80,8 +80,12 @@ public sealed class InvariantTests(ITestOutputHelper output)
     {
         PropertyRunner.Check("intention preservation", (_, result) =>
         {
-            var visible = result.Replicas[0].VisibleIds;
-            var position = visible.Select((id, i) => (id, i))
+            // Full order, including tombstones: a character's recorded right
+            // origin may itself have been deleted since, and skipping those
+            // pairs would quietly drop most of the checks in any scenario that
+            // deletes anything.
+            var order = result.Replicas[0].AllIds;
+            var position = order.Select((id, i) => (id, i))
                 .ToDictionary(p => p.id, p => p.i);
 
             foreach (var intention in result.Intentions)
@@ -155,8 +159,7 @@ public sealed class InvariantTests(ITestOutputHelper output)
     [Fact]
     public void Invariant_8_maximal_non_interleaving()
     {
-        var backwardAboveBoundary = new Observation(
-            "backward run contiguity, 3+ concurrent replicas");
+        var backwardContiguity = new Observation("backward run contiguity");
 
         PropertyRunner.Check("maximal non-interleaving", (scenario, result) =>
         {
@@ -176,46 +179,74 @@ public sealed class InvariantTests(ITestOutputHelper output)
 
             foreach (var session in scenario.Sessions)
             {
-                foreach (var run in session.Runs)
+                // Contiguity is judged only against the other runs of the same
+                // session. Non-interleaving constrains concurrent insertions; a
+                // causally later edit typed inside a run is the author putting it
+                // there, and demanding the run stay pristine forever would be
+                // asserting something no algorithm should satisfy.
+                var labelled = new List<(int Position, int Run)>();
+                for (var runIndex = 0; runIndex < session.Runs.Count; runIndex++)
                 {
-                    var positions = run.StepIndices
-                        .Select(i => result.OperationByStepIndex[i])
-                        .OfType<Operation>()
-                        .Select(op => op.Id)
-                        .Where(position.ContainsKey)
-                        .Select(id => position[id])
-                        .OrderBy(p => p)
+                    foreach (var stepIndex in session.Runs[runIndex].StepIndices)
+                    {
+                        if (result.OperationByStepIndex[stepIndex] is { } op
+                            && position.TryGetValue(op.Id, out var p))
+                        {
+                            labelled.Add((p, runIndex));
+                        }
+                    }
+                }
+
+                if (labelled.Count < 2)
+                {
+                    continue;
+                }
+
+                labelled.Sort((a, b) => a.Position.CompareTo(b.Position));
+
+                for (var runIndex = 0; runIndex < session.Runs.Count; runIndex++)
+                {
+                    var occupied = labelled
+                        .Select((entry, order) => (entry.Run, order))
+                        .Where(x => x.Run == runIndex)
+                        .Select(x => x.order)
                         .ToArray();
 
-                    if (positions.Length < 2)
+                    if (occupied.Length < 2)
                     {
                         continue;
                     }
 
-                    var contiguous = positions[^1] - positions[0] == positions.Length - 1;
+                    var contiguous = occupied[^1] - occupied[0] == occupied.Length - 1;
+                    var run = session.Runs[runIndex];
 
-                    if (run.Direction == RunDirection.Forward || session.Concurrency <= 2)
+                    if (run.Direction == RunDirection.Forward)
                     {
+                        // Lemma 3 gives this unconditionally, for any number of
+                        // replicas.
                         Assert.True(
                             contiguous,
-                            $"a {run.Direction} run of {positions.Length} characters at "
-                            + $"concurrency {session.Concurrency} must stay contiguous (§5 invariant 8)");
+                            $"a forward run of {occupied.Length} characters at "
+                            + $"concurrency {session.Concurrency} must not be interleaved with "
+                            + "the runs it was concurrent with (§5 invariant 8a)");
                     }
                     else
                     {
-                        // Observed, not enforced: above two concurrent replicas
-                        // the Lemma 5 exception may legitimately split a
-                        // backward run. Measured so the boundary can be checked.
-                        backwardAboveBoundary.Record(contiguous);
+                        // Observed, never enforced. There is no backward
+                        // analogue of Lemma 3 at any replica count — Theorem 5
+                        // forbids one — so the only sound statement about
+                        // backward runs is Definition 4, checked above.
+                        backwardContiguity.Record(contiguous);
                     }
                 }
             }
         });
 
-        output.WriteLine(backwardAboveBoundary.Report());
+        output.WriteLine(backwardContiguity.Report());
         output.WriteLine(
-            "If this held in essentially every case, the three-replica boundary in §5 is "
-            + "drawn too wide and should be tightened towards Lemma 5's preconditions.");
+            "Backward contiguity is measured, not required: arXiv Theorem 5 rules out any "
+            + "unconditional backward guarantee, and violations here are the algorithm "
+            + "behaving correctly. Definition 4 above is what is enforced.");
     }
 
     private static Replica Rebuild(IEnumerable<Operation> operations, int observerId)

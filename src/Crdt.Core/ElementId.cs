@@ -22,10 +22,15 @@ public readonly record struct ElementId(ReplicaId Replica, ulong Seq)
     : IComparable<ElementId>
 {
     /// <inheritdoc />
-    public int CompareTo(ElementId other) => throw new NotImplementedException();
+    public int CompareTo(ElementId other)
+    {
+        var replica = Replica.CompareTo(other.Replica);
+        return replica != 0 ? replica : Seq.CompareTo(other.Seq);
+    }
 
     /// <inheritdoc />
-    public override string ToString() => throw new NotImplementedException();
+    public override string ToString() =>
+        $"{Replica}:{Seq.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     public static bool operator <(ElementId left, ElementId right) => left.CompareTo(right) < 0;
 

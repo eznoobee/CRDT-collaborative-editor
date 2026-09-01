@@ -35,7 +35,7 @@ public static class SimulationRunner
     public static SimulationResult Run(Scenario scenario)
     {
         var replicas = scenario.Replicas.Select(id => new Replica(id)).ToArray();
-        var all = new List<Operation>();
+        var allOperations = new List<Operation>();
         var intentions = new List<Intention>();
         var deleted = new List<ElementId>();
         var byStep = new Operation?[scenario.Steps.Count];
@@ -48,12 +48,33 @@ public static class SimulationRunner
                 case InsertStep s:
                     {
                         var replica = replicas[s.Replica];
-                        var before = replica.VisibleIds;
-                        var left = s.Index > 0 ? before[s.Index - 1] : (ElementId?)null;
-                        var right = s.Index < before.Count ? before[s.Index] : (ElementId?)null;
+
+                        // Left origin is the previous VISIBLE element; right
+                        // origin is the next element INCLUDING TOMBSTONES. That
+                        // asymmetry is the paper's (Algorithm 1 lines 23-24, and
+                        // arXiv §5.1), and taking both from the visible list
+                        // silently redefines the property being checked.
+                        var visible = replica.VisibleIds;
+                        var all = replica.AllIds;
+                        var left = s.Index > 0 ? visible[s.Index - 1] : (ElementId?)null;
+
+                        var afterLeft = 0;
+                        if (left is { } leftId)
+                        {
+                            for (var k = 0; k < all.Count; k++)
+                            {
+                                if (all[k].Equals(leftId))
+                                {
+                                    afterLeft = k + 1;
+                                    break;
+                                }
+                            }
+                        }
+
+                        var right = afterLeft < all.Count ? all[afterLeft] : (ElementId?)null;
 
                         var op = replica.Insert(s.Index, s.Value);
-                        all.Add(op);
+                        allOperations.Add(op);
                         byStep[stepIndex] = op;
                         intentions.Add(new Intention(op.Id, left, right));
                         break;
@@ -62,7 +83,7 @@ public static class SimulationRunner
                 case DeleteStep s:
                     {
                         var op = replicas[s.Replica].Delete(s.Index);
-                        all.Add(op);
+                        allOperations.Add(op);
                         byStep[stepIndex] = op;
                         deleted.Add(op.Target);
                         break;
@@ -79,7 +100,38 @@ public static class SimulationRunner
             }
         }
 
-        return new SimulationResult(replicas, all, intentions, deleted, byStep);
+        return new SimulationResult(replicas, allOperations, intentions, deleted, byStep);
+    }
+
+    /// <summary>
+    /// Applies one step to a live set of replicas.
+    /// </summary>
+    /// <remarks>
+    /// Shared with <see cref="ScenarioGenerator"/>, which drives real replicas
+    /// while generating so that every index it emits is in range for the replica
+    /// that will execute it. Computing indices from a shared counter does not
+    /// work: replicas diverge between deliveries, so "the document is nine
+    /// characters long" is not true of all of them at once.
+    /// </remarks>
+    public static Operation? ApplyStep(IReadOnlyList<Replica> replicas, ScenarioStep step)
+    {
+        ArgumentNullException.ThrowIfNull(replicas);
+
+        switch (step)
+        {
+            case InsertStep s:
+                return replicas[s.Replica].Insert(s.Index, s.Value);
+            case DeleteStep s:
+                return replicas[s.Replica].Delete(s.Index);
+            case DeliverStep s:
+                Deliver(replicas[s.From], replicas[s.To]);
+                return null;
+            case SyncStep:
+                SyncAll(replicas);
+                return null;
+            default:
+                throw new InvalidOperationException($"Unknown step {step}.");
+        }
     }
 
     /// <summary>Delivers everything <paramref name="from"/> knows to <paramref name="to"/>.</summary>

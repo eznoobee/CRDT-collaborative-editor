@@ -27,11 +27,17 @@ public sealed class MaximalNonInterleaving
 
     private MaximalNonInterleaving(SimulationResult result)
     {
-        var visible = result.Replicas[0].VisibleIds;
-        _count = visible.Count;
-        for (var i = 0; i < visible.Count; i++)
+        // Positions come from the order INCLUDING TOMBSTONES. Definition 4 is
+        // stated over list elements, and a tombstone is still an element: it can
+        // be another element's origin, and it still occupies a place in the
+        // order. Evaluating on the visible order instead makes the check
+        // systematically wrong once anything is deleted, because an origin that
+        // has been tombstoned simply disappears from the analysis.
+        var order = result.Replicas[0].AllIds;
+        _count = order.Count;
+        for (var i = 0; i < order.Count; i++)
         {
-            _position[visible[i]] = i;
+            _position[order[i]] = i;
         }
 
         foreach (var intention in result.Intentions)

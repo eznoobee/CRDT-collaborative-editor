@@ -279,10 +279,28 @@ version vector shows it has been observed. Track a per-document version vector.
 GC runs as a background job, never on the request path. If you cannot prove an
 element is causally stable, keep it.
 
-A tombstone that is still referenced as another live node's `Parent` or
-`RightOrigin` cannot be collected outright; collect its value and mark it a
-structural placeholder, or skip it. Correctness first — a lower reclamation rate
-is acceptable, a broken tree is not.
+**Causal stability is necessary but not sufficient.** It guarantees every replica
+has *observed* the delete; it does not guarantee nobody will *reference* the
+element again. A tombstone remains a valid anchor: `rightOrigin` is the next node
+in the traversal *including tombstones*, so a fully up-to-date replica can name a
+long-dead element in a brand-new insert. Collecting on stability alone strands
+that insert as an undeliverable dependency — found by invariant 7, not by
+reading.
+
+A tombstone may be collected only when all of these hold:
+
+1. It is causally stable.
+2. It is a leaf — no left or right children.
+3. No node references it as `Parent` or `RightOrigin`.
+4. **It is unreachable as a future right origin.** A new insert names as its
+   right origin the first node after a *visible* left origin, so only the
+   leading tombstone of a run of consecutive tombstones can be named. Retain
+   that leader; the tombstones behind it can never be named again. Collecting
+   the leader would simply promote the next one into reachable position.
+
+Rule 4 collapses a run of tombstones to one, which is where the reclamation
+actually is: a deleted paragraph becomes a single anchor. Correctness first — a
+lower reclamation rate is acceptable, a broken tree is not.
 
 **Replica retirement.** Causal stability over an open-ended replica set never
 converges: one browser tab that never returns blocks GC forever. A replica is
@@ -356,10 +374,12 @@ So the honest statement of what this project guarantees is:
   so any maximally non-interleaving algorithm is semantically equivalent to
   FugueMax. There is no better answer to reach for.
 
-The exception needs a third mutually-concurrent insertion, so it cannot arise
-with two concurrent replicas. **That last step is an inference from Lemma 5's
-preconditions, not a theorem stated in either paper** — treat it as the
-generator's boundary, not as proven fact, and see the testing rules below.
+An earlier draft of this section claimed the exception "cannot arise with two
+concurrent replicas". **That was wrong, and measurement disproved it** — see
+§13.6. There is no replica-count threshold beyond which backward runs are safe:
+the exception depends on the shape of the execution, not on how many replicas
+insert at a position. Backward run contiguity is therefore never asserted, at
+any concurrency. Definition 4 is what holds, and Definition 4 is what is tested.
 
 Invariant 8 is why the algorithm is FugueMax and not RGA: RGA satisfies 8(a)
 but not 8(b) at all. See §13.1.
@@ -390,32 +410,27 @@ but not 8(b) at all. See §13.1.
      Lemma 5 exception encoded as an exception rather than assumed away. This is
      exact and applies to every execution the generator can produce.
   2. **Run-level contiguity** — the property users actually care about.
-     Unconditional for forward runs. For backward runs, asserted **only in
-     executions with at most two replicas inserting concurrently at the
-     position**; above that the algorithm is not permitted to satisfy it, and a
-     generator that demands contiguity there is testing a false proposition.
+     **Forward runs: asserted unconditionally**, at any number of replicas, on
+     the strength of Lemma 3. **Backward runs: observed, never asserted.** The
+     papers give no backward analogue of Lemma 3 at any replica count, and
+     Theorem 5 is the reason there cannot be one.
 
-  The generator must therefore know how many concurrent replicas an execution
-  puts at a position, and must scope the level-2 backward assertion
-  accordingly. It must **not** avoid generating 3-replica backward cases —
-  those are exactly where level 1 earns its keep.
+  The generator must still produce backward runs, and must produce the layered
+  shape of arXiv Fig. 7 — two rounds of concurrency separated by a partial
+  delivery, with the interleaving pairs typed right to left across both rounds.
+  That shape is the only one in which the Lemma 5 exception arises; a single
+  round of concurrent runs cannot produce it however many replicas take part.
 
-- **The three-replica boundary is measured, not assumed.** The claim that the
-  Lemma 5 exception cannot arise below three concurrent replicas is an inference
-  from its preconditions, not a theorem either paper states, and it is what
-  decides where level 2 stops asserting. A label on it is not enough.
+- **Backward contiguity is measured, and the measurement is load-bearing.**
+  Evaluate it on every backward run: compute it, never fail on violation, count
+  how often it holds, and report the rate. Violations are the algorithm behaving
+  correctly.
 
-  So on executions with three or more concurrent replicas, evaluate the level-2
-  backward contiguity check in **observational mode**: compute it, do **not**
-  fail on violation, and count how often it holds. The property runner reports
-  the hold rate across the run.
-
-  Read the number. If contiguity holds in essentially every one of 10,000
-  three-replica cases, the boundary is drawn too wide — the exception is rarer
-  than "three replicas" and the assertion should be tightened towards the actual
-  Lemma 5 preconditions. A hold rate meaningfully below 100% is the evidence
-  that the boundary is real. Either way the inference stops being a guess, and
-  the report says which it is.
+  Read the number, and read it as a check on the generator as much as on the
+  algorithm. A rate at or near 100% means the generator is not reaching the
+  Lemma 5 shape and the corpus is weaker than it looks — that is how the false
+  boundary above survived its first measurement. The rate observed once the
+  Fig. 7 shape was generated is roughly 89%.
 - **Coverage:** ≥85% **mutation score** on `Crdt.Core`, measured with
   Stryker.NET. Line coverage is not a goal and is not tracked — it is trivially
   satisfiable by tests that assert nothing interesting about a CRDT.
@@ -975,6 +990,29 @@ unverified.
 | 15 | A replica cannot create two same-side siblings of one parent | CONFIRMED | §4 |
 | 16 | `ReplicaId` byte ordering is normative | CONFIRMED as compatible, but it is **our** requirement, not the paper's: the paper says id construction and order "is not important". §9 needs it for cross-implementation determinism. | §4 |
 | 17 | Invariant 8 holds in both directions | **CORRECTED** — unachievable by any algorithm. Rewritten as maximal non-interleaving with an explicit scope note. | arXiv Thm 5; Def 4; Thm 9 |
+
+### 13.6 The replica-count boundary for backward runs was wrong
+
+§5 claimed the Lemma 5 exception "cannot arise with two concurrent replicas",
+inferred from the exception's preconditions and labelled as an inference rather
+than a theorem. Observational mode was added to measure it. It is false.
+
+The first measurement reported backward contiguity holding in 6581 of 6581
+applicable cases — 100.00%. That looked like confirmation that the boundary was
+merely too generous. It was not: the generator only produced a single round of
+concurrency, and the Lemma 5 exception cannot arise in that shape at all. The
+measurement was of the generator, not the algorithm.
+
+Adding the arXiv Fig. 7 shape — two rounds separated by a partial delivery, with
+the interleaving pairs typed right to left across both rounds — immediately
+produced a violated backward run at **concurrency two**, inside a four-replica
+execution. Definition 4 held throughout, so the algorithm was right and the
+boundary was wrong.
+
+Two things follow. Backward contiguity is now never asserted at any concurrency,
+because the exception depends on the shape of the execution rather than on a
+count of replicas. And a near-100% hold rate is read as evidence that the
+generator is missing a shape, not as evidence that a property holds.
 
 ### 13.5 Where the papers and the reference implementation differ
 
