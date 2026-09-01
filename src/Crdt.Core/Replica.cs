@@ -46,6 +46,38 @@ public sealed class Replica
     public int PendingCount => throw new NotImplementedException();
 
     /// <summary>
+    /// Element ids of the visible text, positionally aligned with
+    /// <see cref="Values"/>.
+    /// </summary>
+    /// <remarks>
+    /// Production API, not a test hook: §9 requires cursors to be anchored to
+    /// element ids rather than integer indices, because an index is invalidated
+    /// by any concurrent edit earlier in the document.
+    /// </remarks>
+    public IReadOnlyList<ElementId> VisibleIds => throw new NotImplementedException();
+
+    /// <summary>
+    /// Reclaims tombstones that every replica in <paramref name="stableFrontier"/>
+    /// has observed, returning how many were collected.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Causal stability (§5): an element is collectable only when every
+    /// non-retired replica has seen it, so no future legal operation can
+    /// reference it. <paramref name="stableFrontier"/> is the elementwise
+    /// minimum of the known replicas' version vectors.
+    /// </para>
+    /// <para>
+    /// A tombstone still referenced as a live node's parent or right origin
+    /// cannot be removed outright; it keeps its place as a structural
+    /// placeholder. Correctness first — a lower reclamation rate is fine, a
+    /// broken tree is not.
+    /// </para>
+    /// </remarks>
+    public int Collect(IReadOnlyDictionary<ReplicaId, ulong> stableFrontier) =>
+        throw new NotImplementedException();
+
+    /// <summary>
     /// Inserts <paramref name="value"/> at <paramref name="index"/> in the
     /// visible text, applying it locally and returning the operation to broadcast.
     /// </summary>
