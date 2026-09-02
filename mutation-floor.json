@@ -1,12 +1,44 @@
 {
-  "floor": 88.89,
-  "statuses": {
-    "killed": 216,
-    "timeout": 16,
-    "survived": 15,
-    "noCoverage": 14
-  },
+  "why": "PROJECT_SPEC.md §13.7. The ratchet keys on WHICH mutants go undetected, not on the score. A mutant that flips between Killed and Timeout never appears here, so the check does not move with the runner — which the score does: commit 9ffe234 changed neither Crdt.Core nor its tests and the score still went 88.89% to 89.27% because CI timed out eight more mutants. An entry appearing that is not in this list is coverage erosion and fails the build everywhere. This list is the UNION of what has been observed undetected, so a faster machine surfacing a mutant a slower one timed out is already accounted for. Adding to it is a deliberate act and needs an argued exception recorded in §13.7; removing entries as coverage improves is ordinary cleanup and the script reports the candidates.",
   "recorded": "2026-09-02",
-  "why": "PROJECT_SPEC.md §13.7. The ratchet floor, not a target, and CI's number rather than any local one: a mutant that survives on a fast machine can time out on a slow one, and a timeout counts as a detection, so the score is stable on one machine and not across machines. scripts/mutation.sh enforces this only when CI=true. Moving off it in either direction fails — down means coverage eroded, up means this file is stale and the next erosion would be measured from the wrong place. Lowering it needs an argued exception recorded in §13.7.",
-  "measuredOn": "github-actions ubuntu-latest"
+  "observedScores": {
+    "local-4vcpu": 88.12,
+    "github-ubuntu-latest": [
+      88.89,
+      89.27
+    ]
+  },
+  "undetected": [
+    "Replica.cs:163:21:String mutation",
+    "Replica.cs:274:9:Statement mutation",
+    "Replica.cs:402:17:Statement mutation",
+    "Replica.cs:422:13:Block removal mutation",
+    "Replica.cs:452:54:String mutation",
+    "Replica.cs:467:53:String mutation",
+    "Replica.cs:49:70:Boolean mutation",
+    "Replica.cs:505:42:Equality mutation",
+    "Replica.cs:524:42:Equality mutation",
+    "Replica.cs:551:9:Block removal mutation",
+    "Replica.cs:557:20:UnaryMinusExpression to UnaryPlusExpression mutation",
+    "Replica.cs:571:13:PostDecrementExpression to PostIncrementExpression mutation",
+    "Replica.cs:571:13:Statement mutation",
+    "Replica.cs:572:17:Negate expression",
+    "Replica.cs:574:24:Conditional (true) mutation",
+    "Replica.cs:582:13:PostDecrementExpression to PostIncrementExpression mutation",
+    "Replica.cs:582:13:Statement mutation",
+    "Replica.cs:583:17:Negate expression",
+    "Replica.cs:585:24:Conditional (true) mutation",
+    "Replica.cs:585:48:UnaryMinusExpression to UnaryPlusExpression mutation",
+    "Replica.cs:591:9:Block removal mutation",
+    "Replica.cs:598:20:Conditional (false) mutation",
+    "Replica.cs:598:20:Conditional (true) mutation",
+    "Replica.cs:598:20:Equality mutation",
+    "Replica.cs:598:42:UnaryMinusExpression to UnaryPlusExpression mutation",
+    "Replica.cs:601:24:Conditional (true) mutation",
+    "Replica.cs:627:21:Statement mutation",
+    "Replica.cs:627:39:PostDecrementExpression to PostIncrementExpression mutation",
+    "Replica.cs:628:34:Boolean mutation",
+    "Replica.cs:632:21:Statement mutation",
+    "Replica.cs:632:39:PostDecrementExpression to PostIncrementExpression mutation"
+  ]
 }

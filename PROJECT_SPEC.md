@@ -1513,23 +1513,18 @@ supposed to catch and structurally cannot: a fixed bar only notices the last
 step of a slide, and by then the headroom that would have paid for the fix is
 gone.
 
-The floor lives in `mutation-floor.json` and `scripts/mutation.sh` enforces it.
-Raising it is an ordinary commit — improve coverage, commit the new number.
-Lowering it requires an argued exception recorded in this section, naming what
-was removed and why the coverage it provided is not worth keeping. There is no
-third option, and in particular "the score went down but it still passes" is no
-longer a sentence the build will accept.
+The known-undetected list lives in `mutation-floor.json` and
+`scripts/mutation.sh` enforces it. Improving coverage is an ordinary commit:
+cover a mutant, drop its entry. Giving coverage up requires adding an entry
+*and* an argued exception recorded in this section, naming what was removed and
+why the coverage it provided is not worth keeping. There is no third option,
+and in particular "the score went down but it still passes" is not a sentence
+the build will accept — nor is "the score went up", which is now known to mean
+very little on its own.
 
-**A score above the floor fails too**, with a message giving the line to change.
-That reads as pedantic and is not: an unrecorded peak is how a ratchet silently
-stops ratcheting. Improve coverage to 90% without committing it and the floor
-stays at 87.74%, so a later slide from 90% to 88% passes — the exact erosion the
-ratchet exists to catch, now invisible because the reference point was never
-moved. Both directions are a one-line fix.
-
-The comparison is exact rather than tolerant — a tolerance would have to be
-about the size of the erosion being detected, which would defeat the check — and
-that only works where the score is comparable.
+A set comparison is exact by nature, which is what a tolerance could never be: a
+tolerance on a percentage would have to be about the size of the erosion being
+detected, and would therefore defeat the check.
 
 **The score is stable on one machine and is not stable across machines, and this
 was got wrong once.** An earlier draft of this section claimed the same commit
@@ -1545,29 +1540,51 @@ detects mutants a faster one does not, and reports a *higher* score for
 identical code. It is not the scale cases: bounding them to 100 elements changes
 neither the score nor the timeout count here. It is the runner.
 
-So the ratchet is **enforced in CI only**, and `mutation-floor.json` records
-CI's number and says so. Comparing exactly is right; comparing exactly against a
-number measured somewhere else is not. Locally `scripts/mutation.sh` prints the
-comparison, explains the difference, and does not fail; `MUTATION_RATCHET=enforce`
-overrides that for anyone who wants it. The two permanent guards — no tests
-discovered, nothing killed — still fail everywhere, because neither depends on
-timing.
+That was first answered by enforcing the ratchet **in CI only**, so that the
+comparison at least happened between comparable runs. It was the right diagnosis
+and an insufficient fix, for the reason recorded below. The identity-based
+ratchet that replaced it is enforced **everywhere**, because it does not depend
+on timing at all. The two permanent guards — no tests discovered, nothing
+killed — always did, and still do.
 
-**The floor is now hardware-coupled, in one direction.** Pinning the ratchet to
-CI makes the number comparable; it does not make it a property of the code alone.
-A change to the runner image, its CPU allocation, or how loaded it is moves the
-timeout count, and therefore the score, with no commit touching `Crdt.Core` at
-all — upward when the runner gets slower, since a slower machine detects mutants
-a faster one does not.
+**The floor was hardware-coupled, and the very next commit proved it.** Pinning
+the ratchet to CI made the number comparable between runs; it did not make it a
+property of the code. A change to the runner image, its CPU allocation, or how
+loaded it is moves the timeout count and therefore the score, with no commit
+touching `Crdt.Core` at all — upward when the runner gets slower, since a slower
+machine detects mutants a faster one does not.
 
-So a **sudden jump is a signal to investigate, not a new floor to commit.** The
-script's "score rose, commit the new floor" message is written for the case where
-someone improved coverage, and it cannot tell that case from a runner change. If
-the score moves and the diff contains no test and no `Crdt.Core` change, the
-answer is not to update the number — it is to find out what moved underneath it,
-and to record the finding here. Committing a floor that the hardware handed you
-converts a measurement artefact into a permanent requirement, and the next
-genuine erosion is then measured from a place nothing earned.
+The prediction was written into this section and disproved within the hour.
+Commit `9ffe234` changed `PROJECT_SPEC.md`, a script, and two files in
+`Editor.Infrastructure` and the client — **not one line of `Crdt.Core` or of
+`Crdt.Core.Tests`, which are the only things Stryker mutates or runs.** CI's
+score went 88.89% to 89.27%, because it timed out eight more mutants than the
+run before. A gate that fails on a diff it cannot possibly be measuring is not a
+gate, it is a coin toss with a good reputation.
+
+**So the ratchet stopped keying on the score.** `mutation-floor.json` now lists
+*which* mutants are known to go undetected, by file, line, column and mutator,
+and the build fails when a mutant appears outside that list. Coverage erosion is
+"something stopped being caught", and that is what the list measures directly:
+
+- A mutant flipping between `Killed` and `Timeout` never appears in the list at
+  all, so the runner's speed cannot move the check.
+- The list is the **union** of what has been observed undetected, so a fast
+  machine surfacing a mutant a slow one timed out is already accounted for —
+  every machine's undetected set is a subset of it.
+- Entries that *were* detected this run are reported, never failed. The script
+  cannot tell "a new test kills it" from "this runner timed it out", so it hands
+  the judgement over instead of guessing. Cleanup is a deliberate act.
+- The failure message names the mutants rather than a percentage, which is the
+  practical difference: "three mutants at `Replica.cs:317-319` stopped being
+  caught" is actionable where "86.97%, was 88.89%" is a starting point for an
+  investigation.
+
+The score is still computed and printed. It is a useful number to watch and a
+bad thing to gate on, and this section is the record of learning that the
+expensive way — twice. The first version compared it across machines and flapped;
+the second pinned it to CI and still moved with the runner. Stryker's own 85%
+break threshold stays as an absolute backstop underneath all of it.
 
 **The rule that survives all of this:** if the timeout count climbs, the score is
 measuring the clock. Running the §13.10 scale cases at full size once read 89.66%
@@ -1576,10 +1593,20 @@ the score rose while nothing new was caught. `scripts/mutation.sh` bounds
 document size under mutation (`CRDT_SCALE_ELEMENTS`) for that reason, and it is
 still worth doing even though it turned out not to be the cross-machine cause.
 
-**Demonstrated, not assumed.** Deleting one of the three `Import` tests takes
-the score to 86.59% — which still clears Stryker's own 85% break threshold, so
-Stryker exits 0 and the build would have passed. The ratchet fails it. That is
-the whole argument for having one.
+**Demonstrated, not assumed.** Deleting one of the three `Import` tests still
+clears Stryker's own 85% break threshold — 86.97%, so Stryker exits 0 and the
+build would have passed. The ratchet fails it, and says why:
+
+```
+Coverage eroded: 3 mutant(s) went undetected that are not known:
+    Replica.cs:317:17:Statement mutation
+    Replica.cs:318:21:String mutation
+    Replica.cs:319:23:String mutation
+```
+
+Those three are the `Import` guard against a snapshot naming a parent it does not
+contain. Naming them is the practical gain over a percentage: the message is the
+diagnosis rather than the start of one.
 
 `scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
 permanently, alongside the ratchet. They are what caught the false 0.00%, and a

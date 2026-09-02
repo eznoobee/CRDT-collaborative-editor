@@ -11,18 +11,20 @@
 # 0 on, while the same suite killed those mutations when they were injected by
 # hand. A gate that cannot fail loudly is not a gate.
 #
-# There are three guards, and the third is the ratchet: the score in
-# mutation-floor.json is the floor, and any decrease fails regardless of the
-# absolute number. Stryker's own 85% break threshold stays as a backstop, but it
-# cannot see erosion — 85.44% clears an 85% bar after a 1.02-point drop, which is
-# how Phase 2 gave back coverage with nothing going red.
+# There are three guards, and the third is the ratchet: mutation-floor.json lists
+# WHICH mutants are known to go undetected, and a mutant appearing outside that
+# list fails the build. Stryker's own 85% break threshold stays as a backstop,
+# but it cannot see erosion — 85.44% clears an 85% bar after a 1.02-point drop,
+# which is how Phase 2 gave back coverage with nothing going red.
 #
-# The ratchet is ENFORCED IN CI ONLY, and PROJECT_SPEC.md §13.7 says why: the
-# score is stable on one machine and is not stable across machines. A mutant that
-# survives here can time out on a slower runner, and a timeout counts as a
-# detection, so the same commit scored 88.12% here and 88.89% on CI. Comparing
-# exactly is right; comparing exactly against a number measured somewhere else is
-# not. Locally the comparison is printed and explained; CI decides.
+# The ratchet keys on identity rather than on the score because the score moves
+# with the hardware (PROJECT_SPEC.md §13.7). A timeout counts as a detection, so
+# a slower runner detects mutants a faster one does not: commit 9ffe234 touched
+# neither Crdt.Core nor its tests and the score still went 88.89% to 89.27%
+# because CI timed out eight more mutants. A mutant flipping between Killed and
+# Timeout never appears in the undetected list at all, so this check does not
+# move with the runner — and the list is the union of what has been observed, so
+# a fast machine surfacing what a slow one timed out is already accounted for.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -83,58 +85,63 @@ if tested > 0 and counts["Killed"] == 0:
     )
     sys.exit(1)
 
-# The ratchet. The score is recomputed here rather than scraped from Stryker's
-# output: detected mutants over everything that could have been detected. A
-# mutant with no coverage counts against the score, because "no test reaches it"
-# and "a test reaches it and does not notice" are the same gap.
 detected = counts["Killed"] + counts["Timeout"]
 denominator = detected + counts["Survived"] + counts["NoCoverage"]
 if denominator == 0:
-    print("\nNo mutants were tested, so there is no score to ratchet.")
+    print("\nNo mutants were tested, so there is nothing to ratchet.")
     sys.exit(1)
 
-score = round(detected / denominator * 100, 2)
+# Reported, never gated. The score is a function of the hardware as much as of
+# the suite; §13.7 records how that was found out.
+print(f"mutation score: {detected / denominator * 100:.2f}%  (reported, not gated)")
+
+def identify(path, mutant):
+    start = mutant["location"]["start"]
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    return f'{name}:{start["line"]}:{start["column"]}:{mutant["mutatorName"]}'
+
+undetected = {
+    identify(path, mutant)
+    for path, file in report.get("files", {}).items()
+    for mutant in file.get("mutants", [])
+    if mutant.get("status") in ("Survived", "NoCoverage")
+}
 
 with open(sys.argv[2], encoding="utf-8") as handle:
-    floor = round(float(json.load(handle)["floor"]), 2)
+    known = set(json.load(handle)["undetected"])
 
-print(f"mutation score: {score:.2f}%   floor: {floor:.2f}%")
+appeared = sorted(undetected - known)
+gone = sorted(known - undetected)
 
-# The score is deterministic for a given commit — the same status counts appear
-# locally and on CI, timeouts included — so an exact comparison does not flake.
-if score < floor:
+print(f"undetected: {len(undetected)}   known: {len(known)}")
+
+if gone:
+    # Not a failure: an entry can vanish because a test now kills it, or merely
+    # because this machine timed it out. Only the first is worth acting on, and
+    # the script cannot tell them apart, so it reports and leaves the judgement.
+    print(f"\n{len(gone)} known entries were detected this run. If a test now covers")
+    print("them, drop them from mutation-floor.json; if the runner just timed them")
+    print("out, leave them (§13.7).")
+    for entry in gone[:10]:
+        print(f"    {entry}")
+
+if appeared:
+    print(f"\nCoverage eroded: {len(appeared)} mutant(s) went undetected that are not known:")
+    for entry in appeared:
+        print(f"    {entry}")
     print(
-        f"\nMutation score fell from {floor:.2f}% to {score:.2f}%.\n"
-        "\nThat is a coverage regression, and it fails regardless of the absolute\n"
-        "number: a fixed threshold only notices the last step of a slide. Either\n"
-        "cover what this change added, or record an argued exception in\n"
-        "PROJECT_SPEC.md 13.7 saying what was removed and why the coverage it\n"
-        "provided is not worth keeping, and lower the floor in the same commit."
-    )
-    sys.exit(1)
-
-if score > floor:
-    print(
-        f"\nMutation score rose from {floor:.2f}% to {score:.2f}%. Commit the new\n"
-        "floor in the same change:\n"
-        f'\n    "floor": {score:.2f},\n'
-        "\nThis fails rather than warns because an unrecorded peak is how a ratchet\n"
-        "silently stops ratcheting: the next erosion would be measured from a\n"
-        "floor nobody updated."
+        "\nThis fails regardless of the score, which is the point: a percentage\n"
+        "only notices the last step of a slide, and it moves with the runner.\n"
+        "Either cover these, or add them to mutation-floor.json with an argued\n"
+        "exception in PROJECT_SPEC.md §13.7 saying why the coverage is not worth\n"
+        "keeping."
     )
     sys.exit(1)
 REPORT_CHECK
   ratchet=$?
   set -e
   if [[ "$ratchet" -ne 0 ]]; then
-    if [[ "${CI:-}" == "true" || "${MUTATION_RATCHET:-}" == "enforce" ]]; then
-      exit "$ratchet"
-    fi
-
-    echo
-    echo "Not failing: the ratchet is enforced in CI, where the floor was measured."
-    echo "A local score differing from the floor is expected — see §13.7. Run with"
-    echo "MUTATION_RATCHET=enforce to fail here too."
+    exit "$ratchet"
   fi
 fi
 
