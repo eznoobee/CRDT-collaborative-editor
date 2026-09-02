@@ -524,6 +524,214 @@ be collected on causal stability alone, because a `RightOrigin` can name one
 IndexedDB schema. After that, changing it is a migration on every user's
 machine; before it, it is a codec swap behind two tests.
 
+### Binary encoding — normative layout
+
+Written before either implementation, for the same reason §9's trace schema was:
+two codecs written from one description agree or the build says so, whereas a
+second codec written from the first only inherits its mistakes.
+
+All integers are **unsigned LEB128 varints** unless stated otherwise: seven bits
+per byte, least significant group first, high bit set on every byte but the last.
+A varint encoding a value in more bytes than necessary is invalid. Replica ids
+are the raw sixteen bytes in the §5 order — never a text form.
+
+#### Header
+
+| Bytes | Meaning |
+|---|---|
+| 4 | magic `43 52 44 54` (`CRDT`) |
+| 1 | format version, currently `01` |
+| 1 | body kind: `01` snapshot, `02` operation batch |
+
+**A reader that does not recognise the version rejects the input** with an error
+naming the versions it supports, and reads no further. Never a best-effort parse
+— §9 says why, and it is the one rule in this section with no exceptions.
+Unrecognised *kind* is the same.
+
+#### Replica table
+
+Both body kinds begin with it.
+
+| Field | Encoding |
+|---|---|
+| count | varint |
+| ids | `count` × 16 raw bytes, **ascending in §5 order**, no duplicates |
+
+Every replica named anywhere in the body — element ids, parents, right origins,
+delete targets, version vector — appears exactly once here, and every reference
+afterwards is a varint index into this table. This is the first of the three
+structural savings: a 16-byte id becomes one byte at every reference, and a
+document has a handful of replicas and hundreds of thousands of references.
+
+#### Element flags
+
+One byte, in element and insert records alike.
+
+| Bit | Meaning |
+|---|---|
+| 0 | side: `0` left child, `1` right child |
+| 1 | deleted |
+| 2–3 | parent: `0` root, `1` the previous record's element, `2` explicit, `3` invalid |
+| 4 | right origin, **only when bit 0 is set**: `0` end of document, `1` explicit |
+| 5–7 | reserved, must be zero |
+
+A left child has no right-origin field at all, so "absent because left child" and
+"absent because end of document" are distinguished by *shape* rather than by a
+flag value. The pair that §6's `right_origin_is_end` CHECK constraint exists to
+keep apart, and that trace `0050` exists to catch, is unrepresentable here.
+
+Reserved bits must be zero and a reader rejects a record that sets them. That is
+the forward-compatibility trap: a future version that assigns them is a version
+bump, and an old reader must refuse rather than ignore what it cannot see.
+
+#### Snapshot body (kind `01`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| vector count | varint |
+| version vector | `count` × (replica index varint, count varint), ascending by index |
+| element count | varint |
+| records | element and run records, in document order, totalling exactly `element count` elements |
+
+The version vector carries exactly the entries the replica holds — an absent
+replica is not written as zero, because a round trip must reproduce the input
+byte for byte and "absent" and "zero" are different inputs even though §5 treats
+them alike.
+
+**Element record**
+
+| Field | Encoding |
+|---|---|
+| tag | `00` |
+| flags | 1 byte |
+| id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2`: replica index varint, seq varint |
+| right origin | present only when bit 0 is set and bit 4 is set: replica index varint, seq varint |
+| value | byte length varint (1–4), then that many UTF-8 bytes of one code point |
+
+**Run record** — the third structural saving, and the one that pays for
+sequential typing.
+
+| Field | Encoding |
+|---|---|
+| tag | `01` |
+| count | varint, ≥ 2 |
+| flags | 1 byte, describing the **first** element |
+| first id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2` |
+| deleted bitmap | ⌈count/8⌉ bytes, element *i* at bit *i* mod 8 of byte *i* / 8 |
+| values | total byte length varint, then the concatenated UTF-8 of all `count` code points |
+
+A run stands for `count` elements whose ids are `(r, s)`, `(r, s+1)`, …
+`(r, s+count-1)`, where every element after the first is a **right child of the
+one before it with its right origin at end of document**. Flags bit 1 is ignored
+for a run — the bitmap carries every element's deleted state, the first
+included — and bit 4 must be clear, because a run's interior right origins are
+end-of-document by construction and the first element's must be too for the run
+to be one shape.
+
+That is exactly the shape typing left to right produces: each character a right
+child of the previous one, nothing following it at the time. It is also, not
+coincidentally, the shape whose tree depth equals document length (§13.10).
+
+The deleted bitmap is what keeps §8's stress case affordable. Five hundred
+thousand tombstones cannot be collected — a `RightOrigin` can name one (§5) — so
+they are stored, and in a run they cost one bit each rather than a record.
+
+#### Operation batch body (kind `02`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| op count | varint |
+| ops | `op count` × operation record |
+
+**Insert** — tag `00`, then flags, id, parent, right origin and value exactly as
+an element record. "Previous record's element" refers to the element inserted by
+the previous operation in this batch.
+
+**Delete** — tag `01`, then id (replica index varint, seq varint) and target
+(replica index varint, seq varint).
+
+**The run form of §6 stays reserved and is not specified here.** Runs on the wire
+need the ingest-side expansion that replays the placement rule per element, which
+is Phase 3's work; specifying a format now that nothing writes or reads would be
+a stub in the specification. Snapshots use runs today because the snapshot writer
+and reader both exist.
+
+#### Canonical form
+
+There is **exactly one** valid encoding of a given document, because §9 requires
+`binary → JSON → binary` to be byte-identical and that is not a property an
+encoder can have if it may choose between encodings.
+
+1. The replica table is ascending, duplicate-free, and contains exactly the
+   replicas referenced by the body — no more.
+2. Version vector entries ascend by replica index.
+3. **Runs are maximal.** Two or more adjacent elements that satisfy the run shape
+   are one run record, and a run is extended as far as the shape holds. A single
+   element record that could have joined an adjacent run is invalid, and so is a
+   run that could have been longer.
+4. A run record has `count` ≥ 2. One element is an element record.
+5. Parent flag `1` ("previous record's element") is used whenever it applies;
+   spelling the same parent out as flag `2` is invalid.
+6. Varints are minimally encoded.
+7. No trailing bytes after the last record.
+
+A reader **rejects** every violation above that it can detect while decoding —
+which is all of them except maximality across a record boundary it has not yet
+reached, and that one is caught by re-encoding. Rejecting non-canonical input is
+not pedantry: a reader that accepts two spellings of one document turns the
+byte-identity check into a check of whichever spelling the writer happened to
+choose.
+
+#### Measuring it honestly
+
+The 100k document §13.9 measured is a **single forward chain** — one replica
+typing left to right, never deleting. That is the best case this format has: it
+collapses to one run record plus a bitmap, roughly one byte per element, and
+reporting it alone would overstate the format by a wide margin.
+
+So the metric reports **both**:
+
+- the **chain** case, which is what the JSON number was measured on and the only
+  way to compare like with like; and
+- a **fragmented** case — several replicas interleaved, a realistic proportion of
+  tombstones, backward runs among the forward ones — where most elements cannot
+  join a run and pay the full element-record price.
+
+The fragmented figure is the one to quote when asking whether this reaches §8.
+A format whose headline number comes from its best case is a format nobody has
+measured.
+
+**Predicted from the layout above, before any codec existed**, at 100k elements:
+
+| Case | Predicted | Against JSON's 222.8 |
+|---|---|---|
+| chain (one maximal run) | 1.13 bytes/element | 197× smaller |
+| fully fragmented (no runs at all, every parent and right origin explicit, four replicas) | 16.00 bytes/element | 14× smaller |
+
+The prediction is recorded here so the measurement can disagree with it. A
+layout that turns out to cost twice what its own arithmetic says has something
+wrong with it that a single reported number would hide.
+
+#### What a reader rejects
+
+Every one of these is an error naming what was wrong, never a partial document:
+
+- Unrecognised magic, version, body kind, record tag or operation tag.
+- Reserved flag bits set; parent kind `3`.
+- Bit 4 set on a run record.
+- A replica index past the end of the table.
+- Parent kind `1` on the first record of a body.
+- A value that is not exactly one UTF-8 code point, or is a lone surrogate.
+- Truncated input, or bytes remaining after the declared element or operation
+  count is met.
+- Any canonical-form violation from the list above.
+
 ### Serialisation lives in Editor.Infrastructure
 
 `Crdt.Core` references nothing but the BCL (§4), so the mapping from its types to
