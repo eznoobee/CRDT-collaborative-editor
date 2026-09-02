@@ -485,26 +485,284 @@ document_replicas  (document_id, replica_id, user_id, last_seen_at, max_seq,
 - Snapshot every N operations (configurable, default 500). Loading a document
   reads the latest snapshot plus operations after its `server_seq`.
 
-### Snapshot encoding
+### Two encodings, two roles
 
-`document_snapshots.state` holds **the normalised JSON of §9** — the same format
-the conformance runners emit.
+The project carries **two** encodings of the same data, and which one is
+normative is not the same question as which one is stored.
 
-The reason is not tidiness. Sharing the format makes a snapshot directly
-comparable against a conformance run, which extends the cross-implementation
-check into persistence at no cost: if the C# server and the TypeScript client
-ever disagree about how a document serialises, a snapshot and a conformance
-artefact stop matching, and that is a build failure rather than a support
-ticket.
+**Normalised JSON (§9) is normative.** It defines what a correct serialisation
+*is*. The conformance corpus is JSON, the cross-implementation comparison is
+byte-for-byte over JSON, and JSON is the form a human reads when diagnosing a
+divergence. Nothing about this changes.
 
-JSON is larger and slower than a binary encoding, and §8 asks a document of
-100k live characters and 500k tombstones to load in under 500 ms server-side.
-**Measure it, do not assume it.** Phase 2 carries a test that builds a
-100k-element document, snapshots it, and *reports* serialised size and load time
-as metrics — no threshold, no assertion. The point is to know the number before
-the format is baked into the client's IndexedDB schema, not to discover it in
-Phase 7. If JSON turns out to be far off the target, that is a Phase 2 fact and
-the decision to change format is cheap; after Phase 4 it is not.
+**Binary is the storage and wire form.** `document_snapshots.state` holds
+binary, and operations travel the wire as binary. The layout is specified below
+under *Binary encoding*.
+
+The two are tied together by a rule, not by convention:
+
+> **Binary correctness derives from JSON correctness.** The corpus asserts
+> `binary → JSON → binary` is byte-identical, and `JSON → binary → JSON` is
+> byte-identical, on **both** implementations. A binary codec that round-trips
+> but disagrees with the normative form fails the build.
+
+This is what preserves the cross-implementation guarantee through the format
+change. Without it, binary would be a second definition of correctness that
+nothing checks against the first, and the two would drift the way any unchecked
+pair of implementations drifts.
+
+**Why binary at all.** Phase 2 measured the JSON snapshot at 100k live elements:
+22,277,866 bytes — 222.8 bytes per element — loading in 501–941 ms against §8's
+500 ms target, with no tombstones. §13.9 has the numbers and the reasoning. The
+short version is that 222.8 bytes carries on the order of 50 bytes of actual
+data, and §8's stated case adds 500k tombstones, stored in full: roughly 130 MiB
+to move before it reaches a browser. Phase 1 established that tombstones cannot
+be collected on causal stability alone, because a `RightOrigin` can name one
+(§5), so 500k is a realistic accumulation rather than a pessimistic one.
+
+**Why now, and not in Phase 4.** Phase 4 binds the format into the client's
+IndexedDB schema. After that, changing it is a migration on every user's
+machine; before it, it is a codec swap behind two tests.
+
+### Binary encoding — normative layout
+
+Written before either implementation, for the same reason §9's trace schema was:
+two codecs written from one description agree or the build says so, whereas a
+second codec written from the first only inherits its mistakes.
+
+All integers are **unsigned LEB128 varints** unless stated otherwise: seven bits
+per byte, least significant group first, high bit set on every byte but the last.
+A varint encoding a value in more bytes than necessary is invalid. Replica ids
+are the raw sixteen bytes in the §5 order — never a text form.
+
+#### Header
+
+| Bytes | Meaning |
+|---|---|
+| 4 | magic `43 52 44 54` (`CRDT`) |
+| 1 | format version, currently `01` |
+| 1 | body kind: `01` snapshot, `02` operation batch |
+
+**A reader that does not recognise the version rejects the input** with an error
+naming the versions it supports, and reads no further. Never a best-effort parse
+— §9 says why, and it is the one rule in this section with no exceptions.
+Unrecognised *kind* is the same.
+
+#### Replica table
+
+Both body kinds begin with it.
+
+| Field | Encoding |
+|---|---|
+| count | varint |
+| ids | `count` × 16 raw bytes, **ascending in §5 order**, no duplicates |
+
+Every replica named anywhere in the body — element ids, parents, right origins,
+delete targets, version vector — appears exactly once here, and every reference
+afterwards is a varint index into this table. This is the first of the three
+structural savings: a 16-byte id becomes one byte at every reference, and a
+document has a handful of replicas and hundreds of thousands of references.
+
+#### Element flags
+
+One byte, in element and insert records alike.
+
+| Bit | Meaning |
+|---|---|
+| 0 | side: `0` left child, `1` right child |
+| 1 | deleted |
+| 2–3 | parent: `0` root, `1` **the element immediately before this one in document order**, `2` explicit, `3` invalid |
+| 4 | right origin, **only when bit 0 is set**: `0` end of document, `1` explicit |
+| 5–7 | reserved, must be zero |
+
+A left child has no right-origin field at all, so "absent because left child" and
+"absent because end of document" are distinguished by *shape* rather than by a
+flag value. The pair that §6's `right_origin_is_end` CHECK constraint exists to
+keep apart, and that trace `0050` exists to catch, is unrepresentable here.
+
+Reserved bits must be zero and a reader rejects a record that sets them. That is
+the forward-compatibility trap: a future version that assigns them is a version
+bump, and an old reader must refuse rather than ignore what it cannot see.
+
+#### Snapshot body (kind `01`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| vector count | varint |
+| version vector | `count` × (replica index varint, count varint), ascending by index |
+| element count | varint |
+| records | element and run records, in document order, totalling exactly `element count` elements |
+
+The version vector carries exactly the entries the replica holds — an absent
+replica is not written as zero, because a round trip must reproduce the input
+byte for byte and "absent" and "zero" are different inputs even though §5 treats
+them alike.
+
+**Element record**
+
+| Field | Encoding |
+|---|---|
+| tag | `00` |
+| flags | 1 byte |
+| id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2`: replica index varint, seq varint |
+| right origin | present only when bit 0 is set and bit 4 is set: replica index varint, seq varint |
+| value | byte length varint (1–4), then that many UTF-8 bytes of one code point |
+
+**Run record** — the third structural saving, and the one that pays for
+sequential typing.
+
+| Field | Encoding |
+|---|---|
+| tag | `01` |
+| count | varint, ≥ 2 |
+| flags | 1 byte, describing the **first** element |
+| first id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2` |
+| deleted bitmap | ⌈count/8⌉ bytes, element *i* at bit *i* mod 8 of byte *i* / 8; **bits past the last element must be zero** |
+| values | total byte length varint, then the concatenated UTF-8 of all `count` code points |
+
+A run stands for `count` elements whose ids are `(r, s)`, `(r, s+1)`, …
+`(r, s+count-1)`, where every element after the first is a **right child of the
+one before it with its right origin at end of document**. The bitmap carries
+every element's deleted state, the first included, and bit 4 must be clear
+because a run's interior right origins are end-of-document by construction and
+the first element's must be too for the run to be one shape. Bit 1 must be zero, since the bitmap already carries the first
+element's deleted state and two spellings of one document is what canonical form
+forbids. Bit 0 is the first element's own side: a run may begin at a left child,
+and every element after it is a right child regardless.
+
+That is exactly the shape typing left to right produces: each character a right
+child of the previous one, nothing following it at the time. It is also, not
+coincidentally, the shape whose tree depth equals document length (§13.10).
+
+The deleted bitmap is what keeps §8's stress case affordable. Five hundred
+thousand tombstones cannot be collected — a `RightOrigin` can name one (§5) — so
+they are stored, and in a run they cost one bit each rather than a record.
+
+#### Operation batch body (kind `02`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| op count | varint |
+| ops | `op count` × operation record |
+
+**Insert** — tag `00`, then flags, id, parent, right origin and value exactly as
+an element record. Parent flag `1` refers to the element inserted by the
+immediately preceding operation in this batch.
+
+**Delete** — tag `01`, then id (replica index varint, seq varint) and target
+(replica index varint, seq varint).
+
+**The run form of §6 stays reserved and is not specified here.** Runs on the wire
+need the ingest-side expansion that replays the placement rule per element, which
+is Phase 3's work; specifying a format now that nothing writes or reads would be
+a stub in the specification. Snapshots use runs today because the snapshot writer
+and reader both exist.
+
+#### Canonical form
+
+There is **exactly one** valid encoding of a given document, because §9 requires
+`binary → JSON → binary` to be byte-identical and that is not a property an
+encoder can have if it may choose between encodings.
+
+1. The replica table is ascending, duplicate-free, and contains exactly the
+   replicas referenced by the body — no more.
+2. Version vector entries ascend by replica index.
+3. **Runs are maximal.** Two or more adjacent elements that satisfy the run shape
+   are one run record, and a run is extended as far as the shape holds. A single
+   element record that could have joined an adjacent run is invalid, and so is a
+   run that could have been longer. "Satisfy the run shape" is a condition on
+   **both** elements: the earlier one must be able to be in a run at all — no
+   right origin — and the later one must continue it. An element carrying an
+   explicit right origin can neither start a run nor sit inside one, so whatever
+   follows it begins a new record however well it would otherwise continue.
+4. A run record has `count` ≥ 2. One element is an element record.
+5. Parent flag `1` is used whenever it applies; spelling the same parent out as
+   flag `2` is invalid.
+6. Varints are minimally encoded.
+7. **A run's deleted bitmap has zero in every bit past the last element.** A run
+   of five occupies five bits of one byte; the other three are not spare, they
+   are required to be zero. Left free they would give one document eight
+   spellings per partial byte, which is the one thing canonical form forbids.
+8. No trailing bytes after the last record.
+
+A reader **rejects** every violation above, all of which are checkable while
+decoding. Maximality reduces to one local rule, stated over a *pair*:
+
+> The first element of any record must not be able to continue the element
+> immediately before it — where "able to" requires the earlier element to have
+> **no right origin**, and the later one to be a right child of it with
+> consecutive sequence number on the same replica and no right origin of its own.
+
+An element record that could have joined the previous element fails it, and so
+does a run whose first element could have extended the preceding run, which is
+the same condition stated once.
+
+**The right-origin half of that condition is not decoration.** An earlier
+draft omitted it, and both codecs — written independently from that draft, as
+§13.11 records — implemented a decoder that rejected documents its own encoder
+produced. The shape is an element carrying an explicit right origin followed by
+a right child of it with the next sequence number: the encoder cannot begin a
+run there, so it writes two records, and a rule that ignores the earlier
+element's right origin then calls its own correct output non-canonical.
+
+Rejecting non-canonical input is not pedantry: a reader that accepts two
+spellings of one document turns the byte-identity check into a check of
+whichever spelling the writer happened to choose.
+
+#### Measuring it honestly
+
+The 100k document §13.9 measured is a **single forward chain** — one replica
+typing left to right, never deleting. That is the best case this format has: it
+collapses to one run record plus a bitmap, roughly one byte per element, and
+reporting it alone would overstate the format by a wide margin.
+
+So the metric reports **both**:
+
+- the **chain** case, which is what the JSON number was measured on and the only
+  way to compare like with like; and
+- a **fragmented** case — several replicas interleaved, a realistic proportion of
+  tombstones, backward runs among the forward ones — where most elements cannot
+  join a run and pay the full element-record price.
+
+The fragmented figure is the one to quote when asking whether this reaches §8.
+A format whose headline number comes from its best case is a format nobody has
+measured.
+
+**Predicted from the layout above, before any codec existed**, at 100k elements,
+with the measurement beside it:
+
+| Case | Predicted | Measured |
+|---|---|---|
+| chain (one maximal run) | 1.13 bytes/element | **1.13** |
+| fully fragmented (no runs at all, every parent and right origin explicit, four replicas) | 16.00 bytes/element | **8.45** on the fragmented document actually built |
+
+The prediction was recorded so the measurement could disagree with it. The chain
+matched exactly. The fragmented document came in under its bound because the
+bound assumed no run ever forms and every parent is spelled out, while a real
+fragmented document still chains most parents to the previous element — the
+prediction was a worst case, and it holds as one. §13.9 has the full table
+including §8's 600k stress case.
+
+#### What a reader rejects
+
+Every one of these is an error naming what was wrong, never a partial document:
+
+- Unrecognised magic, version, body kind, record tag or operation tag.
+- Reserved flag bits set; parent kind `3`.
+- Bit 4 set on a run record.
+- A replica index past the end of the table.
+- Parent kind `1` on the first record of a body.
+- A value that is not exactly one UTF-8 code point, or is a lone surrogate.
+- A non-zero bit past the last element of a run's deleted bitmap.
+- Truncated input, or bytes remaining after the declared element or operation
+  count is met.
+- Any canonical-form violation from the list above.
 
 ### Serialisation lives in Editor.Infrastructure
 
@@ -538,19 +796,42 @@ lock keyed by `document_id`, reusing the 50 ms batching window from §8 so the
 lock is taken once per batch rather than once per operation. Ops become visible
 in `server_seq` order because the batch commits under the lock.
 
-### Wire and trace encoding — normative
+### JSON encoding — normative
 
 All 64-bit values (`Seq`, `server_seq`, and any counter that can exceed 2^53)
-serialize as **decimal strings** in JSON — on the wire, in snapshots, and in
-conformance traces. The TypeScript side parses them as `BigInt`.
+serialize as **decimal strings** in JSON — in snapshots read for diagnosis, in
+conformance traces, and anywhere else the normative form appears. The TypeScript
+side parses them as `BigInt`.
 
 JSON numbers are IEEE 754 doubles. Values above 2^53 do not round-trip, which
 would break the byte-identical requirement in §9 silently and only after a
 replica had been running long enough to matter.
 
-Every operation and message carries a `v` protocol-version field from the first
-commit. Adding one after the conformance corpus and client IndexedDB schema
-exist is a migration; adding it now is a field.
+**This rule binds the JSON form only.** It exists because JSON cannot represent
+a 64-bit integer, which is a fact about JSON. The binary form of §6 encodes the
+same values as varints and has no such problem — restating the decimal-string
+rule there would be cargo cult, not consistency.
+
+### Versioning — both forms
+
+Every operation and message carries a protocol version from the first commit.
+Adding one after the conformance corpus and the client's IndexedDB schema exist
+is a migration; adding it now is a field.
+
+It appears differently in each form, carrying the same meaning:
+
+- **JSON:** a `v` field.
+- **Binary:** the header's version byte (§6).
+
+**An unrecognised version is rejected in both forms**, with a structured error
+naming the versions the reader supports. Never a best-effort parse, in either
+form, for any reason.
+
+A codec that guesses at a format it does not know produces a document that is
+wrong but well-formed — and this system's entire job is to make every replica
+agree. Every replica agreeing on a corrupt document is not a degraded outcome;
+it is the precise failure the project exists to prevent, arrived at by a path
+that leaves no error behind. Refusing to parse is loud, local, and recoverable.
 
 ### Run operations
 
@@ -683,12 +964,39 @@ measurement point is not a falsifiable claim.
 | p99 < 150 ms, client keystroke → remote client render | 20 concurrent editors, loopback network |
 | 1,000 concurrent connections per instance at < 2 GB RSS | connections spread over 100 documents, 10 each |
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
+| Document load, **browser**, 100k live characters + 500k tombstones | reported, no threshold — see below |
 
-The document-load target is a **server-side** number. The browser replica has no
-equivalent target in this phase; if one is wanted later it constrains the
-snapshot format and must be specified separately. Note also that 500k
-accumulated tombstones implies GC is not keeping up — this is a stress target,
-not a steady state.
+**Document load is two numbers, not one.** The original §8 scoped the 500 ms
+target to the server and said explicitly that a browser target, if wanted later,
+"constrains the snapshot format and must be specified separately". That
+condition has now fired: Phase 2's measurement is what moved the storage and
+wire form to binary (§6), so the browser figure is specified here.
+
+Both numbers are required, and each names where it is measured, because
+"document load" without a measurement point is not a falsifiable claim:
+
+- **Server-side**, C#, from snapshot plus tail, cold cache. Target < 500 ms.
+- **Browser**, the TypeScript core of §9, in **headless Chromium** on a
+  **standard GitHub-hosted `ubuntu-latest` runner** (2 vCPU, 7 GB) — the
+  hardware class is part of the number, and the exact Chromium version is
+  recorded alongside each measurement. **Cold** means a fresh page load with
+  **empty IndexedDB**: the first-time-user case, where the document arrives over
+  the network and nothing is cached. A warm figure may be reported alongside it
+  but the cold one is the number that matters.
+
+The browser figure carries **no threshold in this phase** — it is reported, the
+way §6's snapshot metric was reported, because setting a bound before anyone has
+seen the number is how §8 acquired a 500 ms target nothing had measured. It will
+be worse than the server figure and it is the one that decides whether this
+works on a slow connection.
+
+Measured by `scripts/browser-metrics.sh`, and by the `browser-metrics` CI job on
+the runner class named above. §13.9 carries the first readings; the short version
+is that §8's document takes about six seconds in a browser, and that placement —
+not parsing, and not the network — is where it goes.
+
+Note also that 500k accumulated tombstones implies GC is not keeping up — this
+is a stress target, not a steady state.
 
 ## 9. Client
 
@@ -791,17 +1099,18 @@ contradicting a cited paper.
 `versionVector` is optional and maps replica id to a decimal-string `Seq` high
 water mark (§6).
 
-#### Normalised result format (v1)
+#### Normalised result format (v2)
 
 Each runner writes exactly this, and the comparison is `diff` over the bytes:
 
 ```jsonc
 {
-  "v": 1,
+  "v": 2,
   "implementation": "csharp",              // or "typescript"; EXCLUDED from comparison
   "results": [
     {
       "name": "rga-backward-interleaving",
+      "snapshot": "4352445401010100…",     // §6 binary snapshot, lowercase hex
       "text": "abx",                        // final text after the last op
       "replicaTexts": {                     // every replica's final text
         "00000000-0000-0000-0000-000000000001": "abx",
@@ -816,6 +1125,22 @@ Each runner writes exactly this, and the comparison is `diff` over the bytes:
 `replicaTexts` is present so convergence is visible in the artefact itself rather
 than asserted only inside a runner: a trace where replicas disagree is a failure
 you can see in the diff.
+
+**`snapshot` is what makes the binary encoding a build requirement rather than a
+local assertion.** Each runner encodes the document per §6 and writes the bytes
+as hex, so two implementations that disagree about the encoding produce different
+artefacts and the comparison fails — exactly as it does for an algorithm
+disagreement. Asserting the round trips separately on each side would prove each
+codec self-consistent and say nothing about whether the two agree.
+
+Before writing that hex, each runner checks both directions locally, because a
+failure there names the document rather than showing up as an opaque hex diff:
+
+- `binary → JSON → binary` is byte-identical.
+- `JSON → binary → JSON` is byte-identical.
+
+Version 1 of this format had no `snapshot` field; it was added when §6 made
+binary the storage and wire form.
 
 Serialisation is pinned, because "byte-identical" is otherwise not well defined
 across two languages:
@@ -882,7 +1207,9 @@ reviewed. At the end of each phase, stop and report.
 | 0 | Repo, solution, Docker Compose, CI, `AGENTS.md` | See below — the original "empty suites" gate had no signal |
 | 1 | `Crdt.Core` **and the TypeScript core**, property tests, conformance runner | All 8 invariants pass 10,000 randomized cases; ≥85% mutation score; transcribed fixed traces match across both implementations |
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
-| 3 | SignalR hub, auth, causal delivery | Two real clients converge; auth tests pass |
+| 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
+| 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
+| 3b | Causal delivery over the wire, scale-out | Two real clients converge; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test |
@@ -897,6 +1224,22 @@ and (f) run a secret scan.
 
 An empty test suite passing proves nothing, and `vitest` exits non-zero with no
 test files unless told otherwise.
+
+**Phase 2.5 exists because the hub and the codec must not change together.**
+Phase 2's measurement moved the storage and wire form to binary (§6, §13.9), and
+the wire form is an input to Phase 3's hub. Doing both in one phase means a red
+convergence test cannot say which of the two moved. The scale dimension and the
+mutation ratchet ride along because Phase 3's fan-out is where the
+correct-at-test-size, fatal-at-real-size class recurs, so the instrument has to
+exist before the phase that needs it.
+
+**Phase 3 is split by failure mode, not by size.** In Phase 3 a failing test
+means a security property is absent — that is the only thing it can mean. In
+Phase 3b a failing test might mean the property is absent, or the test is wrong,
+or a timing assumption slipped. Those want different reviewer attention, and
+reviewing them together means the security tests get skimmed on the way to the
+concurrency work. Run expansion sits in Phase 3 because it is ingest-path
+validation, and because 3b needs it working.
 
 **Phase 1 builds both cores together.** The TypeScript replica was originally
 written in Phase 4 and first compared against C# in Phase 5, which meant
@@ -926,6 +1269,57 @@ core in React rather than writing a second one.
   you believe a test is wrong, argue for changing this spec first.
 - **Say when you are unsure.** Distributed systems bugs hide in the cases where
   the implementer felt "this probably works." Flag those explicitly.
+
+### Sabotage the checks, on a schedule
+
+**Every check that exists to catch divergence gets deliberately broken on one
+side, periodically, to confirm it fires.** Not as a habit someone remembers — as
+a standing practice with a record of when it was last done.
+
+This has been performed twice and found something both times. In Phase 0 the
+architecture test that proves `Crdt.Core` references nothing outside the BCL was
+sabotaged by adding a forbidden reference, and it turned out the reflection check
+missed a *declared* reference the compiler had elided; both halves exist now
+because of it. In Phase 2.5 the cross-implementation binary comparison was
+sabotaged by dropping a run-encoding guard, the comparison did **not** fire, and
+investigating why produced a real bug in §6 that both codecs had implemented
+identically (§13.11).
+
+A green check is evidence about the code only if the check can go red. That is
+not a property anyone can read off the source; it has to be demonstrated. When
+sabotage does *not* produce a failure, the finding is not "the check is broken" —
+it is "the corpus does not reach this shape", and that is the more useful of the
+two answers.
+
+### Hand-written fixtures for every canonical form
+
+**Wherever this specification defines a canonical form, the suite carries
+hand-written documents the specification says are VALID that neither
+implementation generates.**
+
+Round-trip testing defines codec correctness as encoder-decoder agreement, which
+is circular: an encoder that never emits a legal shape and a decoder that rejects
+it agree perfectly and are both wrong. The property that actually matters is that
+**a decoder accepts every document the format admits**, and only a fixture
+written by hand from the specification can test it — by construction, the encoder
+cannot produce the cases that would expose the gap.
+
+The refusal fixtures are the mirror of this and are not a substitute: they prove
+a decoder rejects what the format forbids. Both directions are needed, and only
+the acceptance direction is circular without hand-written input.
+
+### No phase is reported complete without a CI preflight
+
+**`scripts/phase-preflight.sh` runs before any phase report, and a phase with any
+red job is not reported complete.** The script queries the actual CI status of
+the branch head; its output goes in the report.
+
+This is structural rather than a matter of diligence, deliberately. Phase 2.5's
+mutation gate was red for six consecutive pushes while six of seven jobs were
+green, and it went unnoticed because the report format had a slot for what was
+built and no slot for whether the build agreed. A checklist item that exists only
+in someone's intention is a checklist item that gets skipped exactly when things
+are busy.
 
 ## 13. Decision log
 
@@ -1112,9 +1506,111 @@ Round 3 is the instructive one: four plausible tests, written against the right
 file, moved coverage by exactly zero. Reaching the branch needed an argument
 about when the code could execute, not more scenarios.
 
+**The gate is now a ratchet.** The committed score is the floor, and any
+decrease fails CI regardless of the absolute number. An 85.44% that clears an
+85% threshold after a 1.02-point drop is exactly the erosion a threshold is
+supposed to catch and structurally cannot: a fixed bar only notices the last
+step of a slide, and by then the headroom that would have paid for the fix is
+gone.
+
+The known-undetected list lives in `mutation-floor.json` and
+`scripts/mutation.sh` enforces it. Improving coverage is an ordinary commit:
+cover a mutant, drop its entry. Giving coverage up requires adding an entry
+*and* an argued exception recorded in this section, naming what was removed and
+why the coverage it provided is not worth keeping. There is no third option,
+and in particular "the score went down but it still passes" is not a sentence
+the build will accept — nor is "the score went up", which is now known to mean
+very little on its own.
+
+A set comparison is exact by nature, which is what a tolerance could never be: a
+tolerance on a percentage would have to be about the size of the erosion being
+detected, and would therefore defeat the check.
+
+**The score is stable on one machine and is not stable across machines, and this
+was got wrong once.** An earlier draft of this section claimed the same commit
+produces identical status counts locally and on CI. That claim was made from
+four runs on a single machine plus one CI run predating the §13.10 scale cases,
+and CI disproved it immediately: commit `d20bc0c` scored **88.12%** locally
+(220 killed, 10 timed out, 17 survived) and **88.89%** on CI (216 killed, 16
+timed out, 15 survived). Two mutants that survive here time out there.
+
+The mechanism is that **a timeout counts as a detection**, which is right — a
+mutant that hangs the suite has been caught — but it means a slower machine
+detects mutants a faster one does not, and reports a *higher* score for
+identical code. It is not the scale cases: bounding them to 100 elements changes
+neither the score nor the timeout count here. It is the runner.
+
+That was first answered by enforcing the ratchet **in CI only**, so that the
+comparison at least happened between comparable runs. It was the right diagnosis
+and an insufficient fix, for the reason recorded below. The identity-based
+ratchet that replaced it is enforced **everywhere**, because it does not depend
+on timing at all. The two permanent guards — no tests discovered, nothing
+killed — always did, and still do.
+
+**The floor was hardware-coupled, and the very next commit proved it.** Pinning
+the ratchet to CI made the number comparable between runs; it did not make it a
+property of the code. A change to the runner image, its CPU allocation, or how
+loaded it is moves the timeout count and therefore the score, with no commit
+touching `Crdt.Core` at all — upward when the runner gets slower, since a slower
+machine detects mutants a faster one does not.
+
+The prediction was written into this section and disproved within the hour.
+Commit `9ffe234` changed `PROJECT_SPEC.md`, a script, and two files in
+`Editor.Infrastructure` and the client — **not one line of `Crdt.Core` or of
+`Crdt.Core.Tests`, which are the only things Stryker mutates or runs.** CI's
+score went 88.89% to 89.27%, because it timed out eight more mutants than the
+run before. A gate that fails on a diff it cannot possibly be measuring is not a
+gate, it is a coin toss with a good reputation.
+
+**So the ratchet stopped keying on the score.** `mutation-floor.json` now lists
+*which* mutants are known to go undetected, by file, line, column and mutator,
+and the build fails when a mutant appears outside that list. Coverage erosion is
+"something stopped being caught", and that is what the list measures directly:
+
+- A mutant flipping between `Killed` and `Timeout` never appears in the list at
+  all, so the runner's speed cannot move the check.
+- The list is the **union** of what has been observed undetected, so a fast
+  machine surfacing a mutant a slow one timed out is already accounted for —
+  every machine's undetected set is a subset of it.
+- Entries that *were* detected this run are reported, never failed. The script
+  cannot tell "a new test kills it" from "this runner timed it out", so it hands
+  the judgement over instead of guessing. Cleanup is a deliberate act.
+- The failure message names the mutants rather than a percentage, which is the
+  practical difference: "three mutants at `Replica.cs:317-319` stopped being
+  caught" is actionable where "86.97%, was 88.89%" is a starting point for an
+  investigation.
+
+The score is still computed and printed. It is a useful number to watch and a
+bad thing to gate on, and this section is the record of learning that the
+expensive way — twice. The first version compared it across machines and flapped;
+the second pinned it to CI and still moved with the runner. Stryker's own 85%
+break threshold stays as an absolute backstop underneath all of it.
+
+**The rule that survives all of this:** if the timeout count climbs, the score is
+measuring the clock. Running the §13.10 scale cases at full size once read 89.66%
+with thirty timeouts, five of them mutants that had survived moments earlier —
+the score rose while nothing new was caught. `scripts/mutation.sh` bounds
+document size under mutation (`CRDT_SCALE_ELEMENTS`) for that reason, and it is
+still worth doing even though it turned out not to be the cross-machine cause.
+
+**Demonstrated, not assumed.** Deleting one of the three `Import` tests still
+clears Stryker's own 85% break threshold — 86.97%, so Stryker exits 0 and the
+build would have passed. The ratchet fails it, and says why:
+
+```
+Coverage eroded: 3 mutant(s) went undetected that are not known:
+    Replica.cs:317:17:Statement mutation
+    Replica.cs:318:21:String mutation
+    Replica.cs:319:23:String mutation
+```
+
+Those three are the `Import` guard against a snapshot naming a parent it does not
+contain. Naming them is the practical gain over a percentage: the message is the
+diagnosis rather than the start of one.
+
 `scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
-permanently. They are what caught the false 0.00%, and a gate that cannot fail
-loudly is not a gate.
+permanently, alongside the ratchet. They are what caught the false 0.00%, and a
+gate that cannot fail loudly is not a gate.
 
 One survivor found along the way is genuine rather than tooling: flipping the
 `Seq` half of the `ElementId` comparison changes nothing observable, because two
@@ -1214,6 +1710,135 @@ or incremental encoding), or the encoding changes. Deciding is cheap now and
 expensive after Phase 4 binds the format into the client's IndexedDB schema,
 which is why §6 asked for the number in Phase 2.
 
+**Resolved: the encoding changes.** §6 now splits the roles — JSON stays
+normative, binary becomes the storage and wire form. Three facts decided it.
+
+*The overhead is structural, not incidental.* An element carries an id, a
+value, a parent, a side, an optional right origin, and a deleted flag: on the
+order of 50 bytes of actual information. JSON spends 222.8. The gap is field
+names repeated per element, 16-byte replica ids written out per reference,
+64-bit counters as decimal strings, and punctuation — none of which a tokeniser
+can skip, which is why parsing dominates the load time rather than the database
+does.
+
+*The stress case is four times worse than the case measured.* §8 asks for 100k
+live characters **and 500k tombstones**, and a tombstone is a full element in
+this encoding — it must be, because it can still be named as a `RightOrigin`.
+Six hundred thousand elements at 222.8 bytes is roughly 130 MiB to move before
+it reaches a browser.
+
+*Those tombstones are realistic, not pessimistic.* Phase 1 established that
+causal stability alone does not license collecting a tombstone, precisely
+because a `RightOrigin` can name one (§5, and the collection rule's four
+conditions). Accumulation is the expected behaviour of a correct implementation,
+not evidence of a broken one.
+
+The savings are structural too, and that is the reason to expect them to hold:
+interning replica ids into a per-snapshot table replaces a 16-byte value with a
+small index at every reference, varints replace decimal strings, and sequential
+typing — the most common editing pattern there is — produces long runs of
+consecutive `(replica, seq)` along a parent chain, which the run form collapses.
+
+**Measured, after the codecs existed.** Three documents, the same machine as
+above:
+
+| Document | JSON | Binary | Ratio |
+|---|---|---|---|
+| chain — 100k, one replica typing | 22,277,866 B (222.78/el) | 112,541 B (**1.13**/el) | 198× |
+| fragmented — 100k, four replicas, explicit right origins, 75% deleted | 23,379,876 B (233.80/el) | 845,359 B (**8.45**/el) | 27.7× |
+| **§8's case** — 600k: 100k live + 500k tombstones | 141,163,181 B (235.27/el) | 5,512,023 B (**9.19**/el) | 25.6× |
+
+The chain came out at 1.13 bytes per element, which is what the layout's own
+arithmetic predicted before a codec existed. The fragmented figure beat the
+predicted 16.00 worst case, because even a run-hostile document still chains
+most parents to the previous element.
+
+**§8's case is 141 MiB of JSON and 5.3 MiB of binary.** That is the number the
+decision was about, and it is settled.
+
+**What is not settled: the load target is still missed, for a different
+reason.** §8's document loads server-side in **1.3–2.1 s** against a 500 ms
+target. Splitting the cost says why:
+
+| | parse (bytes → elements) | place (elements → tree) |
+|---|---|---|
+| §8's 600k case | 540 ms | **1,164 ms** |
+
+Parsing 5.3 MiB is no longer the problem — the equivalent JSON parse was
+4,613 ms. **Placement is**, and no encoding change touches it: `Import` replays
+the §5 sibling ordering for every element, deliberately, so that a snapshot
+written wrongly builds a different tree rather than restoring a corrupt one
+(§13.9's `Import` note). Six hundred thousand replays is simply a lot of work.
+
+This is recorded, not fixed, and it is not Phase 2.5's to fix: §8's targets are
+load-test targets and Phase 7 owns them. What Phase 2.5 owed was the format
+decision and the number, and both are now here.
+
+**The two options are written out now so that the decision arrives with them
+already on the table.** Both change what a snapshot *means*, not how it is
+spelled, which is why neither belongs beside a codec swap.
+
+*Option A — a snapshot stores placement results rather than replaying them.*
+Today `Import` re-derives every element's position from the §5 sibling rule, so a
+snapshot is a set of claims that the reader checks. Under A it becomes a
+description of a tree the reader trusts: sibling order is stored, and loading is
+a linear rebuild instead of 600,000 comparisons.
+
+> What it costs: the guarantee that a wrongly written snapshot produces a
+> different tree rather than a quietly corrupt one. That guarantee is the whole
+> reason `Import` replays placement (§13.9 above), so trading it away needs
+> something in its place — a checksum over the stored order, a periodic audit
+> that re-derives and compares, or restricting trust to snapshots this replica
+> wrote itself, where the writer and reader share a version. The last is the
+> narrowest and probably the right one: a snapshot arriving from elsewhere is
+> exactly the case the replay defends against.
+
+*Option B — a snapshot stops being the whole document.* Load the visible text
+plus the elements needed to place incoming operations, and fetch the rest lazily
+or in chunks. §8's case is 100k live characters among 600k elements, so five
+sixths of the work is tombstones nobody is about to read.
+
+> What it costs: a replica that has not loaded everything cannot answer every
+> question about the document, and §5's placement rule can reach any element —
+> a `RightOrigin` may name a tombstone in an unloaded chunk. That makes
+> chunking a change to the algorithm's preconditions, not just to I/O, and it
+> interacts with GC (§5) which is the other mechanism for making tombstones stop
+> costing anything.
+
+They are not exclusive. A does more for the common case and B does more for §8's
+stress case, and the honest reading of the measurement is that A alone probably
+reaches the target while B is what makes the target insensitive to how long a
+document has been alive.
+
+**And the browser is worse, as expected.** §8's second number, from the
+`browser-metrics` CI job on the `ubuntu-latest` runner §8 names — the §9
+TypeScript core in **headless Chromium 151.0.7922.34**, 4 vCPU, cold meaning a
+fresh context with empty IndexedDB:
+
+| Case | fetch | parse | place | text | **cold total** | warm total |
+|---|---|---|---|---|---|---|
+| chain, 100k | 4 ms | 38 ms | 236 ms | 19 ms | **302 ms** | 297 ms |
+| §8's 600k case | 38 ms | 493 ms | 1,683 ms | 291 ms | **2,508 ms** | 2,045 ms |
+
+Two and a half seconds for §8's document, on a fast network with a 5.3 MiB
+payload. Reading the same bytes back from IndexedDB saves almost nothing,
+because the fetch was never the cost — which is the useful part: a warm cache
+does not rescue this, and neither will a faster network.
+
+**The hardware matters enough to be part of the number, which is why §8 names
+it.** The same commit measured **5,964 ms** for the 600k case on the 4 vCPU
+development container this was written in — more than twice CI's figure on a
+nominally identical core count. Quote the CI figure; treat a local run as the
+shape of the answer rather than the answer.
+
+**The same term dominates on both sides.** Placement is 1,683 ms of the
+browser's 2,508 and 1,164 ms of the server's ~1,700, in two independently
+written implementations. That is not two performance bugs; it is the cost of
+replaying §5's placement rule 600,000 times, and it is the thing to fix when
+§8's targets are addressed. The encoding was worth changing — 141 MiB became
+5.3 MiB, JSON parsing fell from 4.6 s to 0.5 s server-side, and the browser's
+parse is 493 ms of a 2,508 ms load — and it was not the whole problem.
+
 **The metric also found two defects that no correctness test had reached.**
 Both were only visible at this size, which is the argument for measuring at
 realistic scale rather than at test scale:
@@ -1233,3 +1858,117 @@ Neither is a specification change. They are recorded because the conclusion is:
 the correctness suite verifies the algorithm at sizes where a linear-space bug
 and a quadratic-time bug are both invisible, and only a test that builds a
 realistic document exposed them.
+
+### 13.10 The generator explored shape exhaustively and scale not at all
+
+The stack overflow in §13.9 is the most instructive failure in the project so
+far, and the instructive part is not the bug. It is that eight invariants at
+10,000 randomised cases each, a nine-trace cross-implementation corpus, and an
+87% mutation score all passed over it.
+
+**Depth equals document length on left-to-right typing** — each character is a
+right child of the previous one — so a recursive traversal overflows at a
+document length users reach in an afternoon. That is the single most common
+thing anyone does to a text editor.
+
+It survived because every generated scenario built a few dozen elements. The
+magnitudes were literals in the generator: runs of two to four characters, at
+most five edits a round, a prefix of at most three. Nothing in the suite was
+wrong; the dimension simply was not there.
+
+Worse, randomisation works *against* finding it. A generator that picks
+positions uniformly produces balanced trees. The pathological shape is the
+degenerate one — a single chain — and that is precisely what uniform random
+insertion does not produce. More cases would never have found this. Only a
+different dimension would.
+
+**Scale is now drawn explicitly** (`ScenarioScale`), reported on every scenario,
+and printed in failure output beside the seed. Large scenarios are rare on
+purpose — roughly one seed in 250, about forty across the 10,000-case gate,
+reaching around 2,000 elements — because their value is in being reached at all,
+and because typing costs O(n²) in this implementation. `ScaleTests` carries the
+few very large cases: 10,000 characters through real typing, and 50,000 and
+150,000 through the import path that Phase 2 proved equivalent to typing.
+
+The shrinker gained a size phase for the same reason. Delta debugging a
+two-thousand-step scenario needs O(n log n) replays of an O(n²) simulation and
+never finishes; truncating to a prefix costs O(log n) replays and answers "was
+this about the tail?" immediately. A shrinker that hangs turns a reproducible
+failure into an unreadable one, so the shape phase also runs against a replay
+budget.
+
+**One asymmetry is worth knowing.** On .NET a stack overflow cannot be caught:
+reintroducing the recursive traversal kills the test host rather than failing an
+assertion. That is still a red build and it is the only signal the platform
+offers. The TypeScript side throws a catchable `RangeError`, and its regression
+test asserts on it directly — which is how that fix was verified.
+
+**The general form, for Phase 3 onward:** a property suite that passes at every
+size it tests is evidence about those sizes only. Where cost is superlinear in
+something — document length, connection count, fan-out width — the suite must
+name that quantity as a dimension and draw it, because the failure mode is
+correct at every tested size and fatal at real ones, and nothing in a green
+build distinguishes the two.
+
+### 13.11 Writing the spec first put the same bug in both implementations
+
+§6's binary layout was written before either codec, on the reasoning that two
+implementations derived from one description disagree loudly when either is
+wrong, while a second derived from the first inherits its mistakes silently.
+That reasoning is sound and the approach is kept. It has a failure mode worth
+naming.
+
+**A mistake in the description reaches both implementations, and they agree.**
+The canonical-form rule for run maximality was drafted as: *the first element of
+any record must not be able to continue the element immediately before it*. Both
+codecs implemented exactly that, agreed byte for byte on the whole corpus, and
+were both wrong.
+
+The rule needs a condition on the *earlier* element too. An element carrying an
+explicit right origin can neither start a run nor sit inside one, so whatever
+follows it begins a new record however well it would otherwise continue. Without
+that half, a decoder rejects documents its own encoder produces: encode an
+element with an explicit right origin followed by a right child of it with the
+next sequence number, and the encoder correctly writes two records while the
+decoder correctly-by-the-draft calls them non-canonical.
+
+**How it was found is the point.** Not by the corpus, which passed. By
+deliberately breaking one implementation to check the cross-implementation
+comparison would notice — the first sabotage chosen was dropping exactly this
+guard, and the corpus did *not* notice, which meant the shape was uncovered.
+Investigating why produced the real bug. The check works: a second sabotage,
+dropping the deleted flag, failed the build immediately.
+
+Two things follow, both now in place.
+
+1. **The shape has a test on each side**, not a trace. Ordinary typing cannot
+   reach it — a right origin records what followed at insert time and tombstones
+   keep it there — so it needs either garbage collection (§5) or a directly built
+   snapshot. A user-level trace cannot express it, which is why the corpus was
+   silent.
+2. **Agreement between two implementations is not evidence of correctness when
+   both were written from one description.** It is evidence they read it the same
+   way. The corpus catches divergence; only reasoning about the specification,
+   or an independent check like the round trips against the normative JSON,
+   catches a shared misreading. This is the same lesson as §13.6, where a
+   100.00% hold rate turned out to measure the generator, arriving from the
+   other direction.
+
+**The practice this produced immediately found a second bug of the same class.**
+§12 now requires hand-written fixtures for every canonical form — documents the
+specification says are valid that neither implementation generates. Writing the
+first batch turned up that a run's deleted bitmap had **unconstrained bits past
+its last element**: a run of five occupies five bits of one byte, §6 said nothing
+about the other three, and both codecs ignored them on read. Two byte strings
+differing in those bits decoded to the same document, which is precisely the
+canonical-form violation the whole rule exists to prevent — and it makes
+`binary → JSON → binary` byte-identity a check of whichever spelling the writer
+chose. §6 now requires them to be zero and both readers reject a non-zero one.
+
+The fixtures caught something else, less serious and more instructive: the first
+draft of the two-byte-replica-index fixture used a 130-entry table over a
+one-element document, which §6's canonical form forbids — the table holds exactly
+the replicas the body names. The *re-encode* half of the fixture check caught it,
+which is the argument for that half existing. A fixture that is merely accepted
+proves the decoder is permissive; a fixture that is accepted and re-encodes to
+the same bytes proves it agrees with the encoder about what the document is.

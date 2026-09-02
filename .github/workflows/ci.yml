@@ -69,6 +69,32 @@ jobs:
       # PROJECT_SPEC.md §9: any divergence between the two cores fails the build.
       - run: ./scripts/conformance.sh
 
+  browser-metrics:
+    name: Browser document load metric
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+
+      - run: npm ci
+        working-directory: tests/browser
+
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+
+      # PROJECT_SPEC.md §8 requires two document-load numbers and names the
+      # runner class as part of the browser one, so this is where that figure
+      # comes from. It reports and never asserts: §8 gives it no threshold in
+      # this phase.
+      - name: Measure
+        run: node measure.mjs
+        working-directory: tests/browser
+
   mutation:
     name: Crdt.Core mutation score
     runs-on: ubuntu-latest
@@ -81,9 +107,11 @@ jobs:
 
       - run: dotnet tool restore
 
-      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage. The
-      # reduced case count keeps a per-mutant suite run to seconds; the full
-      # 10,000-case gate runs in the dotnet job above.
+      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage, and
+      # §13.7 makes it a ratchet: the floor in mutation-floor.json is what
+      # actually fails the build, in either direction. The reduced case count
+      # keeps a per-mutant suite run to seconds; the full 10,000-case gate runs
+      # in the dotnet job above.
       - name: Stryker
         env:
           CRDT_PROPERTY_CASES: "150"

@@ -10,6 +10,21 @@
 # one of 227 tested mutants as Survived — a score of 0.00% that the tool exited
 # 0 on, while the same suite killed those mutations when they were injected by
 # hand. A gate that cannot fail loudly is not a gate.
+#
+# There are three guards, and the third is the ratchet: mutation-floor.json lists
+# WHICH mutants are known to go undetected, and a mutant appearing outside that
+# list fails the build. Stryker's own 85% break threshold stays as a backstop,
+# but it cannot see erosion — 85.44% clears an 85% bar after a 1.02-point drop,
+# which is how Phase 2 gave back coverage with nothing going red.
+#
+# The ratchet keys on identity rather than on the score because the score moves
+# with the hardware (PROJECT_SPEC.md §13.7). A timeout counts as a detection, so
+# a slower runner detects mutants a faster one does not: commit 9ffe234 touched
+# neither Crdt.Core nor its tests and the score still went 88.89% to 89.27%
+# because CI timed out eight more mutants. A mutant flipping between Killed and
+# Timeout never appears in the undetected list at all, so this check does not
+# move with the runner — and the list is the union of what has been observed, so
+# a fast machine surfacing what a slow one timed out is already accounted for.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -17,6 +32,13 @@ cd "$(dirname "$0")/.."
 # Mutation runs execute the suite once per mutant; the full 10,000-case count
 # would take hours and add nothing. The 10,000-case gate runs separately in CI.
 export CRDT_PROPERTY_CASES="${CRDT_PROPERTY_CASES:-150}"
+
+# Same reasoning for size (PROJECT_SPEC.md §13.10). Unbounded, the scale cases
+# make the suite slow enough that mutants which merely slow it down are recorded
+# as timed out — detected without anything having caught them — and the counts
+# start depending on how fast the machine is. §13.7's ratchet compares the score
+# exactly, which is only sound while the score is deterministic.
+export CRDT_SCALE_ELEMENTS="${CRDT_SCALE_ELEMENTS:-2000}"
 
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
@@ -36,7 +58,8 @@ fi
 
 report=$(ls -dt StrykerOutput/*/reports/mutation-report.json 2>/dev/null | head -1 || true)
 if [[ -n "$report" ]]; then
-  python3 - "$report" <<'PY'
+  set +e
+  python3 - "$report" mutation-floor.json <<'REPORT_CHECK'
 import collections, json, sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -58,10 +81,68 @@ if tested > 0 and counts["Killed"] == 0:
     print(
         "\nEvery tested mutant survived. That is the signature of Stryker not "
         "running the tests, not of a suite that catches nothing — see "
-        "PROJECT_SPEC.md §13.7 and stryker-net#3094."
+        "PROJECT_SPEC.md 13.7 and stryker-net#3094."
     )
     sys.exit(1)
-PY
+
+detected = counts["Killed"] + counts["Timeout"]
+denominator = detected + counts["Survived"] + counts["NoCoverage"]
+if denominator == 0:
+    print("\nNo mutants were tested, so there is nothing to ratchet.")
+    sys.exit(1)
+
+# Reported, never gated. The score is a function of the hardware as much as of
+# the suite; §13.7 records how that was found out.
+print(f"mutation score: {detected / denominator * 100:.2f}%  (reported, not gated)")
+
+def identify(path, mutant):
+    start = mutant["location"]["start"]
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    return f'{name}:{start["line"]}:{start["column"]}:{mutant["mutatorName"]}'
+
+undetected = {
+    identify(path, mutant)
+    for path, file in report.get("files", {}).items()
+    for mutant in file.get("mutants", [])
+    if mutant.get("status") in ("Survived", "NoCoverage")
+}
+
+with open(sys.argv[2], encoding="utf-8") as handle:
+    known = set(json.load(handle)["undetected"])
+
+appeared = sorted(undetected - known)
+gone = sorted(known - undetected)
+
+print(f"undetected: {len(undetected)}   known: {len(known)}")
+
+if gone:
+    # Not a failure: an entry can vanish because a test now kills it, or merely
+    # because this machine timed it out. Only the first is worth acting on, and
+    # the script cannot tell them apart, so it reports and leaves the judgement.
+    print(f"\n{len(gone)} known entries were detected this run. If a test now covers")
+    print("them, drop them from mutation-floor.json; if the runner just timed them")
+    print("out, leave them (§13.7).")
+    for entry in gone[:10]:
+        print(f"    {entry}")
+
+if appeared:
+    print(f"\nCoverage eroded: {len(appeared)} mutant(s) went undetected that are not known:")
+    for entry in appeared:
+        print(f"    {entry}")
+    print(
+        "\nThis fails regardless of the score, which is the point: a percentage\n"
+        "only notices the last step of a slide, and it moves with the runner.\n"
+        "Either cover these, or add them to mutation-floor.json with an argued\n"
+        "exception in PROJECT_SPEC.md §13.7 saying why the coverage is not worth\n"
+        "keeping."
+    )
+    sys.exit(1)
+REPORT_CHECK
+  ratchet=$?
+  set -e
+  if [[ "$ratchet" -ne 0 ]]; then
+    exit "$ratchet"
+  fi
 fi
 
 exit "$status"
