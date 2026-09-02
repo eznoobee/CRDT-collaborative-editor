@@ -1,4 +1,11 @@
-import { BinaryFormatError, decodeSnapshot, encodeSnapshot } from './binary';
+import {
+  BinaryFormatError,
+  RunLengthExceededError,
+  decodeOperations,
+  decodeSnapshot,
+  encodeOperations,
+  encodeSnapshot,
+} from './binary';
 import { parseReplicaId, replicaIdToBytes, type ReplicaId } from './replicaId';
 
 /**
@@ -197,5 +204,136 @@ describe('canonical-form fixtures the encoder never produces', () => {
 
     expect(elements).toEqual([]);
     expect(versionVector.map((v) => v.count)).toEqual([41n, 7n]);
+  });
+});
+
+/**
+ * §6's run insert, from the same hand-written bodies the C# suite uses.
+ *
+ * The bytes below are written from the specification, not produced by either
+ * encoder. That is the point: two implementations agreeing on what they both
+ * generate is evidence they read the specification the same way, not that
+ * either read it correctly.
+ */
+const KIND_OPERATIONS = 0x02;
+const OP_RUN = 0x02;
+const RIGHT_ORIGIN_EXPLICIT = 0b0001_0000;
+
+function runFixture(
+  text: string,
+  options: { rightOrigin?: boolean; declaredCount?: number } = {},
+): Uint8Array {
+  const bytes: number[] = [...MAGIC, VERSION, KIND_OPERATIONS];
+  const table = options.rightOrigin ? [R(1), R(2)] : [R(1)];
+
+  varint(bytes, table.length);
+  for (const id of table) {
+    bytes.push(...replicaIdToBytes(id));
+  }
+
+  varint(bytes, 1);
+
+  bytes.push(OP_RUN);
+  bytes.push(PARENT_ROOT | SIDE_RIGHT | (options.rightOrigin ? RIGHT_ORIGIN_EXPLICIT : 0));
+  varint(bytes, 0);
+  varint(bytes, 0);
+
+  if (options.rightOrigin) {
+    varint(bytes, 1);
+    varint(bytes, 7);
+  }
+
+  // The first element's value is part of the insert body; the count and the
+  // remaining values follow it (§6).
+  const points = [...text];
+  value(bytes, points[0]!);
+  varint(bytes, options.declaredCount ?? points.length);
+  for (const point of points.slice(1)) {
+    value(bytes, point);
+  }
+
+  return new Uint8Array(bytes);
+}
+
+function varint(bytes: number[], value: number): void {
+  let v = BigInt(value);
+  while (v >= 0x80n) {
+    bytes.push(Number((v & 0x7fn) | 0x80n));
+    v >>= 7n;
+  }
+  bytes.push(Number(v));
+}
+
+function value(bytes: number[], point: string): void {
+  const utf8 = new TextEncoder().encode(point);
+  varint(bytes, utf8.length);
+  bytes.push(...utf8);
+}
+
+describe('run insert fixtures', () => {
+  it('expands into a chain rather than into siblings', () => {
+    const operations = decodeOperations(runFixture('hello'));
+
+    expect(operations).toHaveLength(5);
+    expect(operations.map((op) => (op.kind === 'insert' ? op.value : ''))).toEqual([
+      'h',
+      'e',
+      'l',
+      'l',
+      'o',
+    ]);
+
+    // §5 and §6: same parent and side for every element would make them
+    // siblings, and invariant 8 forbids exactly that.
+    for (let i = 1; i < operations.length; i++) {
+      const element = operations[i]!;
+      const previous = operations[i - 1]!;
+      if (element.kind !== 'insert' || previous.kind !== 'insert') {
+        throw new Error('expected inserts');
+      }
+      expect(element.parent).toEqual(previous.id);
+      expect(element.side).toBe('R');
+      expect(element.rightOrigin).toBeNull();
+      expect(element.id.seq).toBe(BigInt(i));
+    }
+  });
+
+  it("lets the run's first element carry a right origin", () => {
+    const operations = decodeOperations(runFixture('ab', { rightOrigin: true }));
+    const first = operations[0]!;
+    const second = operations[1]!;
+
+    if (first.kind !== 'insert' || second.kind !== 'insert') {
+      throw new Error('expected inserts');
+    }
+
+    expect(first.rightOrigin).not.toBeNull();
+    expect(second.rightOrigin).toBeNull();
+  });
+
+  it('re-encodes a hand-written run to the same bytes', () => {
+    for (const fixture of [runFixture('hello'), runFixture('ab', { rightOrigin: true })]) {
+      expect(encodeOperations(decodeOperations(fixture))).toEqual(fixture);
+    }
+  });
+
+  it('encodes left-to-right typing as one run', () => {
+    const operations = decodeOperations(runFixture('hello world'));
+    expect(encodeOperations(operations)).toEqual(runFixture('hello world'));
+  });
+
+  it('refuses a run of one', () => {
+    expect(() => decodeOperations(runFixture('a', { declaredCount: 1 }))).toThrow(BinaryFormatError);
+  });
+
+  it('refuses a run past the cap before expanding it', () => {
+    expect(() => decodeOperations(runFixture('ab', { declaredCount: 1000 }))).toThrow(
+      RunLengthExceededError,
+    );
+  });
+
+  it('honours a configured cap below the ceiling', () => {
+    expect(() => decodeOperations(runFixture('hello'), 4)).toThrow(RunLengthExceededError);
+    expect(decodeOperations(runFixture('hello'), 5)).toHaveLength(5);
   });
 });

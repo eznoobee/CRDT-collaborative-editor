@@ -371,6 +371,99 @@ public sealed class IngestValidationTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task A_pasted_run_lands_as_one_row_per_element()
+    {
+        // §6: the server expands runs into one row per element on ingest, so
+        // document_ops keeps one row per element and the primary key keeps
+        // deduplication a plain upsert. The client sends one record; Postgres
+        // gets five rows.
+        await using var session = await SessionAsync("run-ingest");
+
+        var encoded = session.Writer.Type("hello");
+
+        // One record on the wire, five operations after expansion. Without the
+        // first assertion this test would pass just as well against a client
+        // that sent five insert records, and would then be testing nothing
+        // about runs.
+        Assert.Single(RecordTags(encoded));
+        Assert.Equal(BinaryFormat.OpRun, RecordTags(encoded)[0]);
+
+        var result = await session.SubmitAsync(encoded);
+        Assert.Null(result.Code);
+        Assert.Equal(5, result.Accepted);
+
+        await using var scope = session.Factory.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<EditorDbContext>();
+        var rows = await context.DocumentOperations
+            .Where(row => row.DocumentId == session.Negotiated.DocumentId)
+            .OrderBy(row => row.Seq)
+            .ToListAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(["h", "e", "l", "l", "o"], rows.Select(row => row.Value));
+
+        // Chained, not siblings. Every element after the first names the one
+        // before it as its parent — §6 is explicit that assigning them all the
+        // same parent would reintroduce the interleaving invariant 8 forbids.
+        for (var i = 1; i < rows.Count; i++)
+        {
+            Assert.Equal(rows[i - 1].ReplicaId, rows[i].ParentReplica);
+            Assert.Equal(rows[i - 1].Seq, rows[i].ParentSeq);
+            Assert.Equal("R", rows[i].Side);
+        }
+    }
+
+    [Fact]
+    public async Task A_run_past_the_cap_is_refused_with_its_own_code()
+    {
+        // Distinct from malformed, because the fix is distinct: this client
+        // pasted too much at once and needs to split it.
+        await using var session = await SessionAsync("run-cap", limits: new Dictionary<string, string?>
+        {
+            ["Ingest:MaxRunCodePoints"] = "16",
+        });
+
+        var result = await session.SubmitAsync(session.Writer.Type(new string('a', 32)));
+
+        Assert.Equal(IngestRejection.RunTooLong, result.Code);
+    }
+
+    /// <summary>The record tags in an encoded batch, without decoding it.</summary>
+    private static List<byte> RecordTags(byte[] encoded)
+    {
+        // Header, then the replica table, then the record count: walked by hand
+        // so the assertion is about the bytes rather than about what the
+        // decoder chose to tell us.
+        var offset = 6;
+        var (tableLength, read) = Varint(encoded, offset);
+        offset += read + ((int)tableLength * 16);
+
+        var (records, countRead) = Varint(encoded, offset);
+        offset += countRead;
+
+        // Only the first tag is needed, and finding the rest means decoding.
+        return records == 0 ? [] : [encoded[offset]];
+    }
+
+    private static (ulong Value, int Read) Varint(byte[] bytes, int offset)
+    {
+        ulong value = 0;
+        var shift = 0;
+        var read = 0;
+
+        while (true)
+        {
+            var b = bytes[offset + read++];
+            value |= (ulong)(b & 0x7f) << shift;
+            if ((b & 0x80) == 0)
+            {
+                return (value, read);
+            }
+
+            shift += 7;
+        }
+    }
+
     private async Task<Session> SessionAsync(
         string subject, Dictionary<string, string?>? limits = null)
     {

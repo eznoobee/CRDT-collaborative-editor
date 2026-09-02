@@ -62,7 +62,18 @@ public sealed class IngestValidator
         IReadOnlyList<Operation> operations;
         try
         {
-            operations = OperationBinary.Decode(encoded.Span);
+            // The run cap goes into the decoder rather than being checked
+            // after it: a run is expanded during decoding, so a cap applied
+            // afterwards would have already paid for the expansion it exists to
+            // prevent (§6, §7).
+            operations = OperationBinary.Decode(encoded.Span, _limits.MaxRunCodePoints);
+        }
+        catch (RunLengthExceededException)
+        {
+            // Its own code: a client that pasted too much at once needs to know
+            // to split it, which is a different fix from the one a client
+            // sending malformed bytes needs.
+            return IngestResult.Reject(IngestRejection.RunTooLong);
         }
         catch (BinaryFormatException)
         {

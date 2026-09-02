@@ -26,6 +26,19 @@ public static class BinaryFormat
 
     public const byte OpInsert = 0x00;
     public const byte OpDelete = 0x01;
+    public const byte OpRun = 0x02;
+
+    /// <summary>
+    /// §7's cap on the code points one run may name, applied while decoding.
+    /// </summary>
+    /// <remarks>
+    /// A run naming four billion code points is one varint. Expanding it and
+    /// then checking the cap is a denial of service written into the format, so
+    /// the check happens before the allocation and the ceiling lives here, next
+    /// to the reader that enforces it. A deployment may configure a smaller cap
+    /// (§7); it cannot configure a larger one.
+    /// </remarks>
+    public const int MaxRunCodePoints = 256;
 
     public const byte FlagSideRight = 0b0000_0001;
     public const byte FlagDeleted = 0b0000_0010;
@@ -98,7 +111,7 @@ public static class BinaryFormat
 /// The whole point of the system is that they agree; agreeing on corruption is
 /// the failure it exists to prevent.
 /// </remarks>
-public sealed class BinaryFormatException : Exception
+public class BinaryFormatException : Exception
 {
     public BinaryFormatException(string message)
         : base(message)
@@ -111,6 +124,33 @@ public sealed class BinaryFormatException : Exception
     }
 
     public BinaryFormatException()
+    {
+    }
+}
+
+/// <summary>
+/// A run named more code points than the cap allows.
+/// </summary>
+/// <remarks>
+/// Distinct from a structural refusal because §7 gives it a distinct answer.
+/// A client that pasted too much at once needs to know to split it; a client
+/// sending bytes that are not a batch has a different bug, and telling them
+/// apart is the difference between a fix and a mystery.
+/// </remarks>
+public sealed class RunLengthExceededException : BinaryFormatException
+{
+    public RunLengthExceededException(string message)
+        : base(message)
+    {
+    }
+
+    public RunLengthExceededException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+
+    public RunLengthExceededException()
+        : base("A run exceeds the code-point cap (§7).")
     {
     }
 }

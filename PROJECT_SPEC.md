@@ -658,11 +658,52 @@ immediately preceding operation in this batch.
 **Delete** — tag `01`, then id (replica index varint, seq varint) and target
 (replica index varint, seq varint).
 
-**The run form of §6 stays reserved and is not specified here.** Runs on the wire
-need the ingest-side expansion that replays the placement rule per element, which
-is Phase 3's work; specifying a format now that nothing writes or reads would be
-a stub in the specification. Snapshots use runs today because the snapshot writer
-and reader both exist.
+**Run insert** — an insert record under a different tag, followed by a count and
+the remaining values. Everything up to and including the first element's value
+is byte-for-byte an insert record, which is what lets one reader serve both.
+
+| field | type |
+|---|---|
+| tag | `02` |
+| flags | 1 byte, as an insert record |
+| id | replica index varint, seq varint — the **first** element |
+| parent | absent for flags 0 and 1, else replica index varint + seq varint |
+| right origin | present only when bit 4 is set — the **first** element's |
+| value | the **first** element's, as an insert record |
+| count | varint, ≥ 2 and ≤ the §7 run cap |
+| values | `count − 1` × UTF-8 code point, for elements 1 … `count − 1` |
+
+Element *i* of the run has id `(replica, seq + i)`. Element 0 takes the record's
+parent, side and right origin. Every later element is a **right child of the
+element before it, with no right origin** — the placement a client produces by
+typing left to right, which is what §5's rule yields for consecutive insertions
+at one position.
+
+Unlike a snapshot run, the first element **may** carry an explicit right origin.
+A snapshot run record has nowhere to put one; this record does, and the case it
+serves — a paste into the middle of a document — is the common one rather than
+an edge case. Later elements never carry one, because each is placed against the
+element before it.
+
+A decoder **expands the run before anything else sees it** and rejects a `count`
+over the §7 cap **before allocating**, not after. A run naming four billion code
+points is one varint; expanding it first and checking the cap afterwards is a
+denial of service written into the format.
+
+Canonical form for the operation batch, in addition to the rules below: a run
+has `count` ≥ 2, runs are maximal **up to the cap**, and an insert record that
+could have joined the run before it is invalid. The cap is the one exception to
+maximality and it has to be: a paste of 300 code points is a run of 256 followed
+by a record that continues it, and a maximality rule with no exception would
+make that batch unencodable. So a record boundary is valid exactly where the
+record before it is a run already at the cap. The run shape here is **not** the snapshot's
+pairwise rule. It is one-sided: the later element must be a right child of the
+earlier one, with the next sequence number on the same replica and no right
+origin of its own. Nothing is required of the earlier element, because a run's
+first element may carry a right origin — it starts the record rather than
+continuing one, and a mid-document paste is precisely the case where it does.
+Only the snapshot form needs the two-sided rule, because a snapshot run record
+has nowhere to put a right origin at all.
 
 #### Canonical form
 
@@ -851,6 +892,13 @@ Expansion must **replay the placement rule** (§5) for each element in the run,
 chaining each element onto the previous one. It must not assign every element in
 the run the same parent and side — that would make them siblings and reintroduce
 exactly the interleaving invariant 8 forbids.
+
+Because expansion produces exactly the chain a left-to-right typist produces, a
+batch decoded from runs and one decoded from individual inserts are the same
+operations; §6's canonical form then re-encodes both to the same bytes. That is
+what makes the run form a transport optimisation rather than a second dialect,
+and it is testable: expanding a run and encoding the result must reproduce the
+run.
 
 ## 7. Security
 
