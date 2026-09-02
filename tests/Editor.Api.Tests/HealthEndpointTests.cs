@@ -1,16 +1,15 @@
 using System.Net;
-using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace Editor.Api.Tests;
 
 /// <summary>
 /// In-process checks of the API host. No Docker required.
 /// </summary>
-public sealed class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class HealthEndpointTests : IClassFixture<ApiFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly ApiFactory _factory;
 
-    public HealthEndpointTests(WebApplicationFactory<Program> factory) =>
+    public HealthEndpointTests(ApiFactory factory) =>
         _factory = factory;
 
     [Fact]

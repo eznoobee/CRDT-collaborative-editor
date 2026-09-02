@@ -36,6 +36,13 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_HTTP_PORTS: 8080
+      # No defaults, for the same reason POSTGRES_PASSWORD has none: the API
+      # refuses to start without an issuer (PROJECT_SPEC.md §7), and a value
+      # supplied here would be exactly the fallback §7 forbids — a stack that
+      # comes up authenticating against whatever was convenient at the time.
+      Oidc__Issuer: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
+      Oidc__Audience: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env}
+      Oidc__MetadataAddress: ${OIDC_METADATA_ADDRESS:?set OIDC_METADATA_ADDRESS in .env}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:
