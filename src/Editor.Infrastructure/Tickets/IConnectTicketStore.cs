@@ -18,4 +18,17 @@ public interface IConnectTicketStore
     /// was unknown, already redeemed, or expired. The three are deliberately
     /// indistinguishable to the caller.</returns>
     Task<ConnectionBinding?> RedeemAsync(string ticket, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether <paramref name="ticket"/> is currently redeemable.
+    /// </summary>
+    /// <remarks>
+    /// Advisory, and deliberately not a substitute for redeeming. It exists so
+    /// a connection with no ticket, an expired one, or one already spent can be
+    /// refused before a transport is established — a refusal the client can
+    /// actually observe. Single-use is still decided by <see cref="RedeemAsync"/>
+    /// and its one atomic operation; two callers can both see true here and
+    /// only one will redeem.
+    /// </remarks>
+    Task<bool> ExistsAsync(string ticket, CancellationToken cancellationToken);
 }

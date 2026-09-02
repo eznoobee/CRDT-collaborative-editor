@@ -114,6 +114,18 @@ public sealed class RedisConnectTicketStore : IConnectTicketStore
         return Decode((byte[])payload!);
     }
 
+    public async Task<bool> ExistsAsync(string ticket, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrEmpty(ticket) || !IsWellFormed(ticket))
+        {
+            return false;
+        }
+
+        return await _redis.GetDatabase().KeyExistsAsync(Key(ticket)).ConfigureAwait(false);
+    }
+
     private string Key(string ticket) => _options.KeyPrefix + ticket;
 
     private static string NewTicket() =>

@@ -42,6 +42,7 @@ public sealed class LogRedactionSentinelTests
                     ["Oidc:Audience"] = ApiFactory.Audience,
                     ["Oidc:MetadataAddress"] = ApiFactory.Issuer + ".well-known/openid-configuration",
                     ["Redis:Configuration"] = "127.0.0.1:1,abortConnect=false,connectTimeout=1,connectRetry=0",
+                    ["Postgres:ConnectionString"] = "Host=127.0.0.1;Port=1;Database=editor;Username=editor;Timeout=1",
 
                     // appsettings.json holds Microsoft.AspNetCore at Warning,
                     // which suppresses the hosting layer's "Request starting"

@@ -17,6 +17,9 @@ public sealed class RedisFixture : IAsyncLifetime
     private RedisContainer? _container;
     private ConnectionMultiplexer? _multiplexer;
 
+    /// <summary>The configuration string the fixture's Redis answers on.</summary>
+    public string Configuration { get; private set; } = string.Empty;
+
     public IConnectionMultiplexer Redis =>
         _multiplexer ?? throw new InvalidOperationException(SkipReason ?? "Redis is not available.");
 
@@ -59,6 +62,7 @@ public sealed class RedisFixture : IAsyncLifetime
             }
         }
 
+        Configuration = configuration;
         _multiplexer = await ConnectionMultiplexer.ConnectAsync(configuration);
     }
 

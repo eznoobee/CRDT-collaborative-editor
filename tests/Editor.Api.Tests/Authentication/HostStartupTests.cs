@@ -39,14 +39,23 @@ public sealed class HostStartupTests
     }
 
     [Fact]
-    public void The_host_starts_when_both_are_configured()
+    public void The_host_refuses_to_start_with_no_database_configured()
     {
-        // Without this, the two tests above would pass just as well against a
-        // host that never starts at all.
+        var thrown = Record.Exception(() => Start(Settings(oidc: true, redis: true, postgres: false)));
+
+        Assert.NotNull(thrown);
+        Assert.Contains("Postgres", Flatten(thrown), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_host_starts_when_everything_is_configured()
+    {
+        // Without this, the tests above would pass just as well against a host
+        // that never starts at all.
         Assert.Null(Record.Exception(() => Start(Settings(oidc: true, redis: true))));
     }
 
-    private static Dictionary<string, string?> Settings(bool oidc, bool redis)
+    private static Dictionary<string, string?> Settings(bool oidc, bool redis, bool postgres = true)
     {
         var settings = new Dictionary<string, string?>(StringComparer.Ordinal);
 
@@ -60,6 +69,11 @@ public sealed class HostStartupTests
         if (redis)
         {
             settings["Redis:Configuration"] = "127.0.0.1:1,abortConnect=false,connectTimeout=1,connectRetry=0";
+        }
+
+        if (postgres)
+        {
+            settings["Postgres:ConnectionString"] = "Host=127.0.0.1;Port=1;Database=editor;Username=editor;Timeout=1";
         }
 
         return settings;

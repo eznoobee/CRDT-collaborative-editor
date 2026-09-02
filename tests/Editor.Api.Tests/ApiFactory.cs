@@ -36,6 +36,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 // tries to connect. The tests that do need a real Redis take it
                 // from RedisFixture instead.
                 ["Redis:Configuration"] = "127.0.0.1:1,abortConnect=false,connectTimeout=1,connectRetry=0",
+
+                // Likewise unreachable, and likewise fine: the DbContext opens
+                // a connection when a request needs one, not at startup.
+                ["Postgres:ConnectionString"] = "Host=127.0.0.1;Port=1;Database=editor;Username=editor;Timeout=1",
             }));
     }
 }
