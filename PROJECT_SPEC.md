@@ -1099,6 +1099,14 @@ The first credible score was **54.63%**, and closing the gap took four rounds:
 | 3 | 76.86% | **nothing** — deep-tree tests that built nesting but never made two right siblings disagree about their right origin |
 | 4 | 81.22% | the ancestor case, constructed by reasoning about when that disagreement is possible at all |
 | 5 | **86.46%** | comparison operators at equality, argument validation, and the GC frontier boundary |
+| 6 | 85.44% | **nothing was added** — Phase 2's changes to `Replica` (iterative traversal, the `Import` rewrite) created new mutants and no tests reached them |
+| 7 | **87.74%** | those: `Import`'s argument guards, its refusal of a snapshot with a dangling reference, and its taking the next sequence from its own vector entry |
+
+Round 6 is the other one. The gate is a ratchet only if it is read after every
+change to the mutated project: Phase 2 touched `Crdt.Core` for performance
+reasons alone, added no behaviour it thought worth testing, and gave back 1.02
+points without any test failing. It stayed above 85% by 0.44 points, so nothing
+went red — the score reports a slide the build cannot.
 
 Round 3 is the instructive one: four plausible tests, written against the right
 file, moved coverage by exactly zero. Reaching the branch needed an argument
