@@ -30,6 +30,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Oidc:Issuer"] = Issuer,
                 ["Oidc:Audience"] = Audience,
                 ["Oidc:MetadataAddress"] = Issuer + ".well-known/openid-configuration",
+
+                // Also unreachable, and also fine: the multiplexer is built on
+                // first use, so a host test that never touches Redis never
+                // tries to connect. The tests that do need a real Redis take it
+                // from RedisFixture instead.
+                ["Redis:Configuration"] = "127.0.0.1:1,abortConnect=false,connectTimeout=1,connectRetry=0",
             }));
     }
 }

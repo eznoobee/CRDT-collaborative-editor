@@ -1,4 +1,5 @@
 using Editor.Api.Authentication;
+using Editor.Api.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,6 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 // appsettings.json deliberately carries no Oidc defaults for the same reason:
 // a default issuer is a fallback, and a fallback is what §7 forbids.
 builder.Services.AddEditorAuthentication(builder.Configuration);
+
+// The connect tickets §7 requires live in Redis, because §8 forbids sticky
+// sessions and the instance that issues a ticket is usually not the one that
+// redeems it.
+builder.Services.AddEditorRedis(builder.Configuration);
 
 var app = builder.Build();
 

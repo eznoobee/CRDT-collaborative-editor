@@ -43,6 +43,9 @@ services:
       Oidc__Issuer: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
       Oidc__Audience: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env}
       Oidc__MetadataAddress: ${OIDC_METADATA_ADDRESS:?set OIDC_METADATA_ADDRESS in .env}
+      # Service name, not localhost. A default here would be a fallback that
+      # connects to nothing and issues tickets nobody can redeem.
+      Redis__Configuration: ${REDIS_CONFIGURATION:?set REDIS_CONFIGURATION in .env}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

@@ -166,6 +166,7 @@ jobs:
             echo "OIDC_ISSUER=https://issuer.ci.invalid/"
             echo "OIDC_AUDIENCE=editor-api"
             echo "OIDC_METADATA_ADDRESS=https://issuer.ci.invalid/.well-known/openid-configuration"
+            echo "REDIS_CONFIGURATION=redis:6379"
           } > .env
 
       - name: Start the stack
