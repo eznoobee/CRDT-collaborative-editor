@@ -1173,3 +1173,55 @@ from `ElementId.CompareTo` — would contradict the paper, which specifies
 lexicographic order on whole ids, and would make correctness depend silently on
 an invariant holding rather than on a comparison being total. The survivor is
 evidence the reasoning above is sound.
+
+### 13.9 What the 100k snapshot metric measured, and the two bugs it found
+
+§6 required Phase 2 to build a 100k-element document, snapshot it, and report
+size and load time with no threshold. The number is now measured rather than
+assumed.
+
+Size is deterministic: **22,277,866 bytes — 21.25 MiB, 222.8 bytes per live
+element.** Timings vary with machine load, so they are given as observed ranges
+over four runs of the same test on one machine, Release build, Postgres 16 on
+loopback:
+
+| stage | observed |
+| --- | --- |
+| serialise | 467–591 ms |
+| deserialise (cold) | 733–924 ms |
+| write to Postgres | 483–730 ms |
+| load from Postgres | **501–941 ms** |
+
+**Load is at or over §8's 500 ms target on every sample, and that is the easy
+case.** The document has no tombstones and no operations after the snapshot;
+§8's stated case adds 500k tombstones, which the encoding stores in full. The
+cost is dominated by JSON parsing, not by the database — the row read is a
+single indexed lookup, and standalone deserialisation of the same string takes
+longer than the whole load does once the parser is warm.
+
+This does not by itself decide the format. It bounds the decision: normalised
+JSON as specified in §6 will not reach §8's target at §8's document size, so
+either the target moves, the snapshot stops being the whole document (a chunked
+or incremental encoding), or the encoding changes. Deciding is cheap now and
+expensive after Phase 4 binds the format into the client's IndexedDB schema,
+which is why §6 asked for the number in Phase 2.
+
+**The metric also found two defects that no correctness test had reached.**
+Both were only visible at this size, which is the argument for measuring at
+realistic scale rather than at test scale:
+
+1. **Traversal overflowed the stack in both implementations.** In-order
+   traversal of the element tree was recursive, and a document typed left to
+   right is a chain of right children 100k deep — so the recursion depth equals
+   the document length. It crashed the process rather than throwing, in C# and
+   in TypeScript alike, and every existing test was small enough to miss it.
+   Both are now iterative with an explicit stack, with a 150k-element regression
+   test on each side.
+2. **`Import` was quadratic.** Each placement pass removed placed elements from
+   the unplaced list one at a time; rebuilding the list per pass instead took
+   the .NET suite from 1m37s to 16s.
+
+Neither is a specification change. They are recorded because the conclusion is:
+the correctness suite verifies the algorithm at sizes where a linear-space bug
+and a quadratic-time bug are both invisible, and only a test that builds a
+realistic document exposed them.
