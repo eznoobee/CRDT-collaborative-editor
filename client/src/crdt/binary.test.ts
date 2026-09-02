@@ -136,6 +136,39 @@ describe('binary snapshots', () => {
     expect(dead.length).toBe(live.length);
   });
 
+  it('does not fold a run onto an element that carries a right origin', () => {
+    // Found by trying to break the cross-implementation check (§13.11). An
+    // element with an explicit right origin can neither start a run nor sit
+    // inside one, so what follows it begins a new record however well it would
+    // otherwise continue. A canonical rule that ignores the earlier element's
+    // right origin makes the decoder reject its own encoder's output.
+    //
+    // Ordinary typing cannot reach this shape: the right origin records what
+    // followed at insert time, and tombstones keep it there. Garbage collection
+    // (§5) and a directly built snapshot can.
+    const elements: ElementState[] = [
+      { id: id(1, 0), value: 'a', parent: null, side: 'R', rightOrigin: null, isDeleted: false },
+      {
+        id: id(2, 0),
+        value: 'x',
+        parent: id(1, 0),
+        side: 'R',
+        rightOrigin: id(1, 0),
+        isDeleted: false,
+      },
+      {
+        id: id(2, 1),
+        value: 'c',
+        parent: id(2, 0),
+        side: 'R',
+        rightOrigin: null,
+        isDeleted: false,
+      },
+    ];
+
+    expect(decodeSnapshot(encodeSnapshot(elements, noVector)).elements).toEqual(elements);
+  });
+
   it('is stable across calls', () => {
     const elements = chain(9);
     expect(encodeSnapshot(elements, noVector)).toEqual(encodeSnapshot(elements, noVector));

@@ -170,6 +170,31 @@ public sealed class BinarySnapshotTests
     }
 
     [Fact]
+    public void A_run_does_not_fold_onto_an_element_that_carries_a_right_origin()
+    {
+        // Found by trying to break the cross-implementation check (§13.11). An
+        // element with an explicit right origin can neither start a run nor sit
+        // inside one, so what follows it begins a new record however well it
+        // would otherwise continue. A canonical rule that ignores the earlier
+        // element's right origin makes the decoder reject its own encoder's
+        // output — which both implementations did, having been written from the
+        // same wrong sentence.
+        //
+        // Ordinary typing cannot reach this shape: a right origin records what
+        // followed at insert time and tombstones keep it there. Garbage
+        // collection (§5) and a directly built snapshot can.
+        var first = new ElementState(new ElementId(R(1), 0), V('a'), null, Side.Right, null, false);
+        var withOrigin = new ElementState(
+            new ElementId(R(2), 0), V('x'), first.Id, Side.Right, first.Id, false);
+        var continuation = new ElementState(
+            new ElementId(R(2), 1), V('c'), withOrigin.Id, Side.Right, null, false);
+
+        Assert.Equal(
+            [first, withOrigin, continuation],
+            RoundTrip(first, withOrigin, continuation));
+    }
+
+    [Fact]
     public void Encoding_is_stable_across_calls()
     {
         var replica = new Replica(R(1));

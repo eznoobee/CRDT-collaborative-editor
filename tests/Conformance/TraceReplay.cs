@@ -11,7 +11,8 @@ public sealed record TraceResult(
     string Text,
     IReadOnlyDictionary<string, string> ReplicaTexts,
     IReadOnlyDictionary<string, string> VersionVector,
-    string WireRoundTripText);
+    string WireRoundTripText,
+    string Snapshot);
 
 /// <summary>Replays a conformance trace against real replicas.</summary>
 /// <remarks>
@@ -74,7 +75,12 @@ public static class TraceReplay
         }
 
         return new TraceResult(
-            name, replicas[0].Text, replicaTexts, versionVector, WireRoundTrip(ids[0], produced));
+            name,
+            replicas[0].Text,
+            replicaTexts,
+            versionVector,
+            WireRoundTrip(ids[0], produced),
+            SnapshotHex(replicas[0]));
     }
 
     /// <summary>
@@ -96,6 +102,50 @@ public static class TraceReplay
         }
 
         return replica.Text;
+    }
+
+    /// <summary>
+    /// The binary snapshot as lowercase hex, after checking that binary and the
+    /// normative JSON agree about this document in both directions.
+    /// </summary>
+    /// <remarks>
+    /// PROJECT_SPEC.md §6: binary is the storage form and JSON is what a correct
+    /// serialisation <em>is</em>. These two round trips are what tie them
+    /// together. Without them binary would be a second definition of correctness
+    /// that nothing checks against the first, and the two would drift the way
+    /// any unchecked pair of implementations drifts.
+    ///
+    /// The hex then goes into the artefact, so a C#/TypeScript disagreement
+    /// about the bytes fails the build exactly as an algorithm disagreement
+    /// does — which is the whole point of putting it there rather than
+    /// asserting it locally on each side.
+    /// </remarks>
+    private static string SnapshotHex(Replica replica)
+    {
+        var binary = SnapshotBinary.Encode(replica);
+        var json = SnapshotSerializer.Serialize(replica);
+
+        // binary -> JSON -> binary
+        var fromBinary = SnapshotBinary.Decode(replica.Id, binary);
+        var reBinary = SnapshotBinary.Encode(
+            SnapshotSerializer.Deserialize(replica.Id, SnapshotSerializer.Serialize(fromBinary)));
+        if (!reBinary.AsSpan().SequenceEqual(binary))
+        {
+            throw new InvalidOperationException(
+                "binary -> JSON -> binary is not byte-identical, so the binary form and the "
+                + "normative form disagree about this document (§6).");
+        }
+
+        // JSON -> binary -> JSON
+        var fromJson = SnapshotSerializer.Deserialize(replica.Id, json);
+        var reJson = SnapshotSerializer.Serialize(
+            SnapshotBinary.Decode(replica.Id, SnapshotBinary.Encode(fromJson)));
+        if (!string.Equals(reJson, json, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("JSON -> binary -> JSON is not byte-identical (§6).");
+        }
+
+        return Convert.ToHexString(binary).ToLowerInvariant();
     }
 
     private static Rune SingleRune(string value)

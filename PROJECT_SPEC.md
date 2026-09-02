@@ -676,7 +676,11 @@ encoder can have if it may choose between encodings.
 3. **Runs are maximal.** Two or more adjacent elements that satisfy the run shape
    are one run record, and a run is extended as far as the shape holds. A single
    element record that could have joined an adjacent run is invalid, and so is a
-   run that could have been longer.
+   run that could have been longer. "Satisfy the run shape" is a condition on
+   **both** elements: the earlier one must be able to be in a run at all — no
+   right origin — and the later one must continue it. An element carrying an
+   explicit right origin can neither start a run nor sit inside one, so whatever
+   follows it begins a new record however well it would otherwise continue.
 4. A run record has `count` ≥ 2. One element is an element record.
 5. Parent flag `1` is used whenever it applies; spelling the same parent out as
    flag `2` is invalid.
@@ -684,11 +688,24 @@ encoder can have if it may choose between encodings.
 7. No trailing bytes after the last record.
 
 A reader **rejects** every violation above, all of which are checkable while
-decoding. Maximality reduces to one local rule: *the first element of any record
-must not be able to continue the element immediately before it* — that is, the
-two must not together satisfy the run shape. An element record that could have
-joined the previous element fails it, and so does a run whose first element could
-have extended the preceding run, which is the same condition stated once.
+decoding. Maximality reduces to one local rule, stated over a *pair*:
+
+> The first element of any record must not be able to continue the element
+> immediately before it — where "able to" requires the earlier element to have
+> **no right origin**, and the later one to be a right child of it with
+> consecutive sequence number on the same replica and no right origin of its own.
+
+An element record that could have joined the previous element fails it, and so
+does a run whose first element could have extended the preceding run, which is
+the same condition stated once.
+
+**The right-origin half of that condition is not decoration.** An earlier
+draft omitted it, and both codecs — written independently from that draft, as
+§13.11 records — implemented a decoder that rejected documents its own encoder
+produced. The shape is an element carrying an explicit right origin followed by
+a right child of it with the next sequence number: the encoder cannot begin a
+run there, so it writes two records, and a rule that ignores the earlier
+element's right origin then calls its own correct output non-canonical.
 
 Rejecting non-canonical input is not pedantry: a reader that accepts two
 spellings of one document turns the byte-identity check into a check of
@@ -1068,17 +1085,18 @@ contradicting a cited paper.
 `versionVector` is optional and maps replica id to a decimal-string `Seq` high
 water mark (§6).
 
-#### Normalised result format (v1)
+#### Normalised result format (v2)
 
 Each runner writes exactly this, and the comparison is `diff` over the bytes:
 
 ```jsonc
 {
-  "v": 1,
+  "v": 2,
   "implementation": "csharp",              // or "typescript"; EXCLUDED from comparison
   "results": [
     {
       "name": "rga-backward-interleaving",
+      "snapshot": "4352445401010100…",     // §6 binary snapshot, lowercase hex
       "text": "abx",                        // final text after the last op
       "replicaTexts": {                     // every replica's final text
         "00000000-0000-0000-0000-000000000001": "abx",
@@ -1093,6 +1111,22 @@ Each runner writes exactly this, and the comparison is `diff` over the bytes:
 `replicaTexts` is present so convergence is visible in the artefact itself rather
 than asserted only inside a runner: a trace where replicas disagree is a failure
 you can see in the diff.
+
+**`snapshot` is what makes the binary encoding a build requirement rather than a
+local assertion.** Each runner encodes the document per §6 and writes the bytes
+as hex, so two implementations that disagree about the encoding produce different
+artefacts and the comparison fails — exactly as it does for an algorithm
+disagreement. Asserting the round trips separately on each side would prove each
+codec self-consistent and say nothing about whether the two agree.
+
+Before writing that hex, each runner checks both directions locally, because a
+failure there names the document rather than showing up as an opaque hex diff:
+
+- `binary → JSON → binary` is byte-identical.
+- `JSON → binary → JSON` is byte-identical.
+
+Version 1 of this format had no `snapshot` field; it was added when §6 made
+binary the storage and wire form.
 
 Serialisation is pinned, because "byte-identical" is otherwise not well defined
 across two languages:
@@ -1655,3 +1689,47 @@ something — document length, connection count, fan-out width — the suite mus
 name that quantity as a dimension and draw it, because the failure mode is
 correct at every tested size and fatal at real ones, and nothing in a green
 build distinguishes the two.
+
+### 13.11 Writing the spec first put the same bug in both implementations
+
+§6's binary layout was written before either codec, on the reasoning that two
+implementations derived from one description disagree loudly when either is
+wrong, while a second derived from the first inherits its mistakes silently.
+That reasoning is sound and the approach is kept. It has a failure mode worth
+naming.
+
+**A mistake in the description reaches both implementations, and they agree.**
+The canonical-form rule for run maximality was drafted as: *the first element of
+any record must not be able to continue the element immediately before it*. Both
+codecs implemented exactly that, agreed byte for byte on the whole corpus, and
+were both wrong.
+
+The rule needs a condition on the *earlier* element too. An element carrying an
+explicit right origin can neither start a run nor sit inside one, so whatever
+follows it begins a new record however well it would otherwise continue. Without
+that half, a decoder rejects documents its own encoder produces: encode an
+element with an explicit right origin followed by a right child of it with the
+next sequence number, and the encoder correctly writes two records while the
+decoder correctly-by-the-draft calls them non-canonical.
+
+**How it was found is the point.** Not by the corpus, which passed. By
+deliberately breaking one implementation to check the cross-implementation
+comparison would notice — the first sabotage chosen was dropping exactly this
+guard, and the corpus did *not* notice, which meant the shape was uncovered.
+Investigating why produced the real bug. The check works: a second sabotage,
+dropping the deleted flag, failed the build immediately.
+
+Two things follow, both now in place.
+
+1. **The shape has a test on each side**, not a trace. Ordinary typing cannot
+   reach it — a right origin records what followed at insert time and tombstones
+   keep it there — so it needs either garbage collection (§5) or a directly built
+   snapshot. A user-level trace cannot express it, which is why the corpus was
+   silent.
+2. **Agreement between two implementations is not evidence of correctness when
+   both were written from one description.** It is evidence they read it the same
+   way. The corpus catches divergence; only reasoning about the specification,
+   or an independent check like the round trips against the normative JSON,
+   catches a shared misreading. This is the same lesson as §13.6, where a
+   100.00% hold rate turned out to measure the generator, arriving from the
+   other direction.

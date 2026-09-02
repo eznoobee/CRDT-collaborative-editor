@@ -388,11 +388,23 @@ public static class SnapshotBinary
 
     /// <summary>
     /// True when <paramref name="current"/> is the next element of a run begun
-    /// by <paramref name="previous"/>: consecutive ids on one replica, a right
-    /// child of it, with nothing recorded after it at the time.
+    /// by <paramref name="previous"/>.
     /// </summary>
+    /// <remarks>
+    /// A condition on both elements, which §6 is explicit about because an
+    /// earlier draft was not: <paramref name="previous"/> must be able to be in
+    /// a run at all — no right origin — and <paramref name="current"/> must be a
+    /// right child of it with the next sequence number on the same replica and
+    /// no right origin of its own.
+    ///
+    /// Dropping the first half makes a decoder reject documents its own encoder
+    /// produces: an element with an explicit right origin followed by a
+    /// consecutive right child, where no run can begin and so two records are
+    /// written (§13.11).
+    /// </remarks>
     internal static bool CanFollow(ElementState previous, ElementState current) =>
-        current.Id.Replica.Equals(previous.Id.Replica)
+        previous.RightOrigin is null
+        && current.Id.Replica.Equals(previous.Id.Replica)
         && previous.Id.Seq != ulong.MaxValue
         && current.Id.Seq == previous.Id.Seq + 1
         && current.Side == Side.Right

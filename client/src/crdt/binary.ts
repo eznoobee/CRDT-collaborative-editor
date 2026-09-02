@@ -282,14 +282,21 @@ function readParent(
 }
 
 /**
- * True when `current` continues a run begun by `previous`: consecutive ids on
- * one replica, a right child of it, with nothing recorded after it at the time.
+ * True when `current` continues a run begun by `previous`.
  *
- * §6 reduces run maximality to this one predicate, applied to the first element
- * of every record.
+ * A condition on both elements, which §6 is explicit about because an earlier
+ * draft was not: `previous` must be able to be in a run at all, meaning it
+ * carries no right origin, and `current` must be a right child of it with the
+ * next sequence number on the same replica and no right origin of its own.
+ *
+ * Dropping the first half makes a decoder reject documents its own encoder
+ * produces — an element with an explicit right origin followed by a consecutive
+ * right child, where the encoder cannot start a run and so writes two records
+ * (§13.11).
  */
 function canFollow(previous: ElementState, current: ElementState): boolean {
   return (
+    previous.rightOrigin === null &&
     compareReplicaId(current.id.replica, previous.id.replica) === 0 &&
     current.id.seq === previous.id.seq + 1n &&
     current.side === 'R' &&
