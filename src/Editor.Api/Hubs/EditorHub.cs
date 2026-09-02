@@ -1,5 +1,7 @@
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
+using Editor.Infrastructure.Ingest;
+using Editor.Infrastructure.Persistence;
 using Editor.Infrastructure.Tickets;
 using Microsoft.AspNetCore.SignalR;
 
@@ -18,16 +20,31 @@ public sealed partial class EditorHub : Hub
 
     private readonly IConnectTicketStore _tickets;
     private readonly IDocumentRoles _roles;
+    private readonly IngestValidator _validator;
+    private readonly DocumentIngestState _state;
+    private readonly OperationLogBatcher _log;
     private readonly ILogger<EditorHub> _logger;
 
-    public EditorHub(IConnectTicketStore tickets, IDocumentRoles roles, ILogger<EditorHub> logger)
+    public EditorHub(
+        IConnectTicketStore tickets,
+        IDocumentRoles roles,
+        IngestValidator validator,
+        DocumentIngestState state,
+        OperationLogBatcher log,
+        ILogger<EditorHub> logger)
     {
         ArgumentNullException.ThrowIfNull(tickets);
         ArgumentNullException.ThrowIfNull(roles);
+        ArgumentNullException.ThrowIfNull(validator);
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(logger);
 
         _tickets = tickets;
         _roles = roles;
+        _validator = validator;
+        _state = state;
+        _log = log;
         _logger = logger;
     }
 
@@ -63,10 +80,8 @@ public sealed partial class EditorHub : Hub
 
     /// <summary>Submits a batch of operations into the bound document.</summary>
     /// <remarks>
-    /// This is §7's two checks and nothing else yet: the operations themselves
-    /// are validated in the next task, and until then a batch that passes
-    /// authorization is accepted and not applied. Broadcasting or persisting it
-    /// before validation exists would be the stub §12 forbids.
+    /// Authorize, validate, append. Broadcast is not here: fanning a batch out
+    /// to other connections is causal delivery's problem and lands with it.
     /// </remarks>
     public async Task<SubmitResult> SubmitAsync(OperationBatchMessage batch)
     {
@@ -115,7 +130,30 @@ public sealed partial class EditorHub : Hub
             return SubmitResult.Rejected(HubErrors.Forbidden);
         }
 
-        return SubmitResult.Ok(batch.Operations.LongLength);
+        var replicaId = ReplicaIdConversion.FromGuid(binding.ReplicaId);
+        var validated = await _validator
+            .ValidateAsync(binding.DocumentId, replicaId, batch.Operations, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        if (validated.Rejection is not null)
+        {
+            return SubmitResult.Rejected(validated.Rejection);
+        }
+
+        var operations = validated.Operations!;
+        if (operations.Count == 0)
+        {
+            return SubmitResult.Ok(0);
+        }
+
+        await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
+
+        // Only after the append. Advancing the expected sequence for a batch
+        // that failed to write would reject the client's retry of the very
+        // operations the server does not have.
+        _state.Accepted(binding.DocumentId, operations);
+
+        return SubmitResult.Ok(operations.Count);
     }
 
     /// <summary>The SignalR group carrying one document's broadcasts.</summary>

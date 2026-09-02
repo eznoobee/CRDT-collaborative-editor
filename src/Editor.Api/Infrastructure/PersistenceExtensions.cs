@@ -1,9 +1,11 @@
 using System.ComponentModel.DataAnnotations;
 using Editor.Api.Documents;
 using Editor.Infrastructure.Authorization;
+using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using StackExchange.Redis;
 
 namespace Editor.Api.Infrastructure;
@@ -44,6 +46,25 @@ public static class PersistenceExtensions
 
         services.AddDbContext<EditorDbContext>((provider, options) =>
             options.UseNpgsql(provider.GetRequiredService<IOptions<PostgresOptions>>().Value.ConnectionString));
+
+        services.AddOptions<IngestLimits>()
+            .Bind(configuration.GetSection(IngestLimits.Section))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        // Npgsql directly for the hot path, EF for the schema and the rest (§3).
+        services.AddSingleton(provider => NpgsqlDataSource.Create(
+            provider.GetRequiredService<IOptions<PostgresOptions>>().Value.ConnectionString));
+
+        services.AddSingleton<DocumentIngestState>();
+        services.AddSingleton(provider => new IngestValidator(
+            provider.GetRequiredService<DocumentIngestState>(),
+            provider.GetRequiredService<IOptions<IngestLimits>>().Value));
+
+        services.AddSingleton(provider => new OperationLogWriter(
+            provider.GetRequiredService<NpgsqlDataSource>()));
+        services.AddSingleton(provider => new OperationLogBatcher(
+            provider.GetRequiredService<OperationLogWriter>(), BatchingPolicy.Default));
 
         services.AddScoped<CurrentUser>();
         services.AddScoped<DocumentRoleReader>();

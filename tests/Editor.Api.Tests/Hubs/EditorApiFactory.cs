@@ -16,10 +16,16 @@ public sealed class EditorApiFactory : WebApplicationFactory<Program>
     private readonly EditorFixture _fixture;
     private readonly bool _testAuthentication;
 
-    public EditorApiFactory(EditorFixture fixture, bool testAuthentication = true)
+    private readonly Dictionary<string, string?>? _settings;
+
+    public EditorApiFactory(
+        EditorFixture fixture,
+        bool testAuthentication = true,
+        Dictionary<string, string?>? settings = null)
     {
         _fixture = fixture;
         _testAuthentication = testAuthentication;
+        _settings = settings;
     }
 
     /// <summary>How many role lookups the hub has made.</summary>
@@ -44,6 +50,14 @@ public sealed class EditorApiFactory : WebApplicationFactory<Program>
                 ["Redis:Configuration"] = _fixture.Redis.Configuration,
                 ["Postgres:ConnectionString"] = _fixture.Postgres.ConnectionString,
             }));
+
+        if (_settings is not null)
+        {
+            // Applied second, so a test can tighten a cap the way a deployment
+            // would — through configuration, not by reaching past it.
+            builder.ConfigureAppConfiguration(configuration =>
+                configuration.AddInMemoryCollection(_settings));
+        }
 
         if (!_testAuthentication)
         {

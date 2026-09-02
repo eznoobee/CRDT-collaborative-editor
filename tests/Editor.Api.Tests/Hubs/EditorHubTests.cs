@@ -70,7 +70,8 @@ public sealed class EditorHubTests
         // test that raced the two would fail on a busy machine roughly as often
         // as it caught anything. A method that needs the binding only succeeds
         // once redemption has happened.
-        var accepted = await SubmitAsync(first, documentId, negotiated.ReplicaId);
+        var accepted = await SubmitAsync(
+            first, documentId, negotiated.ReplicaId, new ReplicaWriter(negotiated.ReplicaId).Type("a"));
         Assert.Null(accepted.Code);
 
         await using var second = Connect(factory, negotiated.Ticket);
@@ -128,10 +129,12 @@ public sealed class EditorHubTests
         await using var connection = Connect(factory, negotiated.Ticket);
         await connection.StartAsync(TestContext.Current.CancellationToken);
 
-        var result = await SubmitAsync(connection, negotiated.DocumentId, negotiated.ReplicaId);
+        var writer = new ReplicaWriter(negotiated.ReplicaId);
+        var result = await SubmitAsync(
+            connection, negotiated.DocumentId, negotiated.ReplicaId, writer.Type("hello"));
 
         Assert.Null(result.Code);
-        Assert.Equal(4, result.Accepted);
+        Assert.Equal(5, result.Accepted);
     }
 
     [Fact]
@@ -163,7 +166,9 @@ public sealed class EditorHubTests
 
         await using var connection = Connect(factory, negotiated.Ticket);
         await connection.StartAsync(TestContext.Current.CancellationToken);
-        await SubmitAsync(connection, documentId, negotiated.ReplicaId);
+        var writer = new ReplicaWriter(negotiated.ReplicaId);
+        Assert.Null((await SubmitAsync(
+            connection, documentId, negotiated.ReplicaId, writer.Type("a"))).Code);
 
         await using (var scope = factory.Services.CreateAsyncScope())
         {
@@ -171,7 +176,8 @@ public sealed class EditorHubTests
                 .RemoveAsync(documentId, userId, TestContext.Current.CancellationToken);
         }
 
-        var result = await SubmitAsync(connection, documentId, negotiated.ReplicaId);
+        var result = await SubmitAsync(
+            connection, documentId, negotiated.ReplicaId, writer.Type("b"));
 
         AssertRejected(HubErrors.NotFound, result);
     }
@@ -192,7 +198,9 @@ public sealed class EditorHubTests
 
         await using var connection = Connect(factory, negotiated.Ticket);
         await connection.StartAsync(TestContext.Current.CancellationToken);
-        await SubmitAsync(connection, documentId, negotiated.ReplicaId);
+        var writer = new ReplicaWriter(negotiated.ReplicaId);
+        Assert.Null((await SubmitAsync(
+            connection, documentId, negotiated.ReplicaId, writer.Type("a"))).Code);
 
         await using (var scope = factory.Services.CreateAsyncScope())
         {
@@ -207,7 +215,8 @@ public sealed class EditorHubTests
 
         while (elapsed.Elapsed < bound)
         {
-            var result = await SubmitAsync(connection, documentId, negotiated.ReplicaId);
+            var result = await SubmitAsync(
+                connection, documentId, negotiated.ReplicaId, writer.Type("x"));
             if (result.Code is not null)
             {
                 AssertRejected(HubErrors.NotFound, result);
@@ -239,9 +248,11 @@ public sealed class EditorHubTests
         await connection.StartAsync(TestContext.Current.CancellationToken);
 
         var before = factory.Roles.Lookups;
+        var writer = new ReplicaWriter(negotiated.ReplicaId);
         for (var attempt = 0; attempt < 20; attempt++)
         {
-            var result = await SubmitAsync(connection, Guid.CreateVersion7(), negotiated.ReplicaId);
+            var result = await SubmitAsync(
+                connection, Guid.CreateVersion7(), negotiated.ReplicaId, writer.Type("a"));
             AssertRejected(HubErrors.NotFound, result);
         }
 
@@ -279,10 +290,11 @@ public sealed class EditorHubTests
     }
 
     private static Task<SubmitResult> SubmitAsync(
-        HubConnection connection, Guid documentId, Guid replicaId) =>
+        HubConnection connection, Guid documentId, Guid replicaId, byte[]? operations = null) =>
         connection.InvokeAsync<SubmitResult>(
             "SubmitAsync",
-            new OperationBatchMessage(documentId, replicaId, [1, 2, 3, 4]),
+            new OperationBatchMessage(
+                documentId, replicaId, operations ?? new ReplicaWriter(replicaId).Type("a")),
             TestContext.Current.CancellationToken);
 
     /// <summary>

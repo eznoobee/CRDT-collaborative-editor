@@ -1,9 +1,11 @@
 using System.Security.Claims;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
+using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Persistence;
 using Editor.Infrastructure.Tickets;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace Editor.Api.Documents;
 
@@ -44,6 +46,8 @@ public static class NegotiateEndpoint
         IDocumentRoles roles,
         IConnectTicketStore tickets,
         EditorDbContext context,
+        DocumentIngestState state,
+        IOptions<IngestLimits> limits,
         TimeProvider time,
         CancellationToken cancellationToken)
     {
@@ -64,6 +68,24 @@ public static class NegotiateEndpoint
             // not exist, one that was deleted, and one this caller is not a
             // member of. §7: do not leak document existence.
             return TypedResults.NotFound();
+        }
+
+        // §7 caps concurrent replicas per document. Checked here rather than at
+        // ingest because this is where a replica comes into existence: refusing
+        // the fifty-first at its first keystroke would mean a client that
+        // connected, showed the document, and then could not type.
+        //
+        // Read from Postgres every time. A cached count is a cap that admits an
+        // extra replica per cold instance, and this runs once per connection
+        // rather than once per operation, so the query is affordable.
+        var active = await state.ActiveReplicaCountAsync(documentId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (active >= limits.Value.MaxReplicasPerDocument)
+        {
+            // 409, not 404: the caller is a member and can see the document.
+            // Concealing the reason would leave them retrying forever.
+            return TypedResults.Conflict(new { code = IngestRejection.TooManyReplicas });
         }
 
         // §7 and §13.12: the server assigns the replica id. A client that chose

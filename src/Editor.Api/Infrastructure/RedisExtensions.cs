@@ -1,3 +1,4 @@
+using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Tickets;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
@@ -46,7 +47,21 @@ public static class RedisExtensions
         // message to whoever is connected — server internals to any client —
         // and §7's error codes stop being the whole of what the client sees,
         // which is what the 404-not-403 rule depends on.
-        services.PostConfigure<HubOptions>(options => options.EnableDetailedErrors = false);
+        services.PostConfigure<HubOptions>(options =>
+        {
+            options.EnableDetailedErrors = false;
+
+            // §7 caps a message and says an oversized one closes the
+            // connection after logging. SignalR's own receive limit is what
+            // does the closing — it defaults to 32 KB, so without this the
+            // configured cap would be unreachable and the ingest check for it
+            // would be code that never runs. The validator still checks the
+            // payload, which is the smaller thing inside the message and the
+            // check that applies wherever a batch arrives from.
+            var limits = configuration.GetSection(IngestLimits.Section).Get<IngestLimits>()
+                ?? new IngestLimits();
+            options.MaximumReceiveMessageSize = limits.MaxMessageBytes;
+        });
 
         // §8 forbids sticky sessions, so a client's operations and the
         // broadcasts it should receive routinely land on different instances.
