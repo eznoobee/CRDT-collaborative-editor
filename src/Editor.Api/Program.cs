@@ -1,7 +1,14 @@
 using Editor.Api.Authentication;
 using Editor.Api.Infrastructure;
+using Editor.Api.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// First, and before anything that could log. §7: a ticket or a token must
+// never reach a sink, and the request URL — query string included — is logged
+// by the hosting layer before the first middleware runs, so redaction cannot
+// be a middleware.
+builder.Services.AddSecretRedaction();
 
 // Validation is registered here and enforced at host start, so a deployment
 // that forgot to configure an issuer never reaches a listening state rather
