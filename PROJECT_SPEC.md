@@ -869,6 +869,28 @@ Treat every one of these as a hard requirement with a corresponding test.
   `Referer` headers — none of which your own log redaction controls. A ticket
   that is single-use and expires in a minute is a bounded loss; a bearer JWT is
   not.
+
+  **The ticket lives in Redis and is redeemed atomically.** Not in process
+  memory: §8 forbids sticky sessions, so the instance that issues a ticket is
+  usually not the one that redeems it. "Single-use" must be a single atomic
+  operation — `GETDEL`, not a read followed by a delete — because two
+  simultaneous connects against a read-then-delete both find the ticket present
+  and both succeed, which is exactly the replay the single-use rule exists to
+  stop.
+
+  **The ticket carries the binding, and the server chooses it.** A ticket names
+  the user, the document, and the **replica id the server assigned**, and the
+  role check happens at `negotiate` before the ticket is issued. The client does
+  not pick its own replica id.
+
+  That last point is load-bearing rather than tidy. §5 makes `ReplicaId` the
+  tie-break that orders concurrent insertions, and this section rejects
+  operations whose replica id does not match the connection's — but a binding
+  the client chose is not a check, it is a formality. A client that picked
+  another live replica's id would be authenticated, bound, and able to author
+  operations attributed to someone else, and every replica would converge on the
+  result. Server assignment, recorded in `document_replicas` against the user,
+  is what makes the per-operation comparison mean anything.
 - The ticket and any token must never be written to logs. Configure request
   logging to redact them explicitly, and add a test that drives a connection
   using a **known sentinel value** through the real logging pipeline —
@@ -897,6 +919,13 @@ Treat every one of these as a hard requirement with a corresponding test.
   see — do not leak document existence. A viewer attempting a write gets 403:
   they can already see the document, so there is nothing to conceal.
 
+  Those are HTTP statuses and they apply to `negotiate`, which is where the
+  membership decision is made. A hub method has no status code, so it fails with
+  an error carrying the equivalent **code** — `not_found` or `forbidden` — and
+  the same rule about what may be revealed. The distinction is not cosmetic: a
+  hub that answers "forbidden" for a document the caller cannot see has leaked
+  its existence just as surely as a 403 would.
+
 **Input validation**
 - Reject operations whose `ReplicaId` does not match the one bound to the
   authenticated connection. A client must not be able to forge operations
@@ -904,6 +933,11 @@ Treat every one of these as a hard requirement with a corresponding test.
 - Reject operations whose `Seq` is not the next dense value for that replica.
   Density is a correctness property of the version vector (§5), not a
   convention.
+
+  The expected next value is **reconstructible from Postgres** — the maximum
+  `seq` stored for that `(document_id, replica_id)` — and any in-memory copy is
+  a cache. §8 requires exactly that: an app server may hold per-document state
+  for speed, and must not need it for correctness after a failover.
 - Caps: single element value = exactly 1 code point (≤4 bytes UTF-8); run op
   ≤ 256 code points; batch ≤ 256 ops; message ≤ 64 KB; document ≤ 5 MB of live
   text; ≤ 50 concurrent replicas per document; pending-set bound per connection.
@@ -1972,3 +2006,41 @@ the replicas the body names. The *re-encode* half of the fixture check caught it
 which is the argument for that half existing. A fixture that is merely accepted
 proves the decoder is permissive; a fixture that is accepted and re-encodes to
 the same bytes proves it agrees with the encoder about what the document is.
+
+### 13.12 Phase 3 decisions taken before the hub existed
+
+Four things §7 left open that had to be settled before any of it could be
+written, recorded here rather than discovered in the diff.
+
+**The client does not choose its replica id.** §7 already said an operation's
+replica id must match the connection's binding, and §5 already made `ReplicaId`
+the tie-break that orders concurrent insertions. Together those look like a
+complete defence and are not: if the client supplies the binding, the check
+compares a value against itself. A client naming another live replica's id would
+pass authentication, pass the per-operation comparison, and author operations
+attributed to that replica — and every other replica would converge on the
+forgery, because convergence is exactly what the algorithm guarantees. The
+server assigns the id at `negotiate` and records it against the user in
+`document_replicas`; §7 now says so.
+
+**The ticket is redeemed with `GETDEL`, not a read then a delete.** §8 forbids
+sticky sessions, so the issuing instance is usually not the redeeming one and the
+ticket has to be shared state. Under a read-then-delete, two connects arriving
+together both observe the ticket and both proceed: single-use that is not atomic
+is not single-use. This is the kind of thing that passes every test written
+against one client.
+
+**Dense `Seq` validation caches, it does not own.** The next expected value is
+the maximum stored for that `(document_id, replica_id)` in Postgres. An in-memory
+copy makes the hot path affordable (§8 forbids loading the document to validate
+an operation), and losing it on failover must cost a query rather than
+correctness.
+
+**A hub method has no HTTP status.** §7's 404-versus-403 rule is about not
+leaking document existence, and it survives the move to SignalR only if the hub
+carries the same distinction in its error codes. Answering `forbidden` for a
+document the caller cannot see would leak exactly what the 404 rule protects.
+
+None of these are changes of direction. They are the places where §7's rules,
+read literally, could each be satisfied by an implementation that defeated their
+purpose.
