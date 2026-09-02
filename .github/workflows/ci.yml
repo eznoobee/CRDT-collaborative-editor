@@ -81,9 +81,11 @@ jobs:
 
       - run: dotnet tool restore
 
-      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage. The
-      # reduced case count keeps a per-mutant suite run to seconds; the full
-      # 10,000-case gate runs in the dotnet job above.
+      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage, and
+      # §13.7 makes it a ratchet: the floor in mutation-floor.json is what
+      # actually fails the build, in either direction. The reduced case count
+      # keeps a per-mutant suite run to seconds; the full 10,000-case gate runs
+      # in the dotnet job above.
       - name: Stryker
         env:
           CRDT_PROPERTY_CASES: "150"

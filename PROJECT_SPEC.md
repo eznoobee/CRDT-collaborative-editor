@@ -1200,11 +1200,30 @@ supposed to catch and structurally cannot: a fixed bar only notices the last
 step of a slide, and by then the headroom that would have paid for the fix is
 gone.
 
-Raising the floor is an ordinary commit — improve coverage, commit the new
-number. Lowering it requires an argued exception recorded in this section,
-naming what was removed and why the coverage it provided is not worth keeping.
-There is no third option, and in particular "the score went down but it still
-passes" is no longer a sentence the build will accept.
+The floor lives in `mutation-floor.json` and `scripts/mutation.sh` enforces it.
+Raising it is an ordinary commit — improve coverage, commit the new number.
+Lowering it requires an argued exception recorded in this section, naming what
+was removed and why the coverage it provided is not worth keeping. There is no
+third option, and in particular "the score went down but it still passes" is no
+longer a sentence the build will accept.
+
+**A score above the floor fails too**, with a message giving the line to change.
+That reads as pedantic and is not: an unrecorded peak is how a ratchet silently
+stops ratcheting. Improve coverage to 90% without committing it and the floor
+stays at 87.74%, so a later slide from 90% to 88% passes — the exact erosion the
+ratchet exists to catch, now invisible because the reference point was never
+moved. Both directions are a one-line fix.
+
+The comparison is exact rather than tolerant because the score is deterministic:
+the same commit produces identical status counts locally and on CI, timeouts
+included (85.44% from 215 killed, 8 timed out, 21 survived, 17 uncovered, in
+both places). A tolerance would have to be about the size of the erosion being
+detected, which would defeat the check.
+
+**Demonstrated, not assumed.** Deleting one of the three `Import` tests takes
+the score to 86.59% — which still clears Stryker's own 85% break threshold, so
+Stryker exits 0 and the build would have passed. The ratchet fails it. That is
+the whole argument for having one.
 
 `scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
 permanently, alongside the ratchet. They are what caught the false 0.00%, and a

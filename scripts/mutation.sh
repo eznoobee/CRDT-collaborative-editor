@@ -10,6 +10,12 @@
 # one of 227 tested mutants as Survived — a score of 0.00% that the tool exited
 # 0 on, while the same suite killed those mutations when they were injected by
 # hand. A gate that cannot fail loudly is not a gate.
+#
+# There are three guards, and the third is the ratchet: the score in
+# mutation-floor.json is the floor, and any decrease fails regardless of the
+# absolute number. Stryker's own 85% break threshold stays as a backstop, but it
+# cannot see erosion — 85.44% clears an 85% bar after a 1.02-point drop, which is
+# how Phase 2 gave back coverage with nothing going red.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,7 +42,8 @@ fi
 
 report=$(ls -dt StrykerOutput/*/reports/mutation-report.json 2>/dev/null | head -1 || true)
 if [[ -n "$report" ]]; then
-  python3 - "$report" <<'PY'
+  set +e
+  python3 - "$report" mutation-floor.json <<'REPORT_CHECK'
 import collections, json, sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -58,10 +65,56 @@ if tested > 0 and counts["Killed"] == 0:
     print(
         "\nEvery tested mutant survived. That is the signature of Stryker not "
         "running the tests, not of a suite that catches nothing — see "
-        "PROJECT_SPEC.md §13.7 and stryker-net#3094."
+        "PROJECT_SPEC.md 13.7 and stryker-net#3094."
     )
     sys.exit(1)
-PY
+
+# The ratchet. The score is recomputed here rather than scraped from Stryker's
+# output: detected mutants over everything that could have been detected. A
+# mutant with no coverage counts against the score, because "no test reaches it"
+# and "a test reaches it and does not notice" are the same gap.
+detected = counts["Killed"] + counts["Timeout"]
+denominator = detected + counts["Survived"] + counts["NoCoverage"]
+if denominator == 0:
+    print("\nNo mutants were tested, so there is no score to ratchet.")
+    sys.exit(1)
+
+score = round(detected / denominator * 100, 2)
+
+with open(sys.argv[2], encoding="utf-8") as handle:
+    floor = round(float(json.load(handle)["floor"]), 2)
+
+print(f"mutation score: {score:.2f}%   floor: {floor:.2f}%")
+
+# The score is deterministic for a given commit — the same status counts appear
+# locally and on CI, timeouts included — so an exact comparison does not flake.
+if score < floor:
+    print(
+        f"\nMutation score fell from {floor:.2f}% to {score:.2f}%.\n"
+        "\nThat is a coverage regression, and it fails regardless of the absolute\n"
+        "number: a fixed threshold only notices the last step of a slide. Either\n"
+        "cover what this change added, or record an argued exception in\n"
+        "PROJECT_SPEC.md 13.7 saying what was removed and why the coverage it\n"
+        "provided is not worth keeping, and lower the floor in the same commit."
+    )
+    sys.exit(1)
+
+if score > floor:
+    print(
+        f"\nMutation score rose from {floor:.2f}% to {score:.2f}%. Commit the new\n"
+        "floor in the same change:\n"
+        f'\n    "floor": {score:.2f},\n'
+        "\nThis fails rather than warns because an unrecorded peak is how a ratchet\n"
+        "silently stops ratcheting: the next erosion would be measured from a\n"
+        "floor nobody updated."
+    )
+    sys.exit(1)
+REPORT_CHECK
+  ratchet=$?
+  set -e
+  if [[ "$ratchet" -ne 0 ]]; then
+    exit "$ratchet"
+  fi
 fi
 
 exit "$status"
