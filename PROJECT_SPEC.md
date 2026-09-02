@@ -485,26 +485,44 @@ document_replicas  (document_id, replica_id, user_id, last_seen_at, max_seq,
 - Snapshot every N operations (configurable, default 500). Loading a document
   reads the latest snapshot plus operations after its `server_seq`.
 
-### Snapshot encoding
+### Two encodings, two roles
 
-`document_snapshots.state` holds **the normalised JSON of §9** — the same format
-the conformance runners emit.
+The project carries **two** encodings of the same data, and which one is
+normative is not the same question as which one is stored.
 
-The reason is not tidiness. Sharing the format makes a snapshot directly
-comparable against a conformance run, which extends the cross-implementation
-check into persistence at no cost: if the C# server and the TypeScript client
-ever disagree about how a document serialises, a snapshot and a conformance
-artefact stop matching, and that is a build failure rather than a support
-ticket.
+**Normalised JSON (§9) is normative.** It defines what a correct serialisation
+*is*. The conformance corpus is JSON, the cross-implementation comparison is
+byte-for-byte over JSON, and JSON is the form a human reads when diagnosing a
+divergence. Nothing about this changes.
 
-JSON is larger and slower than a binary encoding, and §8 asks a document of
-100k live characters and 500k tombstones to load in under 500 ms server-side.
-**Measure it, do not assume it.** Phase 2 carries a test that builds a
-100k-element document, snapshots it, and *reports* serialised size and load time
-as metrics — no threshold, no assertion. The point is to know the number before
-the format is baked into the client's IndexedDB schema, not to discover it in
-Phase 7. If JSON turns out to be far off the target, that is a Phase 2 fact and
-the decision to change format is cheap; after Phase 4 it is not.
+**Binary is the storage and wire form.** `document_snapshots.state` holds
+binary, and operations travel the wire as binary. The layout is specified below
+under *Binary encoding*.
+
+The two are tied together by a rule, not by convention:
+
+> **Binary correctness derives from JSON correctness.** The corpus asserts
+> `binary → JSON → binary` is byte-identical, and `JSON → binary → JSON` is
+> byte-identical, on **both** implementations. A binary codec that round-trips
+> but disagrees with the normative form fails the build.
+
+This is what preserves the cross-implementation guarantee through the format
+change. Without it, binary would be a second definition of correctness that
+nothing checks against the first, and the two would drift the way any unchecked
+pair of implementations drifts.
+
+**Why binary at all.** Phase 2 measured the JSON snapshot at 100k live elements:
+22,277,866 bytes — 222.8 bytes per element — loading in 501–941 ms against §8's
+500 ms target, with no tombstones. §13.9 has the numbers and the reasoning. The
+short version is that 222.8 bytes carries on the order of 50 bytes of actual
+data, and §8's stated case adds 500k tombstones, stored in full: roughly 130 MiB
+to move before it reaches a browser. Phase 1 established that tombstones cannot
+be collected on causal stability alone, because a `RightOrigin` can name one
+(§5), so 500k is a realistic accumulation rather than a pessimistic one.
+
+**Why now, and not in Phase 4.** Phase 4 binds the format into the client's
+IndexedDB schema. After that, changing it is a migration on every user's
+machine; before it, it is a codec swap behind two tests.
 
 ### Serialisation lives in Editor.Infrastructure
 
@@ -538,19 +556,42 @@ lock keyed by `document_id`, reusing the 50 ms batching window from §8 so the
 lock is taken once per batch rather than once per operation. Ops become visible
 in `server_seq` order because the batch commits under the lock.
 
-### Wire and trace encoding — normative
+### JSON encoding — normative
 
 All 64-bit values (`Seq`, `server_seq`, and any counter that can exceed 2^53)
-serialize as **decimal strings** in JSON — on the wire, in snapshots, and in
-conformance traces. The TypeScript side parses them as `BigInt`.
+serialize as **decimal strings** in JSON — in snapshots read for diagnosis, in
+conformance traces, and anywhere else the normative form appears. The TypeScript
+side parses them as `BigInt`.
 
 JSON numbers are IEEE 754 doubles. Values above 2^53 do not round-trip, which
 would break the byte-identical requirement in §9 silently and only after a
 replica had been running long enough to matter.
 
-Every operation and message carries a `v` protocol-version field from the first
-commit. Adding one after the conformance corpus and client IndexedDB schema
-exist is a migration; adding it now is a field.
+**This rule binds the JSON form only.** It exists because JSON cannot represent
+a 64-bit integer, which is a fact about JSON. The binary form of §6 encodes the
+same values as varints and has no such problem — restating the decimal-string
+rule there would be cargo cult, not consistency.
+
+### Versioning — both forms
+
+Every operation and message carries a protocol version from the first commit.
+Adding one after the conformance corpus and the client's IndexedDB schema exist
+is a migration; adding it now is a field.
+
+It appears differently in each form, carrying the same meaning:
+
+- **JSON:** a `v` field.
+- **Binary:** the header's version byte (§6).
+
+**An unrecognised version is rejected in both forms**, with a structured error
+naming the versions the reader supports. Never a best-effort parse, in either
+form, for any reason.
+
+A codec that guesses at a format it does not know produces a document that is
+wrong but well-formed — and this system's entire job is to make every replica
+agree. Every replica agreeing on a corrupt document is not a degraded outcome;
+it is the precise failure the project exists to prevent, arrived at by a path
+that leaves no error behind. Refusing to parse is loud, local, and recoverable.
 
 ### Run operations
 
@@ -683,12 +724,34 @@ measurement point is not a falsifiable claim.
 | p99 < 150 ms, client keystroke → remote client render | 20 concurrent editors, loopback network |
 | 1,000 concurrent connections per instance at < 2 GB RSS | connections spread over 100 documents, 10 each |
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
+| Document load, **browser**, 100k live characters + 500k tombstones | reported, no threshold — see below |
 
-The document-load target is a **server-side** number. The browser replica has no
-equivalent target in this phase; if one is wanted later it constrains the
-snapshot format and must be specified separately. Note also that 500k
-accumulated tombstones implies GC is not keeping up — this is a stress target,
-not a steady state.
+**Document load is two numbers, not one.** The original §8 scoped the 500 ms
+target to the server and said explicitly that a browser target, if wanted later,
+"constrains the snapshot format and must be specified separately". That
+condition has now fired: Phase 2's measurement is what moved the storage and
+wire form to binary (§6), so the browser figure is specified here.
+
+Both numbers are required, and each names where it is measured, because
+"document load" without a measurement point is not a falsifiable claim:
+
+- **Server-side**, C#, from snapshot plus tail, cold cache. Target < 500 ms.
+- **Browser**, the TypeScript core of §9, in **headless Chromium** on a
+  **standard GitHub-hosted `ubuntu-latest` runner** (2 vCPU, 7 GB) — the
+  hardware class is part of the number, and the exact Chromium version is
+  recorded alongside each measurement. **Cold** means a fresh page load with
+  **empty IndexedDB**: the first-time-user case, where the document arrives over
+  the network and nothing is cached. A warm figure may be reported alongside it
+  but the cold one is the number that matters.
+
+The browser figure carries **no threshold in this phase** — it is reported, the
+way §6's snapshot metric was reported, because setting a bound before anyone has
+seen the number is how §8 acquired a 500 ms target nothing had measured. It will
+be worse than the server figure and it is the one that decides whether this
+works on a slow connection.
+
+Note also that 500k accumulated tombstones implies GC is not keeping up — this
+is a stress target, not a steady state.
 
 ## 9. Client
 
@@ -882,7 +945,9 @@ reviewed. At the end of each phase, stop and report.
 | 0 | Repo, solution, Docker Compose, CI, `AGENTS.md` | See below — the original "empty suites" gate had no signal |
 | 1 | `Crdt.Core` **and the TypeScript core**, property tests, conformance runner | All 8 invariants pass 10,000 randomized cases; ≥85% mutation score; transcribed fixed traces match across both implementations |
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
-| 3 | SignalR hub, auth, causal delivery | Two real clients converge; auth tests pass |
+| 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
+| 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
+| 3b | Causal delivery over the wire, scale-out | Two real clients converge; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test |
@@ -897,6 +962,22 @@ and (f) run a secret scan.
 
 An empty test suite passing proves nothing, and `vitest` exits non-zero with no
 test files unless told otherwise.
+
+**Phase 2.5 exists because the hub and the codec must not change together.**
+Phase 2's measurement moved the storage and wire form to binary (§6, §13.9), and
+the wire form is an input to Phase 3's hub. Doing both in one phase means a red
+convergence test cannot say which of the two moved. The scale dimension and the
+mutation ratchet ride along because Phase 3's fan-out is where the
+correct-at-test-size, fatal-at-real-size class recurs, so the instrument has to
+exist before the phase that needs it.
+
+**Phase 3 is split by failure mode, not by size.** In Phase 3 a failing test
+means a security property is absent — that is the only thing it can mean. In
+Phase 3b a failing test might mean the property is absent, or the test is wrong,
+or a timing assumption slipped. Those want different reviewer attention, and
+reviewing them together means the security tests get skimmed on the way to the
+concurrency work. Run expansion sits in Phase 3 because it is ingest-path
+validation, and because 3b needs it working.
 
 **Phase 1 builds both cores together.** The TypeScript replica was originally
 written in Phase 4 and first compared against C# in Phase 5, which meant
@@ -1112,9 +1193,22 @@ Round 3 is the instructive one: four plausible tests, written against the right
 file, moved coverage by exactly zero. Reaching the branch needed an argument
 about when the code could execute, not more scenarios.
 
+**The gate is now a ratchet.** The committed score is the floor, and any
+decrease fails CI regardless of the absolute number. An 85.44% that clears an
+85% threshold after a 1.02-point drop is exactly the erosion a threshold is
+supposed to catch and structurally cannot: a fixed bar only notices the last
+step of a slide, and by then the headroom that would have paid for the fix is
+gone.
+
+Raising the floor is an ordinary commit — improve coverage, commit the new
+number. Lowering it requires an argued exception recorded in this section,
+naming what was removed and why the coverage it provided is not worth keeping.
+There is no third option, and in particular "the score went down but it still
+passes" is no longer a sentence the build will accept.
+
 `scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
-permanently. They are what caught the false 0.00%, and a gate that cannot fail
-loudly is not a gate.
+permanently, alongside the ratchet. They are what caught the false 0.00%, and a
+gate that cannot fail loudly is not a gate.
 
 One survivor found along the way is genuine rather than tooling: flipping the
 `Seq` half of the `ElementId` comparison changes nothing observable, because two
@@ -1213,6 +1307,37 @@ either the target moves, the snapshot stops being the whole document (a chunked
 or incremental encoding), or the encoding changes. Deciding is cheap now and
 expensive after Phase 4 binds the format into the client's IndexedDB schema,
 which is why §6 asked for the number in Phase 2.
+
+**Resolved: the encoding changes.** §6 now splits the roles — JSON stays
+normative, binary becomes the storage and wire form. Three facts decided it.
+
+*The overhead is structural, not incidental.* An element carries an id, a
+value, a parent, a side, an optional right origin, and a deleted flag: on the
+order of 50 bytes of actual information. JSON spends 222.8. The gap is field
+names repeated per element, 16-byte replica ids written out per reference,
+64-bit counters as decimal strings, and punctuation — none of which a tokeniser
+can skip, which is why parsing dominates the load time rather than the database
+does.
+
+*The stress case is four times worse than the case measured.* §8 asks for 100k
+live characters **and 500k tombstones**, and a tombstone is a full element in
+this encoding — it must be, because it can still be named as a `RightOrigin`.
+Six hundred thousand elements at 222.8 bytes is roughly 130 MiB to move before
+it reaches a browser.
+
+*Those tombstones are realistic, not pessimistic.* Phase 1 established that
+causal stability alone does not license collecting a tombstone, precisely
+because a `RightOrigin` can name one (§5, and the collection rule's four
+conditions). Accumulation is the expected behaviour of a correct implementation,
+not evidence of a broken one.
+
+The savings are structural too, and that is the reason to expect them to hold:
+interning replica ids into a per-snapshot table replaces a 16-byte value with a
+small index at every reference, varints replace decimal strings, and sequential
+typing — the most common editing pattern there is — produces long runs of
+consecutive `(replica, seq)` along a parent chain, which the run form collapses.
+The layout is specified in §6; the achieved figure is measured and reported
+rather than predicted.
 
 **The metric also found two defects that no correctness test had reached.**
 Both were only visible at this size, which is the argument for measuring at
