@@ -56,6 +56,13 @@ public sealed class ConformanceTests
                     $"{file.Name}: replica {replica} has \"{text}\" but replica 0 has \"{result.Text}\".");
             }
 
+            // §6: the encoding is a second implementation and must not lose
+            // anything the algorithm depends on.
+            Assert.True(
+                string.Equals(result.WireRoundTripText, result.Text, StringComparison.Ordinal),
+                $"{file.Name}: replaying through the wire encoding gave "
+                + $"\"{result.WireRoundTripText}\" but direct replay gave \"{result.Text}\".");
+
             if (expected.TryGetProperty("text", out var exact))
             {
                 Assert.True(

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Crdt.Core;
+using Editor.Infrastructure.Serialization;
 
 namespace Conformance;
 
@@ -9,7 +10,8 @@ public sealed record TraceResult(
     string Name,
     string Text,
     IReadOnlyDictionary<string, string> ReplicaTexts,
-    IReadOnlyDictionary<string, string> VersionVector);
+    IReadOnlyDictionary<string, string> VersionVector,
+    string WireRoundTripText);
 
 /// <summary>Replays a conformance trace against real replicas.</summary>
 /// <remarks>
@@ -23,6 +25,8 @@ public static class TraceReplay
     {
         var name = trace.GetProperty("name").GetString()!;
 
+        var produced = new List<Operation>();
+
         var ids = trace.GetProperty("replicas")
             .EnumerateArray()
             .Select(r => ReplicaId.Parse(r.GetProperty("id").GetString()!))
@@ -34,13 +38,13 @@ public static class TraceReplay
             switch (op.GetProperty("op").GetString())
             {
                 case "insert":
-                    replicas[op.GetProperty("replica").GetInt32()].Insert(
+                    produced.Add(replicas[op.GetProperty("replica").GetInt32()].Insert(
                         op.GetProperty("index").GetInt32(),
-                        SingleRune(op.GetProperty("value").GetString()!));
+                        SingleRune(op.GetProperty("value").GetString()!)));
                     break;
                 case "delete":
-                    replicas[op.GetProperty("replica").GetInt32()]
-                        .Delete(op.GetProperty("index").GetInt32());
+                    produced.Add(replicas[op.GetProperty("replica").GetInt32()]
+                        .Delete(op.GetProperty("index").GetInt32()));
                     break;
                 case "deliver":
                     Deliver(
@@ -69,7 +73,29 @@ public static class TraceReplay
                 count.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        return new TraceResult(name, replicas[0].Text, replicaTexts, versionVector);
+        return new TraceResult(
+            name, replicas[0].Text, replicaTexts, versionVector, WireRoundTrip(ids[0], produced));
+    }
+
+    /// <summary>
+    /// Replays the same operations after a trip through the wire encoding.
+    /// </summary>
+    /// <remarks>
+    /// PROJECT_SPEC.md §6: the encoding is a second implementation alongside the
+    /// TypeScript serialiser, so it is exercised on every trace rather than on
+    /// one. Anything the encoding loses — a right origin that meant
+    /// end-of-document, a side, a sequence number past 2^53 — changes the text
+    /// this produces.
+    /// </remarks>
+    private static string WireRoundTrip(ReplicaId id, IReadOnlyList<Operation> operations)
+    {
+        var replica = new Replica(id);
+        foreach (var operation in operations)
+        {
+            replica.Apply(OperationWireFormat.Decode(OperationWireFormat.Encode(operation)));
+        }
+
+        return replica.Text;
     }
 
     private static Rune SingleRune(string value)
