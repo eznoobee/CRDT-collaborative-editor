@@ -1,11 +1,11 @@
 {
-  "floor": 87.74,
+  "floor": 88.12,
   "statuses": {
     "killed": 220,
-    "timeout": 9,
-    "survived": 18,
+    "timeout": 10,
+    "survived": 17,
     "noCoverage": 14
   },
   "recorded": "2026-09-02",
-  "why": "PROJECT_SPEC.md §13.7. This is the ratchet floor, not a target. scripts/mutation.sh fails if the score moves off it in either direction: down means coverage eroded, up means this file is stale and the next erosion would be measured from the wrong place. Both are one-line fixes. Lowering it needs an argued exception recorded in §13.7."
+  "why": "PROJECT_SPEC.md §13.7. This is the ratchet floor, not a target. scripts/mutation.sh fails if the score moves off it in either direction: down means coverage eroded, up means this file is stale and the next erosion would be measured from the wrong place. Both are one-line fixes. Lowering it needs an argued exception recorded in §13.7. The killed/timeout split drifts between runs; the score does not, because both are detections."
 }

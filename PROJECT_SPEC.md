@@ -1214,11 +1214,24 @@ stays at 87.74%, so a later slide from 90% to 88% passes — the exact erosion t
 ratchet exists to catch, now invisible because the reference point was never
 moved. Both directions are a one-line fix.
 
-The comparison is exact rather than tolerant because the score is deterministic:
-the same commit produces identical status counts locally and on CI, timeouts
-included (85.44% from 215 killed, 8 timed out, 21 survived, 17 uncovered, in
-both places). A tolerance would have to be about the size of the erosion being
-detected, which would defeat the check.
+The comparison is exact rather than tolerant because the **score** is stable,
+which is not the same as the status counts being stable. Across four runs of one
+commit the split moved — 220 killed with 10 timed out, then 218 with 12 — while
+the score stayed at 88.12% every time, because a timeout and a kill are both
+detections and the numerator is their sum. On the same commit CI and this
+machine agree (85.44% from 215 killed, 8 timed out, 21 survived, 17 uncovered,
+in both places). A tolerance would have to be about the size of the erosion
+being detected, which would defeat the check.
+
+**That stability has to be maintained, not assumed.** A mutant that only makes
+the suite slow gets recorded as timed out, so a suite slow enough to sit near
+the timeout starts converting *survivors* into timeouts — which does move the
+score, and moves it by however fast the machine is. Running the §13.10 scale
+cases at full size did exactly that: the score read 89.66% with thirty timeouts,
+five of them mutants that had survived a moment earlier. `scripts/mutation.sh`
+therefore bounds document size under mutation (`CRDT_SCALE_ELEMENTS`) the way it
+already bounds case counts. The rule to keep: if the timeout count climbs, the
+score is measuring the clock.
 
 **Demonstrated, not assumed.** Deleting one of the three `Import` tests takes
 the score to 86.59% — which still clears Stryker's own 85% break threshold, so
@@ -1377,3 +1390,54 @@ Neither is a specification change. They are recorded because the conclusion is:
 the correctness suite verifies the algorithm at sizes where a linear-space bug
 and a quadratic-time bug are both invisible, and only a test that builds a
 realistic document exposed them.
+
+### 13.10 The generator explored shape exhaustively and scale not at all
+
+The stack overflow in §13.9 is the most instructive failure in the project so
+far, and the instructive part is not the bug. It is that eight invariants at
+10,000 randomised cases each, a nine-trace cross-implementation corpus, and an
+87% mutation score all passed over it.
+
+**Depth equals document length on left-to-right typing** — each character is a
+right child of the previous one — so a recursive traversal overflows at a
+document length users reach in an afternoon. That is the single most common
+thing anyone does to a text editor.
+
+It survived because every generated scenario built a few dozen elements. The
+magnitudes were literals in the generator: runs of two to four characters, at
+most five edits a round, a prefix of at most three. Nothing in the suite was
+wrong; the dimension simply was not there.
+
+Worse, randomisation works *against* finding it. A generator that picks
+positions uniformly produces balanced trees. The pathological shape is the
+degenerate one — a single chain — and that is precisely what uniform random
+insertion does not produce. More cases would never have found this. Only a
+different dimension would.
+
+**Scale is now drawn explicitly** (`ScenarioScale`), reported on every scenario,
+and printed in failure output beside the seed. Large scenarios are rare on
+purpose — roughly one seed in 250, about forty across the 10,000-case gate,
+reaching around 2,000 elements — because their value is in being reached at all,
+and because typing costs O(n²) in this implementation. `ScaleTests` carries the
+few very large cases: 10,000 characters through real typing, and 50,000 and
+150,000 through the import path that Phase 2 proved equivalent to typing.
+
+The shrinker gained a size phase for the same reason. Delta debugging a
+two-thousand-step scenario needs O(n log n) replays of an O(n²) simulation and
+never finishes; truncating to a prefix costs O(log n) replays and answers "was
+this about the tail?" immediately. A shrinker that hangs turns a reproducible
+failure into an unreadable one, so the shape phase also runs against a replay
+budget.
+
+**One asymmetry is worth knowing.** On .NET a stack overflow cannot be caught:
+reintroducing the recursive traversal kills the test host rather than failing an
+assertion. That is still a red build and it is the only signal the platform
+offers. The TypeScript side throws a catchable `RangeError`, and its regression
+test asserts on it directly — which is how that fix was verified.
+
+**The general form, for Phase 3 onward:** a property suite that passes at every
+size it tests is evidence about those sizes only. Where cost is superlinear in
+something — document length, connection count, fan-out width — the suite must
+name that quantity as a dimension and draw it, because the failure mode is
+correct at every tested size and fatal at real ones, and nothing in a green
+build distinguishes the two.

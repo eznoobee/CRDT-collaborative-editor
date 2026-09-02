@@ -24,6 +24,13 @@ cd "$(dirname "$0")/.."
 # would take hours and add nothing. The 10,000-case gate runs separately in CI.
 export CRDT_PROPERTY_CASES="${CRDT_PROPERTY_CASES:-150}"
 
+# Same reasoning for size (PROJECT_SPEC.md §13.10). Unbounded, the scale cases
+# make the suite slow enough that mutants which merely slow it down are recorded
+# as timed out — detected without anything having caught them — and the counts
+# start depending on how fast the machine is. §13.7's ratchet compares the score
+# exactly, which is only sound while the score is deterministic.
+export CRDT_SCALE_ELEMENTS="${CRDT_SCALE_ELEMENTS:-2000}"
+
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 

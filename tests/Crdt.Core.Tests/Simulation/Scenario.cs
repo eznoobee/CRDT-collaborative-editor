@@ -69,6 +69,7 @@ public sealed record SyncStep : ScenarioStep;
 /// </remarks>
 public sealed record Scenario(
     int Seed,
+    ScenarioScale Scale,
     IReadOnlyList<ReplicaId> Replicas,
     IReadOnlyList<ScenarioStep> Steps,
     IReadOnlyList<RunSession> Sessions)
@@ -77,8 +78,8 @@ public sealed record Scenario(
     public string Describe()
     {
         var sb = new StringBuilder();
-        sb.Append("seed ").Append(Seed).Append(", ")
-          .Append(Replicas.Count).AppendLine(" replicas");
+        sb.Append("seed ").Append(Seed).Append(", scale ").Append(Scale.Name)
+          .Append(", ").Append(Replicas.Count).AppendLine(" replicas");
         for (var i = 0; i < Replicas.Count; i++)
         {
             sb.Append("  r").Append(i).Append(" = ").AppendLine(Replicas[i].ToString());
