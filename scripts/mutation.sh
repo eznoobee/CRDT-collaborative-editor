@@ -16,6 +16,13 @@
 # absolute number. Stryker's own 85% break threshold stays as a backstop, but it
 # cannot see erosion — 85.44% clears an 85% bar after a 1.02-point drop, which is
 # how Phase 2 gave back coverage with nothing going red.
+#
+# The ratchet is ENFORCED IN CI ONLY, and PROJECT_SPEC.md §13.7 says why: the
+# score is stable on one machine and is not stable across machines. A mutant that
+# survives here can time out on a slower runner, and a timeout counts as a
+# detection, so the same commit scored 88.12% here and 88.89% on CI. Comparing
+# exactly is right; comparing exactly against a number measured somewhere else is
+# not. Locally the comparison is printed and explained; CI decides.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -120,7 +127,14 @@ REPORT_CHECK
   ratchet=$?
   set -e
   if [[ "$ratchet" -ne 0 ]]; then
-    exit "$ratchet"
+    if [[ "${CI:-}" == "true" || "${MUTATION_RATCHET:-}" == "enforce" ]]; then
+      exit "$ratchet"
+    fi
+
+    echo
+    echo "Not failing: the ratchet is enforced in CI, where the floor was measured."
+    echo "A local score differing from the floor is expected — see §13.7. Run with"
+    echo "MUTATION_RATCHET=enforce to fail here too."
   fi
 fi
 

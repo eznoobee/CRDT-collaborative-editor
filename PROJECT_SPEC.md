@@ -1471,24 +1471,38 @@ stays at 87.74%, so a later slide from 90% to 88% passes — the exact erosion t
 ratchet exists to catch, now invisible because the reference point was never
 moved. Both directions are a one-line fix.
 
-The comparison is exact rather than tolerant because the **score** is stable,
-which is not the same as the status counts being stable. Across four runs of one
-commit the split moved — 220 killed with 10 timed out, then 218 with 12 — while
-the score stayed at 88.12% every time, because a timeout and a kill are both
-detections and the numerator is their sum. On the same commit CI and this
-machine agree (85.44% from 215 killed, 8 timed out, 21 survived, 17 uncovered,
-in both places). A tolerance would have to be about the size of the erosion
-being detected, which would defeat the check.
+The comparison is exact rather than tolerant — a tolerance would have to be
+about the size of the erosion being detected, which would defeat the check — and
+that only works where the score is comparable.
 
-**That stability has to be maintained, not assumed.** A mutant that only makes
-the suite slow gets recorded as timed out, so a suite slow enough to sit near
-the timeout starts converting *survivors* into timeouts — which does move the
-score, and moves it by however fast the machine is. Running the §13.10 scale
-cases at full size did exactly that: the score read 89.66% with thirty timeouts,
-five of them mutants that had survived a moment earlier. `scripts/mutation.sh`
-therefore bounds document size under mutation (`CRDT_SCALE_ELEMENTS`) the way it
-already bounds case counts. The rule to keep: if the timeout count climbs, the
-score is measuring the clock.
+**The score is stable on one machine and is not stable across machines, and this
+was got wrong once.** An earlier draft of this section claimed the same commit
+produces identical status counts locally and on CI. That claim was made from
+four runs on a single machine plus one CI run predating the §13.10 scale cases,
+and CI disproved it immediately: commit `d20bc0c` scored **88.12%** locally
+(220 killed, 10 timed out, 17 survived) and **88.89%** on CI (216 killed, 16
+timed out, 15 survived). Two mutants that survive here time out there.
+
+The mechanism is that **a timeout counts as a detection**, which is right — a
+mutant that hangs the suite has been caught — but it means a slower machine
+detects mutants a faster one does not, and reports a *higher* score for
+identical code. It is not the scale cases: bounding them to 100 elements changes
+neither the score nor the timeout count here. It is the runner.
+
+So the ratchet is **enforced in CI only**, and `mutation-floor.json` records
+CI's number and says so. Comparing exactly is right; comparing exactly against a
+number measured somewhere else is not. Locally `scripts/mutation.sh` prints the
+comparison, explains the difference, and does not fail; `MUTATION_RATCHET=enforce`
+overrides that for anyone who wants it. The two permanent guards — no tests
+discovered, nothing killed — still fail everywhere, because neither depends on
+timing.
+
+**The rule that survives all of this:** if the timeout count climbs, the score is
+measuring the clock. Running the §13.10 scale cases at full size once read 89.66%
+with thirty timeouts, five of them mutants that had survived moments earlier —
+the score rose while nothing new was caught. `scripts/mutation.sh` bounds
+document size under mutation (`CRDT_SCALE_ELEMENTS`) for that reason, and it is
+still worth doing even though it turned out not to be the cross-machine cause.
 
 **Demonstrated, not assumed.** Deleting one of the three `Import` tests takes
 the score to 86.59% — which still clears Stryker's own 85% break threshold, so

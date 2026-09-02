@@ -1,11 +1,12 @@
 {
-  "floor": 88.12,
+  "floor": 88.89,
   "statuses": {
-    "killed": 220,
-    "timeout": 10,
-    "survived": 17,
+    "killed": 216,
+    "timeout": 16,
+    "survived": 15,
     "noCoverage": 14
   },
   "recorded": "2026-09-02",
-  "why": "PROJECT_SPEC.md §13.7. This is the ratchet floor, not a target. scripts/mutation.sh fails if the score moves off it in either direction: down means coverage eroded, up means this file is stale and the next erosion would be measured from the wrong place. Both are one-line fixes. Lowering it needs an argued exception recorded in §13.7. The killed/timeout split drifts between runs; the score does not, because both are detections."
+  "why": "PROJECT_SPEC.md §13.7. The ratchet floor, not a target, and CI's number rather than any local one: a mutant that survives on a fast machine can time out on a slow one, and a timeout counts as a detection, so the score is stable on one machine and not across machines. scripts/mutation.sh enforces this only when CI=true. Moving off it in either direction fails — down means coverage eroded, up means this file is stale and the next erosion would be measured from the wrong place. Lowering it needs an argued exception recorded in §13.7.",
+  "measuredOn": "github-actions ubuntu-latest"
 }
