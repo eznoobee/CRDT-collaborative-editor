@@ -571,7 +571,7 @@ One byte, in element and insert records alike.
 |---|---|
 | 0 | side: `0` left child, `1` right child |
 | 1 | deleted |
-| 2–3 | parent: `0` root, `1` the previous record's element, `2` explicit, `3` invalid |
+| 2–3 | parent: `0` root, `1` **the element immediately before this one in document order**, `2` explicit, `3` invalid |
 | 4 | right origin, **only when bit 0 is set**: `0` end of document, `1` explicit |
 | 5–7 | reserved, must be zero |
 
@@ -626,11 +626,13 @@ sequential typing.
 
 A run stands for `count` elements whose ids are `(r, s)`, `(r, s+1)`, …
 `(r, s+count-1)`, where every element after the first is a **right child of the
-one before it with its right origin at end of document**. Flags bit 1 is ignored
-for a run — the bitmap carries every element's deleted state, the first
-included — and bit 4 must be clear, because a run's interior right origins are
-end-of-document by construction and the first element's must be too for the run
-to be one shape.
+one before it with its right origin at end of document**. The bitmap carries
+every element's deleted state, the first included, and bit 4 must be clear
+because a run's interior right origins are end-of-document by construction and
+the first element's must be too for the run to be one shape. Bit 1 must be zero, since the bitmap already carries the first
+element's deleted state and two spellings of one document is what canonical form
+forbids. Bit 0 is the first element's own side: a run may begin at a left child,
+and every element after it is a right child regardless.
 
 That is exactly the shape typing left to right produces: each character a right
 child of the previous one, nothing following it at the time. It is also, not
@@ -650,8 +652,8 @@ After the replica table:
 | ops | `op count` × operation record |
 
 **Insert** — tag `00`, then flags, id, parent, right origin and value exactly as
-an element record. "Previous record's element" refers to the element inserted by
-the previous operation in this batch.
+an element record. Parent flag `1` refers to the element inserted by the
+immediately preceding operation in this batch.
 
 **Delete** — tag `01`, then id (replica index varint, seq varint) and target
 (replica index varint, seq varint).
@@ -676,17 +678,21 @@ encoder can have if it may choose between encodings.
    element record that could have joined an adjacent run is invalid, and so is a
    run that could have been longer.
 4. A run record has `count` ≥ 2. One element is an element record.
-5. Parent flag `1` ("previous record's element") is used whenever it applies;
-   spelling the same parent out as flag `2` is invalid.
+5. Parent flag `1` is used whenever it applies; spelling the same parent out as
+   flag `2` is invalid.
 6. Varints are minimally encoded.
 7. No trailing bytes after the last record.
 
-A reader **rejects** every violation above that it can detect while decoding —
-which is all of them except maximality across a record boundary it has not yet
-reached, and that one is caught by re-encoding. Rejecting non-canonical input is
-not pedantry: a reader that accepts two spellings of one document turns the
-byte-identity check into a check of whichever spelling the writer happened to
-choose.
+A reader **rejects** every violation above, all of which are checkable while
+decoding. Maximality reduces to one local rule: *the first element of any record
+must not be able to continue the element immediately before it* — that is, the
+two must not together satisfy the run shape. An element record that could have
+joined the previous element fails it, and so does a run whose first element could
+have extended the preceding run, which is the same condition stated once.
+
+Rejecting non-canonical input is not pedantry: a reader that accepts two
+spellings of one document turns the byte-identity check into a check of
+whichever spelling the writer happened to choose.
 
 #### Measuring it honestly
 
