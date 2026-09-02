@@ -1679,28 +1679,34 @@ or storing the tree shape rather than replaying it — are both changes to what 
 snapshot *means*, not to how it is spelled, which is why they are not smuggled
 in beside a codec swap.
 
-**And the browser is worse, as expected.** §8's second number, measured by
-`scripts/browser-metrics.sh` — the §9 TypeScript core in headless Chromium
-141.0.7390.37, cold meaning a fresh context with empty IndexedDB, on a 4 vCPU
-development machine rather than the `ubuntu-latest` runner §8 names (CI produces
-the figure that counts):
+**And the browser is worse, as expected.** §8's second number, from the
+`browser-metrics` CI job on the `ubuntu-latest` runner §8 names — the §9
+TypeScript core in **headless Chromium 151.0.7922.34**, 4 vCPU, cold meaning a
+fresh context with empty IndexedDB:
 
 | Case | fetch | parse | place | text | **cold total** | warm total |
 |---|---|---|---|---|---|---|
-| chain, 100k | 5 ms | 29 ms | 414 ms | 43 ms | **502 ms** | 515 ms |
-| §8's 600k case | 263 ms | 1,636 ms | 3,714 ms | 335 ms | **5,964 ms** | 5,269 ms |
+| chain, 100k | 4 ms | 38 ms | 236 ms | 19 ms | **302 ms** | 297 ms |
+| §8's 600k case | 38 ms | 493 ms | 1,683 ms | 291 ms | **2,508 ms** | 2,045 ms |
 
-Six seconds for §8's document, on a fast local network with a 5.3 MiB payload.
-Reading the same bytes back from IndexedDB is not materially cheaper, because
-the fetch was never the cost.
+Two and a half seconds for §8's document, on a fast network with a 5.3 MiB
+payload. Reading the same bytes back from IndexedDB saves almost nothing,
+because the fetch was never the cost — which is the useful part: a warm cache
+does not rescue this, and neither will a faster network.
 
-**The same term dominates on both sides.** Placement is 3,714 ms of the
-browser's 5,964 and 1,164 ms of the server's ~1,700, in two independently
+**The hardware matters enough to be part of the number, which is why §8 names
+it.** The same commit measured **5,964 ms** for the 600k case on the 4 vCPU
+development container this was written in — more than twice CI's figure on a
+nominally identical core count. Quote the CI figure; treat a local run as the
+shape of the answer rather than the answer.
+
+**The same term dominates on both sides.** Placement is 1,683 ms of the
+browser's 2,508 and 1,164 ms of the server's ~1,700, in two independently
 written implementations. That is not two performance bugs; it is the cost of
 replaying §5's placement rule 600,000 times, and it is the thing to fix when
 §8's targets are addressed. The encoding was worth changing — 141 MiB became
-5.3 MiB and JSON parsing fell from 4.6 s to 0.5 s server-side — and it was not
-the whole problem.
+5.3 MiB, JSON parsing fell from 4.6 s to 0.5 s server-side, and the browser's
+parse is 493 ms of a 2,508 ms load — and it was not the whole problem.
 
 **The metric also found two defects that no correctness test had reached.**
 Both were only visible at this size, which is the argument for measuring at
