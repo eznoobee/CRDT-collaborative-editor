@@ -1,4 +1,5 @@
 import { compareElementId, elementKey, type ElementId } from './elementId';
+import type { ElementState, VersionVectorEntry } from './elementState';
 import type { InsertOperation, DeleteOperation, Operation, Side } from './operation';
 import { compareReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
 
@@ -153,6 +154,113 @@ export class Replica {
   }
 
   /** Applies an operation, buffering it if a dependency is missing. */
+  /**
+   * Every element in traversal order, tombstones included — the basis of a
+   * snapshot (PROJECT_SPEC.md §6).
+   *
+   * Tombstones are in it because operations arriving after the snapshot still
+   * attach to them: a `rightOrigin` can name a tombstone (§5), so dropping them
+   * would make a snapshot unable to accept operations a full replay accepts.
+   */
+  export(): ElementState[] {
+    return this.inOrder().map((node) => ({
+      id: node.id,
+      value: node.value,
+      parent: node.parent !== null && !node.parent.isRoot ? node.parent.id : null,
+      side: node.side,
+      rightOrigin: node.rightOrigin !== null ? node.rightOrigin.id : null,
+      isDeleted: node.isDeleted,
+    }));
+  }
+
+  /** This replica's version vector in the shape `import` takes back. */
+  get versionVectorEntries(): VersionVectorEntry[] {
+    return [...this.versionVectorByKey.values()].map((entry) => ({
+      replica: entry.replica,
+      count: entry.count,
+    }));
+  }
+
+  /**
+   * Rebuilds a replica from exported elements and a version vector.
+   *
+   * Mirrors the C# `Replica.Import`, deliberately including the parts that look
+   * like overkill. Elements are placed with the live sibling ordering rather
+   * than trusting the order they arrive in, so a snapshot written wrongly builds
+   * a different tree here instead of quietly restoring a corrupt one. And
+   * placement iterates to a fixpoint because traversal order does not guarantee
+   * parents precede children — a left child is traversed before its parent.
+   *
+   * Each pass rebuilds the unplaced list rather than splicing out of it: the
+   * splice version is quadratic in exactly the common case where everything
+   * places on the first pass, which is what §13.9 records finding at 100k.
+   */
+  static import(
+    id: ReplicaId,
+    elements: readonly ElementState[],
+    versionVector: readonly VersionVectorEntry[],
+  ): Replica {
+    const replica = new Replica(id);
+    let remaining = [...elements];
+
+    while (remaining.length > 0) {
+      const deferred: ElementState[] = [];
+
+      for (const element of remaining) {
+        const parentPresent =
+          element.parent === null || replica.byId.has(elementKey(element.parent));
+        const originPresent =
+          element.rightOrigin === null || replica.byId.has(elementKey(element.rightOrigin));
+
+        if (!parentPresent || !originPresent) {
+          deferred.push(element);
+          continue;
+        }
+
+        const parent =
+          element.parent === null ? replica.root : replica.byId.get(elementKey(element.parent))!;
+        const node: Node = {
+          id: element.id,
+          value: element.value,
+          isDeleted: element.isDeleted,
+          isRoot: false,
+          parent,
+          side: element.side,
+          rightOrigin:
+            element.rightOrigin === null
+              ? null
+              : replica.byId.get(elementKey(element.rightOrigin))!,
+          leftChildren: [],
+          rightChildren: [],
+        };
+
+        replica.byId.set(elementKey(node.id), node);
+        insertAmongSiblings(node, parent);
+      }
+
+      if (deferred.length === remaining.length) {
+        throw new Error(
+          `${deferred.length} elements reference a parent or right origin that is not in the ` +
+            'snapshot. The snapshot is incomplete or was written out of order.',
+        );
+      }
+
+      remaining = deferred;
+    }
+
+    for (const entry of versionVector) {
+      replica.versionVectorByKey.set(formatReplicaId(entry.replica), {
+        replica: entry.replica,
+        count: entry.count,
+      });
+      if (compareReplicaId(entry.replica, id) === 0) {
+        replica.nextSeq = entry.count;
+      }
+    }
+
+    return replica;
+  }
+
   apply(operation: Operation): void {
     if (this.hasSeen(operation)) {
       return;
