@@ -5,7 +5,7 @@ WORKDIR /source
 
 # Restore first, on just the files that affect it, so a source-only change
 # does not invalidate the restore layer.
-COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY global.json Directory.Build.props Directory.Packages.props .editorconfig ./
 COPY src/Crdt.Core/Crdt.Core.csproj                     src/Crdt.Core/
 COPY src/Editor.Domain/Editor.Domain.csproj             src/Editor.Domain/
 COPY src/Editor.Infrastructure/Editor.Infrastructure.csproj src/Editor.Infrastructure/

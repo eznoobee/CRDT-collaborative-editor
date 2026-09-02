@@ -1,11 +1,15 @@
 import { Replica } from './replica';
 import { parseReplicaId, formatReplicaId } from './replicaId';
+import { encodeOperation, decodeOperation } from './wire';
+import type { Operation } from './operation';
 
 export interface TraceResult {
   readonly name: string;
   readonly text: string;
   readonly replicaTexts: ReadonlyMap<string, string>;
   readonly versionVector: ReadonlyMap<string, string>;
+  /** The same operations replayed after a trip through the wire encoding. */
+  readonly wireRoundTripText: string;
 }
 
 interface TraceOp {
@@ -51,6 +55,7 @@ function syncAll(replicas: Replica[]): void {
 export function replay(trace: Trace): TraceResult {
   const ids = trace.replicas.map((r) => parseReplicaId(r.id));
   const replicas = ids.map((id) => new Replica(id));
+  const produced: Operation[] = [];
 
   for (const op of trace.ops) {
     switch (op.op) {
@@ -59,11 +64,11 @@ export function replay(trace: Trace): TraceResult {
         if (codePoints.length !== 1) {
           throw new Error(`A trace value must be exactly one code point, got '${op.value!}'.`);
         }
-        replicas[op.replica!]!.insert(op.index!, codePoints[0]!);
+        produced.push(replicas[op.replica!]!.insert(op.index!, codePoints[0]!));
         break;
       }
       case 'delete':
-        replicas[op.replica!]!.delete(op.index!);
+        produced.push(replicas[op.replica!]!.delete(op.index!));
         break;
       case 'deliver':
         deliver(replicas[op.from!]!, replicas[op.to!]!);
@@ -83,7 +88,21 @@ export function replay(trace: Trace): TraceResult {
     versionVector.set(replica, count.toString());
   }
 
-  return { name: trace.name, text: replicas[0]!.text, replicaTexts, versionVector };
+  // §6: the encoding is a second implementation alongside the C# one, so it is
+  // exercised on every trace. Anything it loses — a right origin that meant
+  // end-of-document, a side, a sequence past 2^53 — changes this text.
+  const mirror = new Replica(ids[0]!);
+  for (const operation of produced) {
+    mirror.apply(decodeOperation(encodeOperation(operation)));
+  }
+
+  return {
+    name: trace.name,
+    text: replicas[0]!.text,
+    replicaTexts,
+    versionVector,
+    wireRoundTripText: mirror.text,
+  };
 }
 
 /** Compares by Unicode code point, not UTF-16 code unit (§9). */

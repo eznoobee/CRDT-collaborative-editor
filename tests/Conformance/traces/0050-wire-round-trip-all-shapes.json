@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "name": "wire-round-trip-all-shapes",
+  "description": "Produces every operation shape the wire format has to carry: a left child, a right child whose right origin is another element, a right child whose right origin is end-of-document, and a delete.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "b" },
+    { "op": "insert", "replica": 0, "index": 0, "value": "a" },
+    { "op": "insert", "replica": 0, "index": 2, "value": "c" },
+    { "op": "insert", "replica": 0, "index": 1, "value": "x" },
+    { "op": "delete", "replica": 0, "index": 0 },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "text": "xbc",
+    "rationale": "PROJECT_SPEC.md section 6: the Editor.Infrastructure encoding is a second implementation alongside the TypeScript serialiser, so the corpus must exercise it. 'b' then prepending 'a' makes a left child; appending 'c' after 'b' makes a right child with no right origin; inserting 'x' between 'a' and 'b' makes a right child whose right origin is 'b'. Losing the distinction between the last two is exactly the encoding bug this catches, since both have no right-origin id."
+  }
+}

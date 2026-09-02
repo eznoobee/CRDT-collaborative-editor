@@ -304,22 +304,44 @@ export class Replica {
     }
   }
 
+  /**
+   * Depth-first in-order traversal, tombstones included.
+   *
+   * Iterative, not recursive, for the same reason as the C# side: typing left to
+   * right makes each character a right child of the previous one, so a
+   * document's tree depth equals its length. A recursive walk exceeds the call
+   * stack well below the document sizes §8 targets — and in a browser that takes
+   * the tab, not just the call.
+   */
   private inOrder(): Node[] {
     const result: Node[] = [];
-    visit(this.root, result);
-    return result;
-  }
-}
 
-function visit(node: Node, into: Node[]): void {
-  for (const child of node.leftChildren) {
-    visit(child, into);
-  }
-  if (!node.isRoot) {
-    into.push(node);
-  }
-  for (const child of node.rightChildren) {
-    visit(child, into);
+    // Each frame is [node, phase, next child index]: phase 0 walks the left
+    // children, 1 emits the node, 2 walks the right children.
+    const stack: [Node, number, number][] = [[this.root, 0, 0]];
+
+    while (stack.length > 0) {
+      const [node, phase, index] = stack.pop()!;
+
+      if (phase === 0) {
+        if (index < node.leftChildren.length) {
+          stack.push([node, 0, index + 1]);
+          stack.push([node.leftChildren[index]!, 0, 0]);
+        } else {
+          stack.push([node, 1, 0]);
+        }
+      } else if (phase === 1) {
+        if (!node.isRoot) {
+          result.push(node);
+        }
+        stack.push([node, 2, 0]);
+      } else if (index < node.rightChildren.length) {
+        stack.push([node, 2, index + 1]);
+        stack.push([node.rightChildren[index]!, 0, 0]);
+      }
+    }
+
+    return result;
   }
 }
 

@@ -233,6 +233,36 @@ public sealed class ReplicaTests
     }
 
     [Fact]
+    public void A_deeply_nested_document_can_be_traversed()
+    {
+        // Typing left to right makes each character a right child of the
+        // previous one, so tree depth equals document length. A recursive
+        // traversal overflows the stack and takes the process with it — found by
+        // the snapshot size metric at 100k elements, well inside what §8 targets.
+        const int Depth = 150_000;
+        var replicaId = ReplicaIds.Numbered(1);
+
+        var elements = new List<ElementState>(Depth);
+        for (var i = 0; i < Depth; i++)
+        {
+            elements.Add(new ElementState(
+                new ElementId(replicaId, (ulong)i),
+                R('a'),
+                i == 0 ? null : new ElementId(replicaId, (ulong)(i - 1)),
+                Side.Right,
+                null,
+                IsDeleted: false));
+        }
+
+        var replica = Replica.Import(
+            replicaId, elements, new Dictionary<ReplicaId, ulong> { [replicaId] = Depth });
+
+        Assert.Equal(Depth, replica.Values.Count);
+        Assert.Equal(Depth, replica.AllIds.Count);
+        Assert.Equal(Depth, replica.Text.Length);
+    }
+
+    [Fact]
     public void Collect_does_not_change_the_visible_text()
     {
         var replica = New(1);
@@ -248,5 +278,59 @@ public sealed class ReplicaTests
         replica.Collect(replica.VersionVector);
 
         Assert.Equal(before, replica.Text);
+    }
+
+    [Fact]
+    public void Import_rejects_a_missing_element_list()
+    {
+        Assert.Throws<ArgumentNullException>(() => Replica.Import(
+            ReplicaIds.Numbered(1), null!, new Dictionary<ReplicaId, ulong>()));
+    }
+
+    [Fact]
+    public void Import_rejects_a_missing_version_vector()
+    {
+        Assert.Throws<ArgumentNullException>(() => Replica.Import(
+            ReplicaIds.Numbered(1), [], null!));
+    }
+
+    [Fact]
+    public void Import_rejects_a_snapshot_with_a_dangling_reference()
+    {
+        // A snapshot whose element names a parent the snapshot does not contain
+        // cannot be placed. Accepting it silently would drop the element and
+        // hand back a document that is quietly shorter than the one stored —
+        // the failure mode the persistence path exists to prevent (§6).
+        var replicaId = ReplicaIds.Numbered(1);
+        var orphan = new ElementState(
+            new ElementId(replicaId, 1),
+            R('a'),
+            new ElementId(replicaId, 99),
+            Side.Right,
+            null,
+            IsDeleted: false);
+
+        var thrown = Assert.Throws<InvalidOperationException>(() => Replica.Import(
+            replicaId, [orphan], new Dictionary<ReplicaId, ulong> { [replicaId] = 2 }));
+
+        Assert.Contains("elements reference a parent", thrown.Message, StringComparison.Ordinal);
+        Assert.Contains("snapshot is incomplete", thrown.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Import_takes_its_next_sequence_from_its_own_entry_only()
+    {
+        // The importing replica continues its own numbering; another replica's
+        // count says nothing about which sequence numbers this one has used. A
+        // sorted vector makes the order the entries are read in deterministic,
+        // so the foreign entry is definitely seen after the local one.
+        var mine = ReplicaIds.Numbered(1);
+        var theirs = ReplicaIds.Numbered(2);
+        var vector = new SortedDictionary<ReplicaId, ulong> { [mine] = 3, [theirs] = 11 };
+
+        var replica = Replica.Import(mine, [], vector);
+        var op = replica.Insert(0, R('a'));
+
+        Assert.Equal(3ul, op.Id.Seq);
     }
 }

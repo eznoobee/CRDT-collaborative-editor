@@ -29,6 +29,11 @@ describe('conformance corpus', () => {
         expect(text, `replica ${replica} diverged. ${expected.rationale}`).toBe(result.text);
       }
 
+      expect(
+        result.wireRoundTripText,
+        `wire round trip diverged from direct replay. ${expected.rationale}`,
+      ).toBe(result.text);
+
       if (expected.text !== undefined) {
         expect(result.text, expected.rationale).toBe(expected.text);
       }

@@ -484,6 +484,40 @@ document_replicas  (document_id, replica_id, user_id, last_seen_at, max_seq,
   retirement (§5). `retired_at` is set by the background job after `T_retire`.
 - Snapshot every N operations (configurable, default 500). Loading a document
   reads the latest snapshot plus operations after its `server_seq`.
+
+### Snapshot encoding
+
+`document_snapshots.state` holds **the normalised JSON of §9** — the same format
+the conformance runners emit.
+
+The reason is not tidiness. Sharing the format makes a snapshot directly
+comparable against a conformance run, which extends the cross-implementation
+check into persistence at no cost: if the C# server and the TypeScript client
+ever disagree about how a document serialises, a snapshot and a conformance
+artefact stop matching, and that is a build failure rather than a support
+ticket.
+
+JSON is larger and slower than a binary encoding, and §8 asks a document of
+100k live characters and 500k tombstones to load in under 500 ms server-side.
+**Measure it, do not assume it.** Phase 2 carries a test that builds a
+100k-element document, snapshots it, and *reports* serialised size and load time
+as metrics — no threshold, no assertion. The point is to know the number before
+the format is baked into the client's IndexedDB schema, not to discover it in
+Phase 7. If JSON turns out to be far off the target, that is a Phase 2 fact and
+the decision to change format is cheap; after Phase 4 it is not.
+
+### Serialisation lives in Editor.Infrastructure
+
+`Crdt.Core` references nothing but the BCL (§4), so the mapping from its types to
+database rows and to the wire lives in `Editor.Infrastructure`.
+
+That mapping is now a **second implementation of the same encoding**, alongside
+the TypeScript serialiser, and the two must agree for the same reason the two
+algorithm cores must. §9's corpus therefore includes at least one trace that
+round-trips through the **serialised form** on both sides rather than only
+through the algorithm, so an encoding divergence fails the build exactly as an
+algorithm divergence does. A shared format that nothing checks is a shared format
+that drifts.
 - `document_ops` is partitioned by `document_id` hash. Include the migration.
   The partition key is part of the primary key, as Postgres requires.
 - All writes through parameterized commands. Zero string-concatenated SQL
@@ -818,6 +852,10 @@ across two languages:
      `----------` and `##########` between `<` and `>`; permitted results are
      `<----------##########>` and `<##########---------->`.
    - A trace pinning `ReplicaId` byte ordering (§5).
+   - A trace exercising the **serialised** round trip: operations encoded to the
+     wire form, decoded, and replayed, on both implementations. This checks the
+     encoding rather than the algorithm, and is what keeps the
+     `Editor.Infrastructure` mapping in step with the TypeScript serialiser (§6).
 2. **Generated traces**, from the property-test generator, so the corpus grows
    with the fuzzer.
 
@@ -1061,6 +1099,14 @@ The first credible score was **54.63%**, and closing the gap took four rounds:
 | 3 | 76.86% | **nothing** — deep-tree tests that built nesting but never made two right siblings disagree about their right origin |
 | 4 | 81.22% | the ancestor case, constructed by reasoning about when that disagreement is possible at all |
 | 5 | **86.46%** | comparison operators at equality, argument validation, and the GC frontier boundary |
+| 6 | 85.44% | **nothing was added** — Phase 2's changes to `Replica` (iterative traversal, the `Import` rewrite) created new mutants and no tests reached them |
+| 7 | **87.74%** | those: `Import`'s argument guards, its refusal of a snapshot with a dangling reference, and its taking the next sequence from its own vector entry |
+
+Round 6 is the other one. The gate is a ratchet only if it is read after every
+change to the mutated project: Phase 2 touched `Crdt.Core` for performance
+reasons alone, added no behaviour it thought worth testing, and gave back 1.02
+points without any test failing. It stayed above 85% by 0.44 points, so nothing
+went red — the score reports a slide the build cannot.
 
 Round 3 is the instructive one: four plausible tests, written against the right
 file, moved coverage by exactly zero. Reaching the branch needed an argument
@@ -1135,3 +1181,55 @@ from `ElementId.CompareTo` — would contradict the paper, which specifies
 lexicographic order on whole ids, and would make correctness depend silently on
 an invariant holding rather than on a comparison being total. The survivor is
 evidence the reasoning above is sound.
+
+### 13.9 What the 100k snapshot metric measured, and the two bugs it found
+
+§6 required Phase 2 to build a 100k-element document, snapshot it, and report
+size and load time with no threshold. The number is now measured rather than
+assumed.
+
+Size is deterministic: **22,277,866 bytes — 21.25 MiB, 222.8 bytes per live
+element.** Timings vary with machine load, so they are given as observed ranges
+over four runs of the same test on one machine, Release build, Postgres 16 on
+loopback:
+
+| stage | observed |
+| --- | --- |
+| serialise | 467–591 ms |
+| deserialise (cold) | 733–924 ms |
+| write to Postgres | 483–730 ms |
+| load from Postgres | **501–941 ms** |
+
+**Load is at or over §8's 500 ms target on every sample, and that is the easy
+case.** The document has no tombstones and no operations after the snapshot;
+§8's stated case adds 500k tombstones, which the encoding stores in full. The
+cost is dominated by JSON parsing, not by the database — the row read is a
+single indexed lookup, and standalone deserialisation of the same string takes
+longer than the whole load does once the parser is warm.
+
+This does not by itself decide the format. It bounds the decision: normalised
+JSON as specified in §6 will not reach §8's target at §8's document size, so
+either the target moves, the snapshot stops being the whole document (a chunked
+or incremental encoding), or the encoding changes. Deciding is cheap now and
+expensive after Phase 4 binds the format into the client's IndexedDB schema,
+which is why §6 asked for the number in Phase 2.
+
+**The metric also found two defects that no correctness test had reached.**
+Both were only visible at this size, which is the argument for measuring at
+realistic scale rather than at test scale:
+
+1. **Traversal overflowed the stack in both implementations.** In-order
+   traversal of the element tree was recursive, and a document typed left to
+   right is a chain of right children 100k deep — so the recursion depth equals
+   the document length. It crashed the process rather than throwing, in C# and
+   in TypeScript alike, and every existing test was small enough to miss it.
+   Both are now iterative with an explicit stack, with a 150k-element regression
+   test on each side.
+2. **`Import` was quadratic.** Each placement pass removed placed elements from
+   the unplaced list one at a time; rebuilding the list per pass instead took
+   the .NET suite from 1m37s to 16s.
+
+Neither is a specification change. They are recorded because the conclusion is:
+the correctness suite verifies the algorithm at sizes where a linear-space bug
+and a quadratic-time bug are both invisible, and only a test that builds a
+realistic document exposed them.
