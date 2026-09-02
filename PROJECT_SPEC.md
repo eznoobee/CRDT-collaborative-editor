@@ -621,7 +621,7 @@ sequential typing.
 | flags | 1 byte, describing the **first** element |
 | first id | replica index varint, seq varint |
 | parent | present only when flags bits 2–3 are `2` |
-| deleted bitmap | ⌈count/8⌉ bytes, element *i* at bit *i* mod 8 of byte *i* / 8 |
+| deleted bitmap | ⌈count/8⌉ bytes, element *i* at bit *i* mod 8 of byte *i* / 8; **bits past the last element must be zero** |
 | values | total byte length varint, then the concatenated UTF-8 of all `count` code points |
 
 A run stands for `count` elements whose ids are `(r, s)`, `(r, s+1)`, …
@@ -685,7 +685,11 @@ encoder can have if it may choose between encodings.
 5. Parent flag `1` is used whenever it applies; spelling the same parent out as
    flag `2` is invalid.
 6. Varints are minimally encoded.
-7. No trailing bytes after the last record.
+7. **A run's deleted bitmap has zero in every bit past the last element.** A run
+   of five occupies five bits of one byte; the other three are not spare, they
+   are required to be zero. Left free they would give one document eight
+   spellings per partial byte, which is the one thing canonical form forbids.
+8. No trailing bytes after the last record.
 
 A reader **rejects** every violation above, all of which are checkable while
 decoding. Maximality reduces to one local rule, stated over a *pair*:
@@ -755,6 +759,7 @@ Every one of these is an error naming what was wrong, never a partial document:
 - A replica index past the end of the table.
 - Parent kind `1` on the first record of a body.
 - A value that is not exactly one UTF-8 code point, or is a lone surrogate.
+- A non-zero bit past the last element of a run's deleted bitmap.
 - Truncated input, or bytes remaining after the declared element or operation
   count is met.
 - Any canonical-form violation from the list above.
@@ -1265,6 +1270,57 @@ core in React rather than writing a second one.
 - **Say when you are unsure.** Distributed systems bugs hide in the cases where
   the implementer felt "this probably works." Flag those explicitly.
 
+### Sabotage the checks, on a schedule
+
+**Every check that exists to catch divergence gets deliberately broken on one
+side, periodically, to confirm it fires.** Not as a habit someone remembers — as
+a standing practice with a record of when it was last done.
+
+This has been performed twice and found something both times. In Phase 0 the
+architecture test that proves `Crdt.Core` references nothing outside the BCL was
+sabotaged by adding a forbidden reference, and it turned out the reflection check
+missed a *declared* reference the compiler had elided; both halves exist now
+because of it. In Phase 2.5 the cross-implementation binary comparison was
+sabotaged by dropping a run-encoding guard, the comparison did **not** fire, and
+investigating why produced a real bug in §6 that both codecs had implemented
+identically (§13.11).
+
+A green check is evidence about the code only if the check can go red. That is
+not a property anyone can read off the source; it has to be demonstrated. When
+sabotage does *not* produce a failure, the finding is not "the check is broken" —
+it is "the corpus does not reach this shape", and that is the more useful of the
+two answers.
+
+### Hand-written fixtures for every canonical form
+
+**Wherever this specification defines a canonical form, the suite carries
+hand-written documents the specification says are VALID that neither
+implementation generates.**
+
+Round-trip testing defines codec correctness as encoder-decoder agreement, which
+is circular: an encoder that never emits a legal shape and a decoder that rejects
+it agree perfectly and are both wrong. The property that actually matters is that
+**a decoder accepts every document the format admits**, and only a fixture
+written by hand from the specification can test it — by construction, the encoder
+cannot produce the cases that would expose the gap.
+
+The refusal fixtures are the mirror of this and are not a substitute: they prove
+a decoder rejects what the format forbids. Both directions are needed, and only
+the acceptance direction is circular without hand-written input.
+
+### No phase is reported complete without a CI preflight
+
+**`scripts/phase-preflight.sh` runs before any phase report, and a phase with any
+red job is not reported complete.** The script queries the actual CI status of
+the branch head; its output goes in the report.
+
+This is structural rather than a matter of diligence, deliberately. Phase 2.5's
+mutation gate was red for six consecutive pushes while six of seven jobs were
+green, and it went unnoticed because the report format had a slot for what was
+built and no slot for whether the build agreed. A checklist item that exists only
+in someone's intention is a checklist item that gets skipped exactly when things
+are busy.
+
 ## 13. Decision log
 
 Amendments to the original specification, with reasons. These exist so a future
@@ -1497,6 +1553,22 @@ overrides that for anyone who wants it. The two permanent guards — no tests
 discovered, nothing killed — still fail everywhere, because neither depends on
 timing.
 
+**The floor is now hardware-coupled, in one direction.** Pinning the ratchet to
+CI makes the number comparable; it does not make it a property of the code alone.
+A change to the runner image, its CPU allocation, or how loaded it is moves the
+timeout count, and therefore the score, with no commit touching `Crdt.Core` at
+all — upward when the runner gets slower, since a slower machine detects mutants
+a faster one does not.
+
+So a **sudden jump is a signal to investigate, not a new floor to commit.** The
+script's "score rose, commit the new floor" message is written for the case where
+someone improved coverage, and it cannot tell that case from a runner change. If
+the score moves and the diff contains no test and no `Crdt.Core` change, the
+answer is not to update the number — it is to find out what moved underneath it,
+and to record the finding here. Committing a floor that the hardware handed you
+converts a measurement artefact into a permanent requirement, and the next
+genuine erosion is then measured from a place nothing earned.
+
 **The rule that survives all of this:** if the timeout count climbs, the score is
 measuring the clock. Running the §13.10 scale cases at full size once read 89.66%
 with thirty timeouts, five of them mutants that had survived moments earlier —
@@ -1673,11 +1745,43 @@ written wrongly builds a different tree rather than restoring a corrupt one
 
 This is recorded, not fixed, and it is not Phase 2.5's to fix: §8's targets are
 load-test targets and Phase 7 owns them. What Phase 2.5 owed was the format
-decision and the number, and both are now here. The options when it is
-addressed — trusting the stored order for a snapshot this replica wrote itself,
-or storing the tree shape rather than replaying it — are both changes to what a
-snapshot *means*, not to how it is spelled, which is why they are not smuggled
-in beside a codec swap.
+decision and the number, and both are now here.
+
+**The two options are written out now so that the decision arrives with them
+already on the table.** Both change what a snapshot *means*, not how it is
+spelled, which is why neither belongs beside a codec swap.
+
+*Option A — a snapshot stores placement results rather than replaying them.*
+Today `Import` re-derives every element's position from the §5 sibling rule, so a
+snapshot is a set of claims that the reader checks. Under A it becomes a
+description of a tree the reader trusts: sibling order is stored, and loading is
+a linear rebuild instead of 600,000 comparisons.
+
+> What it costs: the guarantee that a wrongly written snapshot produces a
+> different tree rather than a quietly corrupt one. That guarantee is the whole
+> reason `Import` replays placement (§13.9 above), so trading it away needs
+> something in its place — a checksum over the stored order, a periodic audit
+> that re-derives and compares, or restricting trust to snapshots this replica
+> wrote itself, where the writer and reader share a version. The last is the
+> narrowest and probably the right one: a snapshot arriving from elsewhere is
+> exactly the case the replay defends against.
+
+*Option B — a snapshot stops being the whole document.* Load the visible text
+plus the elements needed to place incoming operations, and fetch the rest lazily
+or in chunks. §8's case is 100k live characters among 600k elements, so five
+sixths of the work is tombstones nobody is about to read.
+
+> What it costs: a replica that has not loaded everything cannot answer every
+> question about the document, and §5's placement rule can reach any element —
+> a `RightOrigin` may name a tombstone in an unloaded chunk. That makes
+> chunking a change to the algorithm's preconditions, not just to I/O, and it
+> interacts with GC (§5) which is the other mechanism for making tombstones stop
+> costing anything.
+
+They are not exclusive. A does more for the common case and B does more for §8's
+stress case, and the honest reading of the measurement is that A alone probably
+reaches the target while B is what makes the target insensitive to how long a
+document has been alive.
 
 **And the browser is worse, as expected.** §8's second number, from the
 `browser-metrics` CI job on the `ubuntu-latest` runner §8 names — the §9
@@ -1822,3 +1926,22 @@ Two things follow, both now in place.
    catches a shared misreading. This is the same lesson as §13.6, where a
    100.00% hold rate turned out to measure the generator, arriving from the
    other direction.
+
+**The practice this produced immediately found a second bug of the same class.**
+§12 now requires hand-written fixtures for every canonical form — documents the
+specification says are valid that neither implementation generates. Writing the
+first batch turned up that a run's deleted bitmap had **unconstrained bits past
+its last element**: a run of five occupies five bits of one byte, §6 said nothing
+about the other three, and both codecs ignored them on read. Two byte strings
+differing in those bits decoded to the same document, which is precisely the
+canonical-form violation the whole rule exists to prevent — and it makes
+`binary → JSON → binary` byte-identity a check of whichever spelling the writer
+chose. §6 now requires them to be zero and both readers reject a non-zero one.
+
+The fixtures caught something else, less serious and more instructive: the first
+draft of the two-byte-replica-index fixture used a 130-entry table over a
+one-element document, which §6's canonical form forbids — the table holds exactly
+the replicas the body names. The *re-encode* half of the fixture check caught it,
+which is the argument for that half existing. A fixture that is merely accepted
+proves the decoder is permissive; a fixture that is accepted and re-encodes to
+the same bytes proves it agrees with the encoder about what the document is.

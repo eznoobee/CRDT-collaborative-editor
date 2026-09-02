@@ -324,6 +324,17 @@ public static class SnapshotBinary
         var parent = ReadParent(ref cursor, flags, table, elements);
 
         var bitmap = cursor.ReadBytes((count + 7) / 8).ToArray();
+
+        // Canonical form: bits past the last element are required to be zero,
+        // not merely unused. Left free they would give one document eight
+        // spellings per partial byte (§6).
+        var spare = count % 8;
+        if (spare != 0 && (bitmap[^1] >> spare) != 0)
+        {
+            throw new BinaryFormatException(
+                "A run's deleted bitmap has a non-zero bit past its last element (§6).");
+        }
+
         var valueBytes = cursor.ReadBytes(cursor.ReadCount("A run value length")).ToArray();
 
         var runes = new List<Rune>(count);

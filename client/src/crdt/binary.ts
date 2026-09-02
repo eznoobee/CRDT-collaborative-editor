@@ -538,6 +538,17 @@ function readRun(
   const parent = readParent(reader, flags, table, previous === null ? null : previous.id);
 
   const bitmap = reader.bytes(Math.ceil(count / 8)).slice();
+
+  // Canonical form: bits past the last element are required to be zero, not
+  // merely unused. Left free they would give one document eight spellings per
+  // partial byte (§6).
+  const spare = count % 8;
+  if (spare !== 0 && bitmap[bitmap.length - 1]! >>> spare !== 0) {
+    throw new BinaryFormatError(
+      "A run's deleted bitmap has a non-zero bit past its last element (§6).",
+    );
+  }
+
   const values = decodeCodePoints(
     reader.bytes(reader.count('A run value length')).slice(),
     count,
