@@ -1,9 +1,9 @@
 import { Replica } from './replica';
-import { parseReplicaId, formatReplicaId } from './replicaId';
+import { parseReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
 import { encodeOperation, decodeOperation } from './wire';
 import type { Operation } from './operation';
 import { compareByCodePoint, quote, renderMap } from './normalisedJson';
-import { decodeSnapshot, encodeSnapshot } from './binary';
+import { decodeOperations, decodeSnapshot, encodeOperations, encodeSnapshot } from './binary';
 import { deserializeSnapshot, serializeSnapshot } from './snapshotJson';
 
 export interface TraceResult {
@@ -106,9 +106,34 @@ export function replay(trace: Trace): TraceResult {
     text: replicas[0]!.text,
     replicaTexts,
     versionVector,
-    wireRoundTripText: mirror.text,
+    wireRoundTripText: wireRoundTrip(ids[0]!, produced, mirror.text),
     snapshot: snapshotHex(replicas[0]!),
   };
+}
+
+/**
+ * Replays the operations through the binary wire form and checks it agrees with
+ * the JSON one, which the caller has already replayed.
+ *
+ * PROJECT_SPEC.md §6: JSON is normative and binary is what travels, so both are
+ * exercised on every trace. Comparing them here means a failure names which
+ * encoding lost something rather than surfacing as an unattributed text
+ * mismatch.
+ */
+function wireRoundTrip(id: ReplicaId, produced: Operation[], viaJsonText: string): string {
+  const viaBinary = new Replica(id);
+  for (const operation of decodeOperations(encodeOperations(produced))) {
+    viaBinary.apply(operation);
+  }
+
+  if (viaBinary.text !== viaJsonText) {
+    throw new Error(
+      `The JSON wire form replays to "${viaJsonText}" and the binary wire form to ` +
+        `"${viaBinary.text}"; one of the two encodings loses something (§6).`,
+    );
+  }
+
+  return viaBinary.text;
 }
 
 function hex(bytes: Uint8Array): string {

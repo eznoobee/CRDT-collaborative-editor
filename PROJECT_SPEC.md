@@ -730,16 +730,20 @@ The fragmented figure is the one to quote when asking whether this reaches §8.
 A format whose headline number comes from its best case is a format nobody has
 measured.
 
-**Predicted from the layout above, before any codec existed**, at 100k elements:
+**Predicted from the layout above, before any codec existed**, at 100k elements,
+with the measurement beside it:
 
-| Case | Predicted | Against JSON's 222.8 |
+| Case | Predicted | Measured |
 |---|---|---|
-| chain (one maximal run) | 1.13 bytes/element | 197× smaller |
-| fully fragmented (no runs at all, every parent and right origin explicit, four replicas) | 16.00 bytes/element | 14× smaller |
+| chain (one maximal run) | 1.13 bytes/element | **1.13** |
+| fully fragmented (no runs at all, every parent and right origin explicit, four replicas) | 16.00 bytes/element | **8.45** on the fragmented document actually built |
 
-The prediction is recorded here so the measurement can disagree with it. A
-layout that turns out to cost twice what its own arithmetic says has something
-wrong with it that a single reported number would hide.
+The prediction was recorded so the measurement could disagree with it. The chain
+matched exactly. The fragmented document came in under its bound because the
+bound assumed no run ever forms and every parent is spelled out, while a real
+fragmented document still chains most parents to the previous element — the
+prediction was a worst case, and it holds as one. §13.9 has the full table
+including §8's 600k stress case.
 
 #### What a reader rejects
 
@@ -1616,8 +1620,45 @@ interning replica ids into a per-snapshot table replaces a 16-byte value with a
 small index at every reference, varints replace decimal strings, and sequential
 typing — the most common editing pattern there is — produces long runs of
 consecutive `(replica, seq)` along a parent chain, which the run form collapses.
-The layout is specified in §6; the achieved figure is measured and reported
-rather than predicted.
+
+**Measured, after the codecs existed.** Three documents, the same machine as
+above:
+
+| Document | JSON | Binary | Ratio |
+|---|---|---|---|
+| chain — 100k, one replica typing | 22,277,866 B (222.78/el) | 112,541 B (**1.13**/el) | 198× |
+| fragmented — 100k, four replicas, explicit right origins, 75% deleted | 23,379,876 B (233.80/el) | 845,359 B (**8.45**/el) | 27.7× |
+| **§8's case** — 600k: 100k live + 500k tombstones | 141,163,181 B (235.27/el) | 5,512,023 B (**9.19**/el) | 25.6× |
+
+The chain came out at 1.13 bytes per element, which is what the layout's own
+arithmetic predicted before a codec existed. The fragmented figure beat the
+predicted 16.00 worst case, because even a run-hostile document still chains
+most parents to the previous element.
+
+**§8's case is 141 MiB of JSON and 5.3 MiB of binary.** That is the number the
+decision was about, and it is settled.
+
+**What is not settled: the load target is still missed, for a different
+reason.** §8's document loads server-side in **1.3–2.1 s** against a 500 ms
+target. Splitting the cost says why:
+
+| | parse (bytes → elements) | place (elements → tree) |
+|---|---|---|
+| §8's 600k case | 540 ms | **1,164 ms** |
+
+Parsing 5.3 MiB is no longer the problem — the equivalent JSON parse was
+4,613 ms. **Placement is**, and no encoding change touches it: `Import` replays
+the §5 sibling ordering for every element, deliberately, so that a snapshot
+written wrongly builds a different tree rather than restoring a corrupt one
+(§13.9's `Import` note). Six hundred thousand replays is simply a lot of work.
+
+This is recorded, not fixed, and it is not Phase 2.5's to fix: §8's targets are
+load-test targets and Phase 7 owns them. What Phase 2.5 owed was the format
+decision and the number, and both are now here. The options when it is
+addressed — trusting the stored order for a snapshot this replica wrote itself,
+or storing the tree shape rather than replaying it — are both changes to what a
+snapshot *means*, not to how it is spelled, which is why they are not smuggled
+in beside a codec swap.
 
 **The metric also found two defects that no correctness test had reached.**
 Both were only visible at this size, which is the argument for measuring at

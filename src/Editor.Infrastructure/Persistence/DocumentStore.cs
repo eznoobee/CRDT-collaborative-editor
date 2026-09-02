@@ -111,8 +111,11 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
         command.Parameters.Add(new NpgsqlParameter { Value = serverSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
         command.Parameters.Add(new NpgsqlParameter
         {
-            Value = SnapshotSerializer.Serialize(replica),
-            NpgsqlDbType = NpgsqlDbType.Text,
+            // §6: binary is the storage form. The normative JSON is what
+            // correctness is defined against, and the conformance corpus is what
+            // holds the two together.
+            Value = SnapshotBinary.Encode(replica),
+            NpgsqlDbType = NpgsqlDbType.Bytea,
         });
         command.Parameters.Add(new NpgsqlParameter
         {
@@ -144,7 +147,7 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
         }
 
         var serverSeq = reader.GetInt64(0);
-        return (serverSeq, SnapshotSerializer.Deserialize(asReplica, reader.GetString(1)));
+        return (serverSeq, SnapshotBinary.Decode(asReplica, reader.GetFieldValue<byte[]>(1)));
     }
 
     private static DocumentOperationRow ReadRow(NpgsqlDataReader reader, Guid documentId) => new()

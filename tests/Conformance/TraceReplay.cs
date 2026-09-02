@@ -84,24 +84,45 @@ public static class TraceReplay
     }
 
     /// <summary>
-    /// Replays the same operations after a trip through the wire encoding.
+    /// Replays the same operations after a trip through each encoding.
     /// </summary>
     /// <remarks>
-    /// PROJECT_SPEC.md §6: the encoding is a second implementation alongside the
-    /// TypeScript serialiser, so it is exercised on every trace rather than on
-    /// one. Anything the encoding loses — a right origin that meant
+    /// <para>
+    /// PROJECT_SPEC.md §6: each encoding is a second implementation alongside its
+    /// TypeScript counterpart, so both are exercised on every trace rather than
+    /// on one. Anything an encoding loses — a right origin that meant
     /// end-of-document, a side, a sequence number past 2^53 — changes the text
     /// this produces.
+    /// </para>
+    /// <para>
+    /// Both forms are replayed: JSON because it is normative, and binary because
+    /// it is what actually travels. They are compared to each other before being
+    /// returned, so a failure names which encoding lost something instead of
+    /// surfacing as a text mismatch with no attribution.
+    /// </para>
     /// </remarks>
     private static string WireRoundTrip(ReplicaId id, IReadOnlyList<Operation> operations)
     {
-        var replica = new Replica(id);
+        var viaJson = new Replica(id);
         foreach (var operation in operations)
         {
-            replica.Apply(OperationWireFormat.Decode(OperationWireFormat.Encode(operation)));
+            viaJson.Apply(OperationWireFormat.Decode(OperationWireFormat.Encode(operation)));
         }
 
-        return replica.Text;
+        var viaBinary = new Replica(id);
+        foreach (var operation in OperationBinary.Decode(OperationBinary.Encode(operations)))
+        {
+            viaBinary.Apply(operation);
+        }
+
+        if (!string.Equals(viaJson.Text, viaBinary.Text, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"The JSON wire form replays to \"{viaJson.Text}\" and the binary wire form to "
+                + $"\"{viaBinary.Text}\"; one of the two encodings loses something (§6).");
+        }
+
+        return viaBinary.Text;
     }
 
     /// <summary>
