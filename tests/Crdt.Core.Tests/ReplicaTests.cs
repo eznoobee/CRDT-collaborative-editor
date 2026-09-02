@@ -233,6 +233,36 @@ public sealed class ReplicaTests
     }
 
     [Fact]
+    public void A_deeply_nested_document_can_be_traversed()
+    {
+        // Typing left to right makes each character a right child of the
+        // previous one, so tree depth equals document length. A recursive
+        // traversal overflows the stack and takes the process with it — found by
+        // the snapshot size metric at 100k elements, well inside what §8 targets.
+        const int Depth = 150_000;
+        var replicaId = ReplicaIds.Numbered(1);
+
+        var elements = new List<ElementState>(Depth);
+        for (var i = 0; i < Depth; i++)
+        {
+            elements.Add(new ElementState(
+                new ElementId(replicaId, (ulong)i),
+                R('a'),
+                i == 0 ? null : new ElementId(replicaId, (ulong)(i - 1)),
+                Side.Right,
+                null,
+                IsDeleted: false));
+        }
+
+        var replica = Replica.Import(
+            replicaId, elements, new Dictionary<ReplicaId, ulong> { [replicaId] = Depth });
+
+        Assert.Equal(Depth, replica.Values.Count);
+        Assert.Equal(Depth, replica.AllIds.Count);
+        Assert.Equal(Depth, replica.Text.Length);
+    }
+
+    [Fact]
     public void Collect_does_not_change_the_visible_text()
     {
         var replica = New(1);

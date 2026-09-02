@@ -232,6 +232,109 @@ public sealed class Replica
     }
 
     /// <summary>
+    /// The document's elements in traversal order, tombstones included.
+    /// </summary>
+    /// <remarks>
+    /// The basis of a snapshot (§6). Tombstones are included because later
+    /// operations still attach to them: dropping them would make the snapshot
+    /// unable to accept operations that a full replay accepts.
+    /// </remarks>
+    public IReadOnlyList<ElementState> Export() =>
+    [
+        .. InOrder().Select(n => new ElementState(
+            n.Id,
+            n.Value,
+            n.Parent is { IsRoot: false } parent ? parent.Id : null,
+            n.Side,
+            n.RightOrigin?.Id,
+            n.IsDeleted)),
+    ];
+
+    /// <summary>
+    /// Rebuilds a replica from exported elements and a version vector.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Elements are placed with the same sibling ordering as a live insert
+    /// rather than trusting the order they arrive in, so a snapshot that was
+    /// written wrongly produces a different tree here instead of quietly
+    /// restoring a corrupt one.
+    /// </para>
+    /// <para>
+    /// Traversal order does not guarantee parents precede children — a left
+    /// child is traversed before its parent — so placement iterates until no
+    /// further element can be attached.
+    /// </para>
+    /// </remarks>
+    public static Replica Import(
+        ReplicaId id,
+        IReadOnlyList<ElementState> elements,
+        IReadOnlyDictionary<ReplicaId, ulong> versionVector)
+    {
+        ArgumentNullException.ThrowIfNull(elements);
+        ArgumentNullException.ThrowIfNull(versionVector);
+
+        var replica = new Replica(id);
+        var remaining = elements.ToList();
+
+        // Each pass rebuilds the unplaced list rather than removing from it.
+        // Removing by index is linear, which would make importing a large
+        // snapshot quadratic in the common case where everything places on the
+        // first pass.
+        while (remaining.Count > 0)
+        {
+            var deferred = new List<ElementState>();
+
+            foreach (var element in remaining)
+            {
+                var parentPresent = element.Parent is null || replica._byId.ContainsKey(element.Parent.Value);
+                var originPresent = element.RightOrigin is null
+                                    || replica._byId.ContainsKey(element.RightOrigin.Value);
+
+                if (!parentPresent || !originPresent)
+                {
+                    deferred.Add(element);
+                    continue;
+                }
+
+                var parent = element.Parent is { } parentId ? replica._byId[parentId] : replica._root;
+                var node = new Node
+                {
+                    Id = element.Id,
+                    Value = element.Value,
+                    IsDeleted = element.IsDeleted,
+                    Parent = parent,
+                    Side = element.Side,
+                    RightOrigin = element.RightOrigin is { } originId ? replica._byId[originId] : null,
+                };
+
+                replica._byId[node.Id] = node;
+                InsertAmongSiblings(node, parent);
+            }
+
+            if (deferred.Count == remaining.Count)
+            {
+                throw new InvalidOperationException(
+                    $"{deferred.Count} elements reference a parent or right origin that is not in the "
+                    + "snapshot. The snapshot is incomplete or was written out of order.");
+            }
+
+            remaining = deferred;
+        }
+
+        foreach (var (replicaId, count) in versionVector)
+        {
+            replica._versionVector[replicaId] = count;
+            if (replicaId.Equals(id))
+            {
+                replica._nextSeq = count;
+            }
+        }
+
+        return replica;
+    }
+
+    /// <summary>
     /// Reclaims tombstones that every replica in <paramref name="stableFrontier"/>
     /// has observed, returning how many were collected.
     /// </summary>
@@ -535,29 +638,59 @@ public sealed class Replica
         while (progressed);
     }
 
+    /// <summary>Depth-first in-order traversal, tombstones included.</summary>
+    /// <remarks>
+    /// Iterative, not recursive. Typing left to right makes each character a
+    /// right child of the previous one, so a document's tree depth equals its
+    /// length — a recursive walk overflows the stack on a document of the size
+    /// §8 targets, and takes the process with it. Found by the snapshot size
+    /// metric, which is why that measurement exists.
+    /// </remarks>
     private List<Node> InOrder()
     {
         var result = new List<Node>();
-        Visit(_root, result);
+
+        // Each frame is (node, phase, next child index): phase 0 walks the left
+        // children, 1 emits the node, 2 walks the right children.
+        var stack = new Stack<(Node Node, int Phase, int Index)>();
+        stack.Push((_root, 0, 0));
+
+        while (stack.Count > 0)
+        {
+            var (node, phase, index) = stack.Pop();
+
+            switch (phase)
+            {
+                case 0 when index < node.LeftChildren.Count:
+                    stack.Push((node, 0, index + 1));
+                    stack.Push((node.LeftChildren[index], 0, 0));
+                    break;
+
+                case 0:
+                    stack.Push((node, 1, 0));
+                    break;
+
+                case 1:
+                    if (!node.IsRoot)
+                    {
+                        result.Add(node);
+                    }
+
+                    stack.Push((node, 2, 0));
+                    break;
+
+                default:
+                    if (index < node.RightChildren.Count)
+                    {
+                        stack.Push((node, 2, index + 1));
+                        stack.Push((node.RightChildren[index], 0, 0));
+                    }
+
+                    break;
+            }
+        }
+
         return result;
-    }
-
-    private static void Visit(Node node, List<Node> into)
-    {
-        foreach (var child in node.LeftChildren)
-        {
-            Visit(child, into);
-        }
-
-        if (!node.IsRoot)
-        {
-            into.Add(node);
-        }
-
-        foreach (var child in node.RightChildren)
-        {
-            Visit(child, into);
-        }
     }
 
     private static Node? NextIncludingTombstones(List<Node> all, Node leftOrigin)
