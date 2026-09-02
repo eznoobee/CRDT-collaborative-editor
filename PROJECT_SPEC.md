@@ -985,6 +985,11 @@ seen the number is how §8 acquired a 500 ms target nothing had measured. It wil
 be worse than the server figure and it is the one that decides whether this
 works on a slow connection.
 
+Measured by `scripts/browser-metrics.sh`, and by the `browser-metrics` CI job on
+the runner class named above. §13.9 carries the first readings; the short version
+is that §8's document takes about six seconds in a browser, and that placement —
+not parsing, and not the network — is where it goes.
+
 Note also that 500k accumulated tombstones implies GC is not keeping up — this
 is a stress target, not a steady state.
 
@@ -1659,6 +1664,29 @@ addressed — trusting the stored order for a snapshot this replica wrote itself
 or storing the tree shape rather than replaying it — are both changes to what a
 snapshot *means*, not to how it is spelled, which is why they are not smuggled
 in beside a codec swap.
+
+**And the browser is worse, as expected.** §8's second number, measured by
+`scripts/browser-metrics.sh` — the §9 TypeScript core in headless Chromium
+141.0.7390.37, cold meaning a fresh context with empty IndexedDB, on a 4 vCPU
+development machine rather than the `ubuntu-latest` runner §8 names (CI produces
+the figure that counts):
+
+| Case | fetch | parse | place | text | **cold total** | warm total |
+|---|---|---|---|---|---|---|
+| chain, 100k | 5 ms | 29 ms | 414 ms | 43 ms | **502 ms** | 515 ms |
+| §8's 600k case | 263 ms | 1,636 ms | 3,714 ms | 335 ms | **5,964 ms** | 5,269 ms |
+
+Six seconds for §8's document, on a fast local network with a 5.3 MiB payload.
+Reading the same bytes back from IndexedDB is not materially cheaper, because
+the fetch was never the cost.
+
+**The same term dominates on both sides.** Placement is 3,714 ms of the
+browser's 5,964 and 1,164 ms of the server's ~1,700, in two independently
+written implementations. That is not two performance bugs; it is the cost of
+replaying §5's placement rule 600,000 times, and it is the thing to fix when
+§8's targets are addressed. The encoding was worth changing — 141 MiB became
+5.3 MiB and JSON parsing fell from 4.6 s to 0.5 s server-side — and it was not
+the whole problem.
 
 **The metric also found two defects that no correctness test had reached.**
 Both were only visible at this size, which is the argument for measuring at

@@ -206,6 +206,24 @@ curl http://localhost:8080/health/live
 - **TypeScript is pinned to 5.x** even though 7.x exists (§3). Do not bump a
   pinned dependency without asking.
 
+## Measuring
+
+Four numbers the project reports rather than asserts, all with no threshold, and
+all with a named measurement point because "fast" without one is not a claim:
+
+| What | Where | Command |
+|---|---|---|
+| Snapshot size and server-side load | `Editor.Api.Tests` metric | `./scripts/run-tests.sh` |
+| Mutation score | `Crdt.Core` | `./scripts/mutation.sh` (the one that *does* assert — §13.7's ratchet) |
+| Browser document load | headless Chromium | `./scripts/browser-metrics.sh` |
+| Scale distribution of the generator | `ScaleTests` | `./scripts/run-tests.sh` |
+
+The snapshot metric measures **three** documents on purpose (§6): a chain, which
+is the binary format's best case, a fragmented document, and §8's own case of
+100k live characters with 500k tombstones. Quote the fragmented or stress figure,
+never the chain alone — a format whose headline number comes from its best case
+is a format nobody has measured.
+
 ## Commits
 
 Conventional commits, one logical change each, and every commit leaves the build
