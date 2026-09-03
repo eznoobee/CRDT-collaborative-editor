@@ -1,3 +1,4 @@
+using Crdt.Core;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
 using Editor.Infrastructure.Ingest;
@@ -21,6 +22,7 @@ public sealed partial class EditorHub : Hub
     /// <summary>The client method a fanned-out batch arrives on.</summary>
     public const string Broadcast = "ReceiveOperations";
 
+    private readonly CatchUpReader _catchUp;
     private readonly DocumentBroadcaster _broadcaster;
     private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
@@ -31,6 +33,7 @@ public sealed partial class EditorHub : Hub
     private readonly ILogger<EditorHub> _logger;
 
     public EditorHub(
+        CatchUpReader catchUp,
         DocumentBroadcaster broadcaster,
         DocumentConnections connections,
         IConnectTicketStore tickets,
@@ -40,6 +43,7 @@ public sealed partial class EditorHub : Hub
         OperationLogBatcher log,
         ILogger<EditorHub> logger)
     {
+        ArgumentNullException.ThrowIfNull(catchUp);
         ArgumentNullException.ThrowIfNull(broadcaster);
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
@@ -49,6 +53,7 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(logger);
 
+        _catchUp = catchUp;
         _broadcaster = broadcaster;
         _connections = connections;
         _tickets = tickets;
@@ -204,6 +209,64 @@ public sealed partial class EditorHub : Hub
             Context.ConnectionAborted).ConfigureAwait(false);
 
         return SubmitResult.Ok(operations.Count);
+    }
+
+    /// <summary>
+    /// What this connection has missed, given what it already has.
+    /// </summary>
+    /// <param name="known">
+    /// Per replica id, the next sequence number this client expects — its
+    /// version vector.
+    /// </param>
+    /// <param name="forceSnapshot">
+    /// Skips the delta path. Exists so §13.14's rule can be honoured: the
+    /// snapshot floor is exercised on its own, because a fallback that only
+    /// ever runs behind a working fast path is a fallback nobody has tested.
+    /// A client may set it after losing local state.
+    /// </param>
+    /// <remarks>
+    /// The cursor is the version vector, never <c>server_seq</c>. §8 makes
+    /// broadcast unordered, so a client can hold 105 without holding 100, and a
+    /// server_seq watermark would silently skip whatever fell in the gap.
+    /// </remarks>
+    public async Task<CatchUpResult> CatchUpAsync(
+        Dictionary<Guid, long> known, bool forceSnapshot = false)
+    {
+        ArgumentNullException.ThrowIfNull(known);
+
+        if (!TryGetBinding(out var binding))
+        {
+            return CatchUpResult.Rejected(HubErrors.Unauthenticated);
+        }
+
+        // The same two-tier check every other call gets. Catch-up returns the
+        // whole document, so skipping authorization here would be a way to read
+        // one without ever submitting to it.
+        var role = await _roles
+            .GetRoleAsync(binding.DocumentId, binding.UserId, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        if (role is null)
+        {
+            return CatchUpResult.Rejected(HubErrors.NotFound);
+        }
+
+        var vector = new Dictionary<ReplicaId, ulong>();
+        foreach (var (replica, next) in known)
+        {
+            if (next < 0)
+            {
+                return CatchUpResult.Rejected(IngestRejection.Malformed);
+            }
+
+            vector[ReplicaIdConversion.FromGuid(replica)] = (ulong)next;
+        }
+
+        var caught = await _catchUp
+            .ReadAsync(binding.DocumentId, vector, forceSnapshot, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        return new CatchUpResult(null, caught.Snapshot, caught.Operations, caught.ServerSeq);
     }
 
     /// <summary>The SignalR group carrying one document's broadcasts.</summary>

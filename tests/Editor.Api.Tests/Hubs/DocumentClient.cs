@@ -57,7 +57,7 @@ public sealed class DocumentClient : IAsyncDisposable
     /// applied in arrival order would only ever exercise the order this
     /// particular run happened to produce.
     /// </remarks>
-    public Replica Replica { get; }
+    public Replica Replica { get; private set; }
 
     /// <summary>§9's normalised form of what this client believes the document is.</summary>
     public string Normalised => SnapshotSerializer.Serialize(Replica);
@@ -77,6 +77,49 @@ public sealed class DocumentClient : IAsyncDisposable
     public void ApplyLocal(byte[] operations)
     {
         foreach (var operation in OperationBinary.Decode(operations))
+        {
+            Replica.Apply(operation);
+        }
+    }
+
+    /// <summary>Asks the server what this client has missed.</summary>
+    /// <remarks>
+    /// The vector sent is this replica's own, not a record of what the test
+    /// delivered: the point of catch-up is that the client states what it holds
+    /// and the server works out the rest, so a test that computed the gap
+    /// itself would be testing its own arithmetic.
+    /// </remarks>
+    public Task<CatchUpResult> CatchUpAsync(bool forceSnapshot = false) =>
+        Connection.InvokeAsync<CatchUpResult>(
+            "CatchUpAsync",
+            Replica.VersionVector.ToDictionary(
+                entry => ReplicaIdConversion.ToGuid(entry.Key),
+                entry => (long)entry.Value),
+            forceSnapshot,
+            TestContext.Current.CancellationToken);
+
+    /// <summary>Sends a version vector the client would never produce itself.</summary>
+    public Task<CatchUpResult> CatchUpAsync(Dictionary<Guid, long> known, bool forceSnapshot = false) =>
+        Connection.InvokeAsync<CatchUpResult>(
+            "CatchUpAsync", known, forceSnapshot, TestContext.Current.CancellationToken);
+
+    /// <summary>Adopts a catch-up answer the way a reconnecting client would.</summary>
+    /// <remarks>
+    /// A snapshot replaces the replica outright — it is the state, not an
+    /// addition to it — and the operations are applied on top in either case,
+    /// because §8 allows the tail to arrive with the snapshot.
+    /// </remarks>
+    public void ApplyCatchUp(CatchUpResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (result.Snapshot is not null)
+        {
+            Replica = SnapshotBinary.Decode(
+                ReplicaIdConversion.FromGuid(Negotiated.ReplicaId), result.Snapshot);
+        }
+
+        foreach (var operation in OperationBinary.Decode(result.Operations))
         {
             Replica.Apply(operation);
         }

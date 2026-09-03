@@ -61,6 +61,18 @@ public static class PersistenceExtensions
             provider.GetRequiredService<DocumentIngestState>(),
             provider.GetRequiredService<IOptions<IngestLimits>>().Value));
 
+        services.AddOptions<CatchUpOptions>()
+            .Bind(configuration.GetSection(CatchUpOptions.Section))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        services.AddSingleton(provider => new DocumentStore(
+            provider.GetRequiredService<NpgsqlDataSource>()));
+        services.AddSingleton(provider => new CatchUpReader(
+            provider.GetRequiredService<NpgsqlDataSource>(),
+            provider.GetRequiredService<DocumentStore>(),
+            provider.GetRequiredService<IOptions<CatchUpOptions>>().Value));
+
         services.AddSingleton(provider => new OperationLogWriter(
             provider.GetRequiredService<NpgsqlDataSource>()));
         services.AddSingleton(provider => new OperationLogBatcher(

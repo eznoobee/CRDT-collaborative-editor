@@ -150,7 +150,12 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
         return (serverSeq, SnapshotBinary.Decode(asReplica, reader.GetFieldValue<byte[]>(1)));
     }
 
-    private static DocumentOperationRow ReadRow(NpgsqlDataReader reader, Guid documentId) => new()
+    /// <summary>
+    /// Reads one operation row. Internal rather than private because
+    /// <see cref="CatchUpReader"/> reads the same shape from a different query,
+    /// and two copies of this mapping would be two places for a column to move.
+    /// </summary>
+    internal static DocumentOperationRow ReadRow(NpgsqlDataReader reader, Guid documentId) => new()
     {
         DocumentId = documentId,
         ReplicaId = reader.GetGuid(0),

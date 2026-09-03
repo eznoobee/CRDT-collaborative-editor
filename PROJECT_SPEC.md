@@ -1187,6 +1187,25 @@ Treat every one of these as a hard requirement with a corresponding test.
   (§13.13). The close carries a reason the client can act on, and the client's
   response is the catch-up path — one of the three guaranteed sources of
   duplicate delivery (§5).
+- **Catch-up is answered from the client's version vector, never from a
+  `server_seq` watermark.** The client says what it holds, per replica, and the
+  server returns what that does not cover. A watermark would be wrong for the
+  same reason the bullet above makes broadcast unordered: a client can hold
+  `server_seq` 105 without holding 100, so "everything after your highest" skips
+  whatever fell in the gap — and skips it silently, leaving a client that
+  renders a plausible document and converges with nobody. What a client actually
+  knows is per replica and dense (§5), which is exactly what a version vector
+  expresses and what a single number cannot.
+
+  Above a configured operation count the answer is a snapshot instead, because
+  replaying a week of deltas costs more than sending the state. The threshold is
+  configuration, not a constant: where the two cross depends on the document.
+  The snapshot path is also reachable on demand, which is not a convenience —
+  it is the only way to exercise a floor that otherwise runs solely behind a
+  working fast path (§13.14).
+
+  Catch-up returns the whole document, so it is a read and is authorized like
+  one: the §7 role check runs on every call, not once at connect.
 - Snapshot compaction and tombstone GC run in a background service, jittered and
   guarded by an advisory lock so multiple instances do not duplicate work.
 
@@ -1539,6 +1558,14 @@ Coverage that would be relied on is worse than none.
 
 So: **a test written for a specific defect is not finished until the fix has
 been removed and the test has been seen to fail.**
+
+**A sabotage run reports on whatever was built, not on whatever is on disk.**
+Restore the file and rebuild before believing the next result — and restore it
+in a way the build system can see. The 3b.6 harness restored with `mv`, which
+preserves the backup's modification time; the restored source was therefore
+*older* than the artefacts compiled from the sabotaged version, so MSBuild
+skipped the recompile and every following run silently executed the previous
+sabotage. See §13.17: the direction that matters is not the one that showed up.
 
 ### Name the vacuity risk before writing the test
 
@@ -2539,3 +2566,43 @@ for it. The test that catches it drops the cache and asserts the reconstructed
 number, which is the only arrangement where the query is the thing being tested.
 The `op_type` literals are now interpolated from the writer's own constants, so
 the two cannot drift again.
+
+### 13.17 The verification apparatus is not exempt
+
+The 3b.6 sabotage run reported that the snapshot-floor test failed under two
+sabotages that could not reach it — one removed a role check, the other a
+negative-sequence guard, and neither is on the floor's path. Run alone, the
+floor test passed five times out of five. The failure was not in the code and
+not in the test. It was in the harness.
+
+Each sabotage backed the file up with `cp`, patched it, built, ran, and restored
+with `mv`. `mv` preserves the *backup's* modification time, so the restored
+source came back older than the artefacts built from the sabotaged version.
+MSBuild compared timestamps, concluded nothing had changed, and skipped the
+recompile. Every run after the first sabotage executed the previous sabotage's
+binary. The "clean" baseline in between was not clean.
+
+The direction that showed up is the harmless one: a sabotage credited to the
+wrong test, noticed because the attribution made no sense. The direction that
+matters is the opposite one, and it is silent. Sabotage a check, build nothing,
+watch the *previous* clean build pass, and record "sabotage caught by nothing —
+the corpus does not reach this shape." That is a finding about the corpus, it
+reads as a real result, and it is the exact conclusion §12 says to take
+seriously. It would have certified a test that catches nothing, using the
+practice whose whole purpose is to prevent that.
+
+So the rule is general, and wider than one build system:
+
+> **Every claim about a check's behaviour under sabotage is a claim about a
+> specific binary. Establish that the binary is the one you think it is —
+> restore in a way the build system can observe, and rebuild — or the result is
+> about a state you are no longer in.**
+
+Three earlier entries (§13.13, §13.15, §13.16) are all instances of a mechanism
+that could not be observed failing. This is the same shape one level up: the
+apparatus that observes the mechanisms was itself unobserved. Nothing checks the
+checker, so the only defence is that its results have to *make sense* — an
+attribution that cannot be explained by the code is a finding about the harness,
+not a flake to re-run until it goes away. The tell here was that a sabotage and
+the test it broke had no path between them; the temptation was to call the floor
+test flaky, and running it in isolation appeared to confirm that.
