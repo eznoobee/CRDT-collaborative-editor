@@ -44,6 +44,24 @@ public static class RedisExtensions
             provider.GetRequiredService<IConnectionMultiplexer>(),
             provider.GetRequiredService<IOptions<ConnectTicketOptions>>().Value));
 
+        // §7's replica claims. Their lifetime must exceed the ticket's, because
+        // the claim is taken at negotiate and the connection that renews it does
+        // not exist yet; ValidateOnStart is what makes a misconfiguration a
+        // refusal to start rather than a replica that can be claimed twice.
+        services.AddOptions<ReplicaClaimOptions>()
+            .Bind(configuration.GetSection(ReplicaClaimOptions.Section))
+            .ValidateDataAnnotations()
+            .Validate(
+                options => options.RefreshInterval < options.Lifetime,
+                "A claim refreshed no more often than it expires is a claim that expires.")
+            .ValidateOnStart();
+
+        services.AddSingleton<IReplicaClaims>(provider => new RedisReplicaClaims(
+            provider.GetRequiredService<IConnectionMultiplexer>(),
+            provider.GetRequiredService<IOptions<ReplicaClaimOptions>>().Value));
+
+        services.AddHostedService<ReplicaClaimRenewal>();
+
         // Off, and post-configured so nothing can turn it back on. With
         // detailed errors on, every hub failure sends the exception's type and
         // message to whoever is connected — server internals to any client —

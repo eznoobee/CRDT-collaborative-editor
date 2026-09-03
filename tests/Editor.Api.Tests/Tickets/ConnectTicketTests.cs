@@ -18,7 +18,7 @@ public sealed class ConnectTicketTests
     public ConnectTicketTests(RedisFixture redis) => _redis = redis;
 
     private static ConnectionBinding Binding(Role role = Role.Editor) =>
-        new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), role);
+        new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), role, Guid.NewGuid());
 
     private RedisConnectTicketStore Store(TimeSpan? lifetime = null) =>
         new(_redis.Redis, new ConnectTicketOptions

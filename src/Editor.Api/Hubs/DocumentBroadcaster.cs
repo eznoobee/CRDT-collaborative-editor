@@ -176,20 +176,53 @@ public sealed class DocumentBroadcaster
 /// </remarks>
 public sealed class DocumentConnections
 {
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, Action>> _byDocument = new();
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, Entry>> _byDocument = new();
+
+    /// <summary>What this instance knows about one connection it holds.</summary>
+    /// <param name="ReplicaId">The replica this connection authors as (§7).</param>
+    /// <param name="ClaimToken">This session's proof that it holds that replica.</param>
+    /// <param name="Abort">
+    /// Closes it. Carried per connection because a hub can only abort
+    /// <em>itself</em> — <c>Context.Abort()</c> ends the connection that invoked
+    /// the method, and there is no abort-by-id anywhere in the hub API. A
+    /// registry of bare ids produced a fan-out that dropped the slow client by
+    /// disconnecting the fast one that happened to be sending.
+    /// </param>
+    private readonly record struct Entry(Guid ReplicaId, Guid ClaimToken, Action Abort);
+
+    /// <summary>One connection this instance holds, as the renewal loop sees it.</summary>
+    public readonly record struct HeldConnection(
+        Guid DocumentId, string ConnectionId, Guid ReplicaId, Guid ClaimToken);
 
     /// <summary>
-    /// Registers a connection along with the means to close it.
+    /// Registers a connection along with the means to close it and the claim it
+    /// holds.
     /// </summary>
+    public void Add(Guid documentId, string connectionId, Guid replicaId, Guid claimToken, Action abort) =>
+        _byDocument.GetOrAdd(documentId, _ => new ConcurrentDictionary<string, Entry>())[connectionId] =
+            new Entry(replicaId, claimToken, abort);
+
+    /// <summary>Every connection this instance holds, across all documents.</summary>
     /// <remarks>
-    /// The abort travels with the id because a hub can only abort <em>itself</em>
-    /// — <c>Context.Abort()</c> ends the connection that invoked the method, not
-    /// some other one, and there is no abort-by-id anywhere in the hub API. A
-    /// registry of bare ids would have produced a fan-out that dropped the slow
-    /// client by disconnecting the fast one that happened to be sending.
+    /// §7's claims are renewed from here rather than from activity: a client
+    /// reading without typing sends nothing for minutes, and its claim lapsing
+    /// while its socket is open is what would let a second session resume a
+    /// replica that still has a live author.
     /// </remarks>
-    public void Add(Guid documentId, string connectionId, Action abort) =>
-        _byDocument.GetOrAdd(documentId, _ => new ConcurrentDictionary<string, Action>())[connectionId] = abort;
+    public IReadOnlyList<HeldConnection> Held()
+    {
+        var held = new List<HeldConnection>();
+        foreach (var (documentId, connections) in _byDocument)
+        {
+            foreach (var (connectionId, entry) in connections)
+            {
+                held.Add(new HeldConnection(
+                    documentId, connectionId, entry.ReplicaId, entry.ClaimToken));
+            }
+        }
+
+        return held;
+    }
 
     /// <summary>
     /// Deregisters a connection, reporting whether it was the last one here.
@@ -224,9 +257,9 @@ public sealed class DocumentConnections
     public void Abort(Guid documentId, string connectionId)
     {
         if (_byDocument.TryGetValue(documentId, out var connections)
-            && connections.TryGetValue(connectionId, out var abort))
+            && connections.TryGetValue(connectionId, out var held))
         {
-            abort();
+            held.Abort();
         }
     }
 

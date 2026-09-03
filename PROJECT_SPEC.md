@@ -1083,7 +1083,15 @@ Treat every one of these as a hard requirement with a corresponding test.
   1. the `document_replicas` row exists;
   2. its `user_id` is the caller;
   3. its `document_id` is the document being negotiated;
-  4. no live connection currently holds it.
+  4. its `retired_at` is null;
+  5. no live connection currently holds it.
+
+  Check 4 is not redundant with the others and follows from §5: a retired
+  replica's operations may already have been collected, so resuming one would
+  let it keep authoring under an id the GC has forgotten. §5 says a retired
+  replica that reconnects is told to resync and discard local state, and minting
+  a fresh id is how that instruction reaches the client — the response names an
+  id the client did not ask for, which is the signal to discard.
 
   If any check fails the server mints a fresh id instead of refusing, and the
   response always names the id that was actually assigned. It is never an error
@@ -1101,7 +1109,7 @@ Treat every one of these as a hard requirement with a corresponding test.
   document, could attribute operations to whichever replica suited them, and
   every peer would converge on it.
 
-  Check 4 is what keeps the two statements consistent, and it is a claim on the
+  Check 5 is what keeps the two statements consistent, and it is a claim on the
   replica taken at `negotiate` — not at connect. The ticket exists before the
   connection does, so a claim taken only when the socket opens leaves a window
   in which two `negotiate` calls both succeed for one replica. The claim is

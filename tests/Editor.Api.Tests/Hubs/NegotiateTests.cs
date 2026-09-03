@@ -122,8 +122,16 @@ public sealed class NegotiateTests
         var tickets = factory.Services.GetRequiredService<IConnectTicketStore>();
         var binding = await tickets.RedeemAsync(negotiated.Ticket, TestContext.Current.CancellationToken);
 
-        Assert.Equal(
-            new ConnectionBinding(owner, documentId, negotiated.ReplicaId, Role.Owner), binding);
+        Assert.NotNull(binding);
+        Assert.Equal(owner, binding.Value.UserId);
+        Assert.Equal(documentId, binding.Value.DocumentId);
+        Assert.Equal(negotiated.ReplicaId, binding.Value.ReplicaId);
+        Assert.Equal(Role.Owner, binding.Value.Role);
+
+        // §7's replica claim, taken at negotiate and carried in the ticket so
+        // the instance that ends up holding the socket can release the claim
+        // this session took rather than whatever claim happens to be there.
+        Assert.NotEqual(Guid.Empty, binding.Value.ClaimToken);
     }
 
     [Fact]

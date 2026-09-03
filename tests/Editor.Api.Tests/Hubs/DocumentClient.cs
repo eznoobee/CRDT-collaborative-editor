@@ -13,7 +13,8 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Editor.Api.Tests.Hubs;
 
 /// <summary>What `negotiate` hands back.</summary>
-public sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
+public sealed record Negotiated(
+    string Ticket, Guid DocumentId, Guid ReplicaId, Role Role, bool Resumed);
 
 /// <summary>
 /// One connected editor: a negotiated ticket, a live hub connection, a sequence
@@ -139,14 +140,14 @@ public sealed class DocumentClient : IAsyncDisposable
 
     /// <summary>Negotiates, connects, and starts listening.</summary>
     public static async Task<DocumentClient> JoinAsync(
-        EditorApiFactory factory, string subject, Guid documentId)
+        EditorApiFactory factory, string subject, Guid documentId, Guid? resume = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
 
         using var http = factory.ClientFor(subject);
-        using var response = await http.PostAsync(
+        using var response = await http.PostAsJsonAsync(
             new Uri($"/documents/{documentId}/negotiate", UriKind.Relative),
-            null,
+            new { replicaId = resume },
             TestContext.Current.CancellationToken);
 
         response.EnsureSuccessStatusCode();

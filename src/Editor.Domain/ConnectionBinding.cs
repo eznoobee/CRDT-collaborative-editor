@@ -16,8 +16,12 @@ namespace Editor.Domain;
 /// <param name="DocumentId">The one document this connection may submit into.</param>
 /// <param name="ReplicaId">The replica id the server assigned to this connection.</param>
 /// <param name="Role">The role held when the ticket was issued.</param>
+/// <param name="ClaimToken">
+/// Proof that this session, and not a previous one, holds the replica (§7).
+/// </param>
 public readonly record struct ConnectionBinding(
     Guid UserId,
     Guid DocumentId,
     Guid ReplicaId,
-    Role Role);
+    Role Role,
+    Guid ClaimToken);

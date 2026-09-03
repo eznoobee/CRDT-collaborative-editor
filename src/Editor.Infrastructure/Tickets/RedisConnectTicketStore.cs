@@ -31,8 +31,17 @@ public sealed class RedisConnectTicketStore : IConnectTicketStore
     /// </summary>
     private const int TicketBytes = 32;
 
-    /// <summary>16 + 16 + 16 bytes of id, then one byte of role.</summary>
-    private const int PayloadBytes = 49;
+    /// <summary>
+    /// 16 + 16 + 16 bytes of id, one byte of role, then the 16-byte claim token.
+    /// </summary>
+    /// <remarks>
+    /// The claim token rides in the ticket because §7 takes the replica claim at
+    /// <c>negotiate</c> and releases it on disconnect, and those happen on
+    /// different instances. Anything else would mean the hub releasing a claim
+    /// by key alone — which lets a stalled session drop the live claim of the
+    /// session that replaced it.
+    /// </remarks>
+    private const int PayloadBytes = 65;
 
     private readonly IConnectionMultiplexer _redis;
     private readonly ConnectTicketOptions _options;
@@ -171,6 +180,7 @@ public sealed class RedisConnectTicketStore : IConnectTicketStore
         }
 
         payload[48] = checked((byte)binding.Role);
+        Write(span.Slice(49, 16), binding.ClaimToken);
         return payload;
 
         static void Write(Span<byte> destination, Guid value)
@@ -207,6 +217,7 @@ public sealed class RedisConnectTicketStore : IConnectTicketStore
             new Guid(payload.AsSpan(0, 16), bigEndian: true),
             new Guid(payload.AsSpan(16, 16), bigEndian: true),
             new Guid(payload.AsSpan(32, 16), bigEndian: true),
-            role);
+            role,
+            new Guid(payload.AsSpan(49, 16), bigEndian: true));
     }
 }
