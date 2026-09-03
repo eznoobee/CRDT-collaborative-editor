@@ -658,11 +658,52 @@ immediately preceding operation in this batch.
 **Delete** — tag `01`, then id (replica index varint, seq varint) and target
 (replica index varint, seq varint).
 
-**The run form of §6 stays reserved and is not specified here.** Runs on the wire
-need the ingest-side expansion that replays the placement rule per element, which
-is Phase 3's work; specifying a format now that nothing writes or reads would be
-a stub in the specification. Snapshots use runs today because the snapshot writer
-and reader both exist.
+**Run insert** — an insert record under a different tag, followed by a count and
+the remaining values. Everything up to and including the first element's value
+is byte-for-byte an insert record, which is what lets one reader serve both.
+
+| field | type |
+|---|---|
+| tag | `02` |
+| flags | 1 byte, as an insert record |
+| id | replica index varint, seq varint — the **first** element |
+| parent | absent for flags 0 and 1, else replica index varint + seq varint |
+| right origin | present only when bit 4 is set — the **first** element's |
+| value | the **first** element's, as an insert record |
+| count | varint, ≥ 2 and ≤ the §7 run cap |
+| values | `count − 1` × UTF-8 code point, for elements 1 … `count − 1` |
+
+Element *i* of the run has id `(replica, seq + i)`. Element 0 takes the record's
+parent, side and right origin. Every later element is a **right child of the
+element before it, with no right origin** — the placement a client produces by
+typing left to right, which is what §5's rule yields for consecutive insertions
+at one position.
+
+Unlike a snapshot run, the first element **may** carry an explicit right origin.
+A snapshot run record has nowhere to put one; this record does, and the case it
+serves — a paste into the middle of a document — is the common one rather than
+an edge case. Later elements never carry one, because each is placed against the
+element before it.
+
+A decoder **expands the run before anything else sees it** and rejects a `count`
+over the §7 cap **before allocating**, not after. A run naming four billion code
+points is one varint; expanding it first and checking the cap afterwards is a
+denial of service written into the format.
+
+Canonical form for the operation batch, in addition to the rules below: a run
+has `count` ≥ 2, runs are maximal **up to the cap**, and an insert record that
+could have joined the run before it is invalid. The cap is the one exception to
+maximality and it has to be: a paste of 300 code points is a run of 256 followed
+by a record that continues it, and a maximality rule with no exception would
+make that batch unencodable. So a record boundary is valid exactly where the
+record before it is a run already at the cap. The run shape here is **not** the snapshot's
+pairwise rule. It is one-sided: the later element must be a right child of the
+earlier one, with the next sequence number on the same replica and no right
+origin of its own. Nothing is required of the earlier element, because a run's
+first element may carry a right origin — it starts the record rather than
+continuing one, and a mid-document paste is precisely the case where it does.
+Only the snapshot form needs the two-sided rule, because a snapshot run record
+has nowhere to put a right origin at all.
 
 #### Canonical form
 
@@ -852,6 +893,13 @@ chaining each element onto the previous one. It must not assign every element in
 the run the same parent and side — that would make them siblings and reintroduce
 exactly the interleaving invariant 8 forbids.
 
+Because expansion produces exactly the chain a left-to-right typist produces, a
+batch decoded from runs and one decoded from individual inserts are the same
+operations; §6's canonical form then re-encodes both to the same bytes. That is
+what makes the run form a transport optimisation rather than a second dialect,
+and it is testable: expanding a run and encoding the result must reproduce the
+run.
+
 ## 7. Security
 
 Treat every one of these as a hard requirement with a corresponding test.
@@ -869,6 +917,28 @@ Treat every one of these as a hard requirement with a corresponding test.
   `Referer` headers — none of which your own log redaction controls. A ticket
   that is single-use and expires in a minute is a bounded loss; a bearer JWT is
   not.
+
+  **The ticket lives in Redis and is redeemed atomically.** Not in process
+  memory: §8 forbids sticky sessions, so the instance that issues a ticket is
+  usually not the one that redeems it. "Single-use" must be a single atomic
+  operation — `GETDEL`, not a read followed by a delete — because two
+  simultaneous connects against a read-then-delete both find the ticket present
+  and both succeed, which is exactly the replay the single-use rule exists to
+  stop.
+
+  **The ticket carries the binding, and the server chooses it.** A ticket names
+  the user, the document, and the **replica id the server assigned**, and the
+  role check happens at `negotiate` before the ticket is issued. The client does
+  not pick its own replica id.
+
+  That last point is load-bearing rather than tidy. §5 makes `ReplicaId` the
+  tie-break that orders concurrent insertions, and this section rejects
+  operations whose replica id does not match the connection's — but a binding
+  the client chose is not a check, it is a formality. A client that picked
+  another live replica's id would be authenticated, bound, and able to author
+  operations attributed to someone else, and every replica would converge on the
+  result. Server assignment, recorded in `document_replicas` against the user,
+  is what makes the per-operation comparison mean anything.
 - The ticket and any token must never be written to logs. Configure request
   logging to redact them explicitly, and add a test that drives a connection
   using a **known sentinel value** through the real logging pipeline —
@@ -897,6 +967,13 @@ Treat every one of these as a hard requirement with a corresponding test.
   see — do not leak document existence. A viewer attempting a write gets 403:
   they can already see the document, so there is nothing to conceal.
 
+  Those are HTTP statuses and they apply to `negotiate`, which is where the
+  membership decision is made. A hub method has no status code, so it fails with
+  an error carrying the equivalent **code** — `not_found` or `forbidden` — and
+  the same rule about what may be revealed. The distinction is not cosmetic: a
+  hub that answers "forbidden" for a document the caller cannot see has leaked
+  its existence just as surely as a 403 would.
+
 **Input validation**
 - Reject operations whose `ReplicaId` does not match the one bound to the
   authenticated connection. A client must not be able to forge operations
@@ -904,6 +981,11 @@ Treat every one of these as a hard requirement with a corresponding test.
 - Reject operations whose `Seq` is not the next dense value for that replica.
   Density is a correctness property of the version vector (§5), not a
   convention.
+
+  The expected next value is **reconstructible from Postgres** — the maximum
+  `seq` stored for that `(document_id, replica_id)` — and any in-memory copy is
+  a cache. §8 requires exactly that: an app server may hold per-document state
+  for speed, and must not need it for correctness after a failover.
 - Caps: single element value = exactly 1 code point (≤4 bytes UTF-8); run op
   ≤ 256 code points; batch ≤ 256 ops; message ≤ 64 KB; document ≤ 5 MB of live
   text; ≤ 50 concurrent replicas per document; pending-set bound per connection.
@@ -1972,3 +2054,41 @@ the replicas the body names. The *re-encode* half of the fixture check caught it
 which is the argument for that half existing. A fixture that is merely accepted
 proves the decoder is permissive; a fixture that is accepted and re-encodes to
 the same bytes proves it agrees with the encoder about what the document is.
+
+### 13.12 Phase 3 decisions taken before the hub existed
+
+Four things §7 left open that had to be settled before any of it could be
+written, recorded here rather than discovered in the diff.
+
+**The client does not choose its replica id.** §7 already said an operation's
+replica id must match the connection's binding, and §5 already made `ReplicaId`
+the tie-break that orders concurrent insertions. Together those look like a
+complete defence and are not: if the client supplies the binding, the check
+compares a value against itself. A client naming another live replica's id would
+pass authentication, pass the per-operation comparison, and author operations
+attributed to that replica — and every other replica would converge on the
+forgery, because convergence is exactly what the algorithm guarantees. The
+server assigns the id at `negotiate` and records it against the user in
+`document_replicas`; §7 now says so.
+
+**The ticket is redeemed with `GETDEL`, not a read then a delete.** §8 forbids
+sticky sessions, so the issuing instance is usually not the redeeming one and the
+ticket has to be shared state. Under a read-then-delete, two connects arriving
+together both observe the ticket and both proceed: single-use that is not atomic
+is not single-use. This is the kind of thing that passes every test written
+against one client.
+
+**Dense `Seq` validation caches, it does not own.** The next expected value is
+the maximum stored for that `(document_id, replica_id)` in Postgres. An in-memory
+copy makes the hot path affordable (§8 forbids loading the document to validate
+an operation), and losing it on failover must cost a query rather than
+correctness.
+
+**A hub method has no HTTP status.** §7's 404-versus-403 rule is about not
+leaking document existence, and it survives the move to SignalR only if the hub
+carries the same distinction in its error codes. Answering `forbidden` for a
+document the caller cannot see would leak exactly what the 404 rule protects.
+
+None of these are changes of direction. They are the places where §7's rules,
+read literally, could each be satisfied by an implementation that defeated their
+purpose.

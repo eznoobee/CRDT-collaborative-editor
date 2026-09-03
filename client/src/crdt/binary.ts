@@ -27,6 +27,16 @@ const TAG_RUN = 0x01;
 
 const OP_INSERT = 0x00;
 const OP_DELETE = 0x01;
+const OP_RUN = 0x02;
+
+/**
+ * §7's cap on the code points one run may name, applied while decoding.
+ *
+ * A run naming four billion code points is one varint. Expanding it and then
+ * checking the cap is a denial of service written into the format, so the check
+ * happens before the allocation.
+ */
+export const MAX_RUN_CODE_POINTS = 256;
 
 const FLAG_SIDE_RIGHT = 0b0000_0001;
 const FLAG_DELETED = 0b0000_0010;
@@ -50,6 +60,20 @@ export class BinaryFormatError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BinaryFormatError';
+  }
+}
+
+/**
+ * A run named more code points than the cap allows.
+ *
+ * Distinct from a structural refusal because §7 gives it a distinct answer: a
+ * client that pasted too much at once needs to know to split it, which is a
+ * different fix from the one a client sending malformed bytes needs.
+ */
+export class RunLengthExceededError extends BinaryFormatError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunLengthExceededError';
   }
 }
 
@@ -655,6 +679,68 @@ function writeInsert(
   writeValue(writer, insert.value);
 }
 
+/**
+ * Whether `later` continues `earlier`'s run (§6, operation batch form).
+ *
+ * One-sided, unlike the snapshot form's rule: nothing is required of the earlier
+ * element, because a run's first element may carry a right origin. A snapshot
+ * run record has nowhere to put one; this record has somewhere, and the case it
+ * serves — a paste into the middle of a document — is the common one.
+ */
+function continuesRun(earlier: Operation, later: Operation): boolean {
+  return (
+    earlier.kind === 'insert' &&
+    later.kind === 'insert' &&
+    later.rightOrigin === null &&
+    later.side === 'R' &&
+    later.parent !== null &&
+    elementIdsEqual(later.parent, earlier.id) &&
+    compareReplicaId(later.id.replica, earlier.id.replica) === 0 &&
+    later.id.seq === earlier.id.seq + 1n
+  );
+}
+
+/** How many operations from `start` form one run. */
+function runLength(operations: readonly Operation[], start: number): number {
+  let length = 1;
+  while (
+    start + length < operations.length &&
+    length < MAX_RUN_CODE_POINTS &&
+    continuesRun(operations[start + length - 1]!, operations[start + length]!)
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function writeOperationRun(
+  writer: Writer,
+  operations: readonly Operation[],
+  start: number,
+  length: number,
+  index: (id: ReplicaId) => number,
+  previousInsert: ElementId | null,
+): void {
+  const first = operations[start] as Extract<Operation, { kind: 'insert' }>;
+
+  // The body is an insert record's, tag included, and the tag is then
+  // overwritten. Sharing the writer rather than copying it is what keeps the two
+  // records from drifting apart field by field.
+  const body = new Writer();
+  writeInsert(body, first, index, previousInsert);
+  const bytes = body.finish();
+  bytes[0] = OP_RUN;
+  writer.raw(bytes);
+
+  writer.varint(length);
+
+  // The first element's value went out with its body; the rest follow in the
+  // order they were placed.
+  for (let i = 1; i < length; i++) {
+    writeValue(writer, (operations[start + i] as Extract<Operation, { kind: 'insert' }>).value);
+  }
+}
+
 /** Encodes an operation batch body (kind 0x02) in canonical form. */
 export function encodeOperations(operations: readonly Operation[]): Uint8Array {
   const table = buildTable(
@@ -680,38 +766,72 @@ export function encodeOperations(operations: readonly Operation[]): Uint8Array {
     writer.raw(replicaIdToBytes(id));
   }
 
-  writer.varint(operations.length);
+  // Records, not operations: a run of n elements is one record. The records go
+  // into a buffer of their own because the count is only known once the
+  // grouping is done.
+  const records = new Writer();
+  let recordCount = 0;
 
   let previousInsert: ElementId | null = null;
-  for (const operation of operations) {
+  for (let i = 0; i < operations.length; ) {
+    const operation = operations[i]!;
     if (operation.kind === 'insert') {
-      writeInsert(writer, operation, index, previousInsert);
-      previousInsert = operation.id;
+      // Maximal by construction. §6 forbids both a run that could have been
+      // longer and a lone insert that could have joined one, so the encoder
+      // takes the longest run available and never has a choice to make.
+      const length = runLength(operations, i);
+      if (length >= 2) {
+        writeOperationRun(records, operations, i, length, index, previousInsert);
+        previousInsert = {
+          replica: operation.id.replica,
+          seq: operation.id.seq + BigInt(length - 1),
+        };
+        i += length;
+      } else {
+        writeInsert(records, operation, index, previousInsert);
+        previousInsert = operation.id;
+        i += 1;
+      }
+      recordCount += 1;
     } else {
-      writer.byte(OP_DELETE);
-      writeElementId(writer, operation.id, index);
-      writeElementId(writer, operation.target, index);
+      records.byte(OP_DELETE);
+      writeElementId(records, operation.id, index);
+      writeElementId(records, operation.target, index);
       previousInsert = null;
+      recordCount += 1;
+      i += 1;
     }
   }
+
+  writer.varint(recordCount);
+  writer.raw(records.finish());
 
   return writer.finish();
 }
 
 /** Decodes an operation batch, or throws having applied none of it. */
-export function decodeOperations(encoded: Uint8Array): Operation[] {
+export function decodeOperations(
+  encoded: Uint8Array,
+  maxRunCodePoints: number = MAX_RUN_CODE_POINTS,
+): Operation[] {
   const reader = new Reader(encoded);
   readHeader(reader, KIND_OPERATIONS);
 
   const table = readTable(reader);
-  const count = reader.count('An operation count');
+  const count = reader.count('A record count');
   const operations: Operation[] = [];
+
+  // Where each record's operations start, so maximality can be checked across
+  // record boundaries once everything is expanded.
+  const recordStarts: number[] = [];
+  const ceiling = Math.min(maxRunCodePoints, MAX_RUN_CODE_POINTS);
 
   let previousInsert: ElementId | null = null;
   for (let i = 0; i < count; i++) {
+    recordStarts.push(operations.length);
     const tag = reader.byte();
 
-    if (tag === OP_INSERT) {
+    if (tag === OP_INSERT || tag === OP_RUN) {
       const flags = reader.byte();
       validateFlags(flags, false);
 
@@ -753,15 +873,52 @@ export function decodeOperations(encoded: Uint8Array): Operation[] {
         rightOrigin = readElementId(reader, table);
       }
 
-      operations.push({
+      const first: Operation = {
         kind: 'insert',
         id,
         value: readValue(reader),
         parent,
         side,
         rightOrigin,
-      });
+      };
+      operations.push(first);
       previousInsert = id;
+
+      if (tag === OP_RUN) {
+        const length = reader.count('A run length');
+
+        if (length < 2) {
+          throw new BinaryFormatError(
+            `Non-canonical: a run of ${length} is an insert record (§6).`,
+          );
+        }
+
+        if (length > ceiling) {
+          // Before the allocation, not after: a run naming four billion code
+          // points is one varint, and expanding it first would make the cap a
+          // denial of service rather than a defence against one (§6, §7).
+          throw new RunLengthExceededError(
+            `A run of ${length} code points exceeds the cap of ${ceiling} (§7).`,
+          );
+        }
+
+        for (let element = 1; element < length; element++) {
+          // §6 and §5: each element chains onto the one before it. Giving them
+          // all the same parent and side would make them siblings and
+          // reintroduce exactly the interleaving invariant 8 forbids.
+          const previous = previousInsert;
+          const next: ElementId = { replica: previous.replica, seq: previous.seq + 1n };
+          operations.push({
+            kind: 'insert',
+            id: next,
+            value: readValue(reader),
+            parent: previous,
+            side: 'R',
+            rightOrigin: null,
+          });
+          previousInsert = next;
+        }
+      }
     } else if (tag === OP_DELETE) {
       const id = readElementId(reader, table);
       const target = readElementId(reader, table);
@@ -774,8 +931,30 @@ export function decodeOperations(encoded: Uint8Array): Operation[] {
 
   if (reader.remaining !== 0) {
     throw new BinaryFormatError(
-      `${reader.remaining} bytes remain after the declared ${count} operations (§6).`,
+      `${reader.remaining} bytes remain after the declared ${count} records (§6).`,
     );
+  }
+
+  // Maximality, checked over the whole batch rather than record by record: a
+  // lone insert that could have continued the record before it is exactly as
+  // non-canonical as a run that stopped early.
+  for (let record = 1; record < recordStarts.length; record++) {
+    const start = recordStarts[record]!;
+    const previousLength = start - recordStarts[record - 1]!;
+
+    // A run already at the cap is the one place a boundary may fall mid-run: a
+    // paste of 300 code points has to be encodable, and it is a run of 256
+    // followed by a record that continues it.
+    if (previousLength >= ceiling) {
+      continue;
+    }
+
+    if (start < operations.length && continuesRun(operations[start - 1]!, operations[start]!)) {
+      throw new BinaryFormatError(
+        'Non-canonical: a record begins with an element that continues the previous ' +
+          "record's last element, so the two should be one run (§6).",
+      );
+    }
   }
 
   return operations;

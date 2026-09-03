@@ -151,15 +151,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate a local-only Postgres password
-        # docker-compose.yml deliberately has no default password
-        # (PROJECT_SPEC.md §7), so CI supplies an ephemeral one.
+      - name: Generate a local-only environment
+        # docker-compose.yml deliberately has no default password and no
+        # default issuer (PROJECT_SPEC.md §7), so CI supplies both. The issuer
+        # is unreachable on purpose: this job proves the stack comes up and
+        # answers /health/live, not that tokens validate — key retrieval is
+        # lazy, so an unreachable metadata address does not block startup.
         run: |
           {
             echo "POSTGRES_DB=editor"
             echo "POSTGRES_USER=editor"
             echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"
             echo "API_PORT=8080"
+            echo "OIDC_ISSUER=https://issuer.ci.invalid/"
+            echo "OIDC_AUDIENCE=editor-api"
+            echo "OIDC_METADATA_ADDRESS=https://issuer.ci.invalid/.well-known/openid-configuration"
+            echo "REDIS_CONFIGURATION=redis:6379"
           } > .env
 
       - name: Start the stack

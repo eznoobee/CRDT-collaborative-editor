@@ -32,8 +32,21 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
   </ItemGroup>
 
+  <ItemGroup Label="Transport and auth">
+    <!-- Approved for Phase 3 (PROJECT_SPEC.md §7, §8). JwtBearer validates the
+         OIDC tokens; the Redis backplane fans SignalR out across instances so
+         that no session is sticky; StackExchange.Redis backs the connect
+         tickets and the role cache. -->
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.11" />
+    <PackageVersion Include="StackExchange.Redis" Version="2.9.38" />
+  </ItemGroup>
+
   <ItemGroup Label="Integration testing">
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
+    <!-- Drives the hub the way a browser does, so the connect-ticket handshake
+         and the hub's error codes are exercised over a real transport. -->
+    <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.11" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.14.0" />
     <PackageVersion Include="Testcontainers.Redis" Version="4.14.0" />
   </ItemGroup>
