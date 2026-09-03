@@ -168,9 +168,16 @@ describe('IndexedDB', () => {
     const one = store(name);
     await one.save('warm-up', record());
 
+    // Captured unbound on purpose: it is put back on the prototype afterwards,
+    // and binding it would install a method permanently attached to whichever
+    // store happened to be first.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
     const put = IDBObjectStore.prototype.put;
-    IDBObjectStore.prototype.put = function aborting(this: IDBObjectStore, ...args) {
-      const operation = put.apply(this, args as Parameters<typeof put>);
+    IDBObjectStore.prototype.put = function aborting(
+      this: IDBObjectStore,
+      ...args: Parameters<typeof put>
+    ): IDBRequest<IDBValidKey> {
+      const operation = put.apply(this, args);
       this.transaction.abort();
       return operation;
     };
@@ -196,7 +203,7 @@ describe('IndexedDB', () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const opening = indexedDB.open(name, 1);
       opening.onsuccess = () => resolve(opening.result);
-      opening.onerror = () => reject(opening.error);
+      opening.onerror = () => reject(opening.error ?? new Error('open failed'));
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -206,7 +213,7 @@ describe('IndexedDB', () => {
         'doc-1',
       );
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
+      transaction.onerror = () => reject(transaction.error ?? new Error('write failed'));
     });
 
     await expect(store(name).load('doc-1')).rejects.toThrow(UnsupportedStoreVersion);
