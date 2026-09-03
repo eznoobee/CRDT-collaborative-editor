@@ -116,10 +116,16 @@ public sealed class CachedDocumentRoles : IDocumentRoles, IAsyncDisposable
             // five-second TTL is the guarantee in the meantime.
             _invalidations = null;
         }
+        catch (ObjectDisposedException)
+        {
+            // Shutting down while a reconnect was in flight.
+            _invalidations = null;
+        }
     }
 
     private void OnConnectionRestored(object? sender, ConnectionFailedEventArgs e) =>
         _ = TrySubscribeAsync();
+
 
     public async Task<Role?> GetRoleAsync(
         Guid documentId, Guid userId, CancellationToken cancellationToken)
@@ -189,13 +195,43 @@ public sealed class CachedDocumentRoles : IDocumentRoles, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    /// <summary>Stops listening, tolerating a multiplexer that is already gone.</summary>
+    /// <remarks>
+    /// Nothing here orders this against the multiplexer's own disposal. Both are
+    /// singletons, the container disposes them in whatever order it likes, and
+    /// on a slow shutdown this loses the race and throws
+    /// <see cref="ObjectDisposedException"/> from inside a hosted service's
+    /// StopAsync — which fails the host's shutdown, and in a test host fails
+    /// whichever test happened to be running.
+    /// <para>
+    /// Unsubscribing from a connection that no longer exists is not a failure,
+    /// it is the outcome already achieved, so it is swallowed rather than
+    /// ordered around. The alternative — making this depend on disposal
+    /// order — would be a guarantee the container does not offer.
+    /// </para>
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
-        _redis.ConnectionRestored -= OnConnectionRestored;
-
-        if (_invalidations is not null)
+        try
         {
-            await _invalidations.UnsubscribeAsync().ConfigureAwait(false);
+            _redis.ConnectionRestored -= OnConnectionRestored;
+
+            if (_invalidations is not null)
+            {
+                await _invalidations.UnsubscribeAsync().ConfigureAwait(false);
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // The multiplexer went first. Nothing left to unsubscribe from.
+        }
+        catch (RedisException)
+        {
+            // Redis is unreachable. The subscription dies with the connection.
+        }
+        finally
+        {
+            _invalidations = null;
         }
     }
 
