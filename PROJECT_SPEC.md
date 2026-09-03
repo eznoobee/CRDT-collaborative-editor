@@ -2321,7 +2321,62 @@ The measurement itself carries the trap: **the inflation lives in the frame, not
 in the payload.** Measuring `byte[]` length would show the two protocols as
 identical and decide this wrongly, with a plausible number and nothing about the
 result looking wrong afterwards. What gets measured is the framed message on the
-wire.
+wire, via `IHubProtocol.WriteMessage`, which is exactly what the connection
+sends minus transport framing that is identical for both.
+
+**The numbers.** Framed hub message, bytes:
+
+| document | payload | JSON frame | MessagePack frame | saved |
+|---|---|---|---|---|
+| one keystroke | 30 | 209 | 161 | 23.0% |
+| keystroke batch (16) | 61 | 253 | 192 | 24.1% |
+| paste at the run cap (256) | 542 | 893 | 674 | 24.5% |
+| 256 separate inserts, no run | 1,500 | 2,169 | 1,632 | 24.8% |
+| a batch near the cap | 121,772 | 162,533 | 121,907 | 25.0% |
+
+Base64 adds a third to the payload, so the saving relative to the JSON frame is
+a quarter — 0.33/1.33 — approached from below as the fixed frame overhead
+(method name, document id, replica id) is amortised.
+
+Under §7's 64 KB message cap, **JSON admits 49,023 payload bytes and MessagePack
+65,403**. Phase 3's "about 47 KB" was an estimate; 49,023 is the measurement.
+
+Client bundle, gzipped bytes:
+
+| bundle | minified | gzipped | delta |
+|---|---|---|---|
+| CRDT core alone | 8,399 | 3,135 | — |
+| core + SignalR | 64,167 | 17,317 | +14,182 |
+| core + SignalR + MessagePack | 94,192 | 25,390 | +22,255 |
+
+**The MessagePack protocol costs 8,073 gzipped bytes, 46.6% on top of the
+SignalR client.** That is not trivial and it is the honest case against this
+decision.
+
+**The call, against both figures: MessagePack.** Three reasons, in order of
+weight.
+
+The bundle cost is paid once per page load and is cacheable; the wire saving
+accrues per message and is not. At 253 versus 192 bytes for a keystroke batch,
+8 KB of bundle is repaid after roughly 130 batches — a few minutes of typing —
+and every batch after that is profit.
+
+Second, and this is what actually decides it: on the slow connection the bundle
+argument is about, **the document dominates the bundle by three orders of
+magnitude.** §8's case is 5.3 MiB of binary snapshot (§13.9). Against that,
+8 KB is noise, and optimising it while shipping 5.3 MiB would be a strange place
+to economise.
+
+Third, the cap becomes honest. A "64 KB message limit" that admits 49 KB of
+operations is a number that will mislead whoever next reasons about batch sizing;
+under MessagePack the cap means what it says.
+
+**JSON is withdrawn from the hub's supported protocols, not merely deprioritised.**
+Supporting both would let a client negotiate JSON and silently take the worse
+wire and the smaller effective cap — a downgrade nobody would observe. A client
+that cannot speak MessagePack now fails to connect, and §13.13 is the reason a
+loud failure is the better one. A test asserts the refusal rather than assuming
+it.
 
 ### 13.14 Test a bound where it is the only guarantee
 

@@ -505,6 +505,7 @@ public sealed class IngestValidationTests
                         await factory.Server.CreateWebSocketClient()
                             .ConnectAsync(context.Uri, cancellationToken);
                 })
+            .AddMessagePackProtocol()
             .Build();
 
         await connection.StartAsync(TestContext.Current.CancellationToken);

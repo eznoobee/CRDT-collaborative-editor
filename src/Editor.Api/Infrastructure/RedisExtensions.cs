@@ -1,6 +1,7 @@
 using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Tickets;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -61,6 +62,14 @@ public static class RedisExtensions
             var limits = configuration.GetSection(IngestLimits.Section).Get<IngestLimits>()
                 ?? new IngestLimits();
             options.MaximumReceiveMessageSize = limits.MaxMessageBytes;
+
+            // MessagePack only, and JSON deliberately withdrawn. Supporting
+            // both would let a client negotiate JSON and silently get a 25%
+            // worse wire and a §7 cap that admits 49 KB rather than 65 KB of
+            // operations (§13.13a) — a downgrade nobody would see. A client
+            // that cannot speak MessagePack now fails to connect, which is
+            // loud, and §13.13 is the reason that is the better failure.
+            options.SupportedProtocols = [new MessagePackHubProtocol().Name];
         });
 
         // §8 forbids sticky sessions, so a client's operations and the
@@ -68,6 +77,11 @@ public static class RedisExtensions
         // The backplane is what makes that work; without it a document is only
         // collaborative among the clients that happened to hit one server.
         services.AddSignalR()
+            // Framing only (§6, §13.13a). The payload stays an opaque byte
+            // string in §6's format; MessagePack's object model is not used and
+            // must not be — a second encoding with its own canonical-form rules
+            // is where §13.11's bug came from.
+            .AddMessagePackProtocol()
             .AddStackExchangeRedis(options => options.ConnectionFactory = writer =>
                 // Its own connection rather than the application's: the
                 // backplane subscribes and publishes continuously, and sharing

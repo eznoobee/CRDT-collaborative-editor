@@ -93,6 +93,15 @@ jobs:
       # this phase.
       - name: Measure
         run: node measure.mjs
+
+      - name: Client bundle size (§13.13a)
+        # The second figure the protocol decision rests on. Reported, not
+        # gated: a threshold set before anyone has seen a number is how §8
+        # acquired a 500 ms target nothing had measured.
+        working-directory: tests/browser
+        run: |
+          npm --prefix ../../client ci
+          node bundle-metrics.mjs
         working-directory: tests/browser
 
   mutation:

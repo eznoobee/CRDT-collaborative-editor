@@ -5,7 +5,8 @@
   "type": "module",
   "description": "PROJECT_SPEC.md §8: the browser half of the document-load measurement. Test-only.",
   "scripts": {
-    "measure": "node measure.mjs"
+    "measure": "node measure.mjs",
+    "bundle": "node bundle-metrics.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
