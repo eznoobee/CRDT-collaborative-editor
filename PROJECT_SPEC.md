@@ -1291,7 +1291,7 @@ reviewed. At the end of each phase, stop and report.
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
 | 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
-| 3b | Causal delivery over the wire, scale-out | Two real clients converge; an instance killed mid-session and clients still converge |
+| 3b | Wire protocol decision, causal delivery, scale-out | Protocol settled and measured **before** any throughput number; two real clients converge; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test |
@@ -1372,6 +1372,19 @@ not a property anyone can read off the source; it has to be demonstrated. When
 sabotage does *not* produce a failure, the finding is not "the check is broken" —
 it is "the corpus does not reach this shape", and that is the more useful of the
 two answers.
+
+**The practice applies to a new test as much as to an established check**, and
+that is where it pays most often. Phase 3 ran sixteen sabotages; fifteen
+confirmed a check and one caught a *test* — a shutdown-race test written against
+the wrong path, which passed whether or not the code was correct and would have
+sat in the suite forever counted as coverage of a race it never touched. Right
+subject, wrong path is the most common way a test passes for no reason, and no
+amount of reading finds it: a test asserting something true either way looks
+exactly like a test asserting something true because the code is right.
+Coverage that would be relied on is worse than none.
+
+So: **a test written for a specific defect is not finished until the fix has
+been removed and the test has been seen to fail.**
 
 ### Hand-written fixtures for every canonical form
 
@@ -2092,3 +2105,73 @@ document the caller cannot see would leak exactly what the 404 rule protects.
 None of these are changes of direction. They are the places where §7's rules,
 read literally, could each be satisfied by an implementation that defeated their
 purpose.
+
+### 13.13 A rejection the rejected party cannot observe is not a rejection
+
+Phase 3 refused an unauthenticated hub connection in `OnConnectedAsync`, first
+with `Context.Abort()` and then by throwing. Both are the documented way to
+refuse a SignalR connection. Neither is observable to the client: SignalR
+completes its handshake *before* invoking the hub, so `StartAsync` has already
+returned success by the time the connection is torn down. Every rejected client
+believed it was connected, and what it saw afterwards — a connection closing
+shortly after opening — is indistinguishable from a network blip.
+
+The server was correct throughout. It redeemed no ticket, established no
+binding, and would have refused every subsequent call. A server-side test suite
+asserting on server state would have passed, and did.
+
+**The general form: a rejection that is not observable to the rejected party is
+not a rejection, and no amount of server-side testing can detect that class of
+defect.** The server's own view is identical in both worlds. What separates them
+lives entirely in what the *client* can observe, so the test has to be written
+from the client's side and has to assert on what the client is told — not on
+what the server recorded.
+
+This is a security finding rather than a usability one, and the reason is the
+direction the failure runs in. A client that cannot tell refusal from a blip
+retries, and a retrying client is indistinguishable from an attacker probing;
+worse, a client that believes it is connected will surface a working editor to
+someone holding no valid credential, and only fail when they type. The failure
+is deferred to the moment of most confusion and attributed to the wrong cause.
+
+The fix was to move the observable part of the refusal to where the client can
+see it — SignalR's own negotiate request, before a transport exists, answering
+401 — while leaving the authoritative single-use redemption in the hub. Note the
+shape: the check that *enforces* and the check the client can *see* ended up in
+two different places, and both are needed. An enforcement point is not
+automatically a signalling point.
+
+**It applies again in 3b and Phase 4.** Every rejection either phase adds is
+subject to it: a batch dropped for exceeding a pending-set bound, a client
+refused during a scale-out failover, an offline client whose queued operations
+are refused on reconnect. In each case the question is not "did the server
+refuse" but "can the client tell it was refused, and tell it apart from a
+network failure". The second is what needs the test.
+
+### 13.14 Test a bound where it is the only guarantee
+
+§7 bounds role-cache staleness at five seconds and gets there two ways: eager
+pub/sub invalidation makes the usual case immediate, and a five-second TTL is
+the fallback. Two tests were written — one revoking through the writer, one
+deleting the membership row behind the writer's back so no invalidation is ever
+published.
+
+Only the second found the bug, and the bug was worth finding: a local cache
+entry refreshed from a Redis hit took a fresh five seconds regardless of how
+little was left on the shared entry it read, so an expiry landing near the
+boundary restarted the clock. Worst case was very nearly ten seconds — double
+§7's bound. The eager-invalidation test stayed green throughout, because eager
+invalidation was working perfectly.
+
+**The rule: where a guarantee has a fast path and a fallback, the bound must be
+tested with the fast path disabled.** Testing it with both running measures the
+fast path and says nothing about the bound, and the fast path is precisely the
+thing that is unavailable in the situations the bound exists for — a lost
+message, an instance partitioned from Redis, a row changed by an operator with
+`psql`. A test that only ever exercises the happy path is measuring the
+optimisation and reporting it as the guarantee.
+
+This generalises past caches. Anywhere this system has a fast path and a
+correctness floor — causal delivery's buffer against its resend, a reconnecting
+client's delta against a full snapshot — the floor gets its own test with the
+fast path switched off.
