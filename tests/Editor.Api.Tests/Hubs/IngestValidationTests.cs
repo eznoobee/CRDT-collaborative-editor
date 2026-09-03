@@ -25,8 +25,6 @@ public sealed class IngestValidationTests
 
     public IngestValidationTests(EditorFixture fixture) => _fixture = fixture;
 
-    private sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
-
     [Fact]
     public async Task An_oversized_message_closes_the_connection()
     {

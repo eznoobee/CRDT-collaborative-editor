@@ -18,6 +18,9 @@ public sealed partial class EditorHub : Hub
 {
     private const string BindingKey = "editor.binding";
 
+    /// <summary>The client method a fanned-out batch arrives on.</summary>
+    public const string Broadcast = "ReceiveOperations";
+
     private readonly IConnectTicketStore _tickets;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
@@ -146,12 +149,27 @@ public sealed partial class EditorHub : Hub
             return SubmitResult.Ok(0);
         }
 
-        await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
+        var appended = await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
 
         // Only after the append. Advancing the expected sequence for a batch
         // that failed to write would reject the client's retry of the very
         // operations the server does not have.
         _state.Accepted(binding.DocumentId, operations);
+
+        // Fanned out after the write, never before: a client that received an
+        // operation the server then failed to persist would hold state no
+        // amount of reconnecting could recover, because catch-up reads the log.
+        //
+        // The sender is excluded because it already has these operations. That
+        // is an optimisation and not a correctness requirement — §5 makes
+        // re-delivery harmless — but the exclusion is asserted, because a hub
+        // echoing every batch to its author doubles fan-out for nothing.
+        await Clients.GroupExcept(Group(binding.DocumentId), Context.ConnectionId)
+            .SendAsync(
+                Broadcast,
+                new OperationBroadcast(binding.DocumentId, batch.Operations, appended.HighestServerSeq),
+                Context.ConnectionAborted)
+            .ConfigureAwait(false);
 
         return SubmitResult.Ok(operations.Count);
     }

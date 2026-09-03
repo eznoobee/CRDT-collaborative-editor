@@ -24,8 +24,6 @@ public sealed class EditorHubTests
 
     public EditorHubTests(EditorFixture fixture) => _fixture = fixture;
 
-    private sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
-
     [Fact]
     public async Task A_connection_without_a_ticket_is_refused()
     {
