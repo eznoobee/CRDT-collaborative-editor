@@ -83,6 +83,72 @@ public sealed class CausalReadinessTests
     }
 
     [Fact]
+    public void The_pending_set_is_unbounded_until_a_connection_bounds_it()
+    {
+        // §5 bounds the pending set per connection, and a replica is not a
+        // connection. A replica replaying a stored trace buffers as much as the
+        // trace demands; the property suite depends on that, and a core that
+        // refused would fail for a reason unrelated to the property.
+        var author = R(1);
+        var replica = new Replica(R(2));
+
+        for (var i = 50; i > 0; i--)
+        {
+            replica.Apply(new InsertOperation(
+                new ElementId(author, (ulong)i), new Rune('a'), new ElementId(author, (ulong)(i - 1)),
+                Side.Right, null));
+        }
+
+        Assert.Equal(50, replica.PendingCount);
+    }
+
+    [Fact]
+    public void Exceeding_the_bound_throws_rather_than_dropping_the_oldest()
+    {
+        // §5 calls this a protocol violation. Dropping the oldest instead would
+        // leave the replica permanently missing an operation with nothing to
+        // indicate it — divergence arrived at quietly, which is exactly what
+        // this system exists to prevent. The numbers travel with the exception
+        // so the connection layer can say why it closed (§13.13).
+        var author = R(1);
+        var replica = new Replica(R(2)) { MaxPending = 4 };
+
+        var overflow = Assert.Throws<PendingSetOverflowException>(() =>
+        {
+            for (var i = 10; i > 0; i--)
+            {
+                replica.Apply(new InsertOperation(
+                    new ElementId(author, (ulong)i), new Rune('a'), new ElementId(author, (ulong)(i - 1)),
+                    Side.Right, null));
+            }
+        });
+
+        Assert.Equal(4, overflow.Bound);
+        Assert.Equal(4, overflow.Pending);
+        Assert.Equal(4, replica.PendingCount);
+    }
+
+    [Fact]
+    public void A_duplicate_does_not_count_against_the_bound()
+    {
+        // The bound counts distinct waiting operations. Counting re-deliveries
+        // would let a peer close its own connection by resending one operation,
+        // and §5 guarantees re-delivery happens.
+        var author = R(1);
+        var replica = new Replica(R(2)) { MaxPending = 2 };
+
+        var buffered = new InsertOperation(
+            new ElementId(author, 5), new Rune('a'), new ElementId(author, 4), Side.Right, null);
+
+        replica.Apply(buffered);
+        replica.Apply(buffered);
+        replica.Apply(buffered);
+
+        Assert.Equal(1, replica.PendingCount);
+        Assert.Equal(2, replica.DuplicatesDropped);
+    }
+
+    [Fact]
     public void Applying_the_same_operation_twice_changes_nothing()
     {
         var author = R(1);

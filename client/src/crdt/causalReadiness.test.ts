@@ -1,3 +1,4 @@
+import { PendingSetOverflowError } from './pendingSetOverflow';
 import { Replica } from './replica';
 import { parseReplicaId, type ReplicaId } from './replicaId';
 import type { Operation } from './operation';
@@ -108,5 +109,53 @@ describe('causal readiness', () => {
 
     expect(replica.pendingCount).toBe(0);
     expect([...replica.text].filter((c) => c === 'c')).toHaveLength(1);
+  });
+});
+
+describe('the pending-set bound', () => {
+  const author = R(1);
+
+  function orphan(seq: number) {
+    return insert(author, BigInt(seq), 'a', { replica: author, seq: BigInt(seq - 1) });
+  }
+
+  it('is unbounded until a connection bounds it', () => {
+    // §5 bounds the pending set per connection, and a replica is not a
+    // connection. A replica replaying a stored trace buffers as much as the
+    // trace demands.
+    const replica = new Replica(R(2));
+    for (let i = 50; i > 0; i--) {
+      replica.apply(orphan(i));
+    }
+    expect(replica.pendingCount).toBe(50);
+  });
+
+  it('throws rather than dropping the oldest when the bound is exceeded', () => {
+    // Dropping instead would leave the replica permanently missing an
+    // operation with nothing to indicate it — divergence arrived at quietly.
+    const replica = new Replica(R(2));
+    replica.maxPending = 4;
+
+    expect(() => {
+      for (let i = 10; i > 0; i--) {
+        replica.apply(orphan(i));
+      }
+    }).toThrow(PendingSetOverflowError);
+
+    expect(replica.pendingCount).toBe(4);
+  });
+
+  it('does not count a duplicate against the bound', () => {
+    // Counting re-deliveries would let a peer close its own connection by
+    // resending one operation, and §5 guarantees re-delivery happens.
+    const replica = new Replica(R(2));
+    replica.maxPending = 2;
+
+    replica.apply(orphan(5));
+    replica.apply(orphan(5));
+    replica.apply(orphan(5));
+
+    expect(replica.pendingCount).toBe(1);
+    expect(replica.duplicatesDropped).toBe(2);
   });
 });

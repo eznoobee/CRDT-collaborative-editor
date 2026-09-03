@@ -2,6 +2,7 @@ import { compareElementId, elementKey, type ElementId } from './elementId';
 import type { ElementState, VersionVectorEntry } from './elementState';
 import type { InsertOperation, DeleteOperation, Operation, Side } from './operation';
 import { compareReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
+import { PendingSetOverflowError } from './pendingSetOverflow';
 
 interface Node {
   id: ElementId;
@@ -49,6 +50,18 @@ export class Replica {
    * operation; what is worth alerting on is its rate.
    */
   duplicatesDropped = 0;
+
+  /**
+   * How many operations may wait in the pending set (§5).
+   *
+   * Unbounded by default, deliberately: §5 bounds the pending set *per
+   * connection*, and a replica is not a connection. A replica replaying a
+   * stored trace legitimately buffers as much as the trace demands. Whoever
+   * attaches a replica to a network connection sets this, because that is the
+   * layer where an unbounded buffer fed by a remote peer is a denial-of-service
+   * vector and one fed by a local file is not.
+   */
+  maxPending = Number.MAX_SAFE_INTEGER;
   private nextSeq = 0n;
 
   constructor(id: ReplicaId) {
@@ -289,6 +302,13 @@ export class Replica {
         // twice would apply it twice when the gap closes.
         this.duplicatesDropped += 1;
       } else {
+        if (this.pending.length >= this.maxPending) {
+          // §5: a protocol violation, not something to absorb by dropping the
+          // oldest. Dropping would leave this replica permanently missing an
+          // operation with nothing to indicate it — divergence arrived at
+          // quietly, which is the one outcome this project exists to prevent.
+          throw new PendingSetOverflowError(this.pending.length, this.maxPending);
+        }
         this.pending.push(operation);
       }
       return;

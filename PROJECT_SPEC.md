@@ -2481,3 +2481,61 @@ happen. Not "and the document still matches".
 
 This is what §12's vacuity rule is for at the level of a single mechanism, and
 what the sabotage practice catches when the rule was not applied.
+
+### 13.16 The server has no pending set, and a query that matched nothing
+
+Two findings from 3b.4, related only in that the second was found while
+implementing the first.
+
+**The server rejects a non-ready operation rather than buffering one.** §5
+describes a bounded pending set and justifies the bound by noting that origins
+are client-supplied — an unbounded set is a denial-of-service vector. That
+reasoning is sound for a *peer* receiving a broadcast. It does not transfer to
+the ingest path, and following it literally would have added the vector it
+warns about.
+
+A client can only reference an element it knows about, and under this
+architecture it knows about exactly two kinds. Its own earlier operations: §7's
+density rule already guarantees the server holds them, because it refused
+anything else. And other replicas' operations: it learned of those from a
+broadcast, and §8 sends a broadcast only after the write commits. There is no
+third kind and no race between them — an operation referencing something the
+server does not have is a bug or an attack, never a legitimate ordering
+accident.
+
+So buffering one means holding an id that may never arrive, indexed by a key an
+attacker chooses. Rejecting removes the vector instead of bounding it, and
+leaves the server with no pending set to bound at all. §7's pending-set cap
+therefore has no server-side subject; the bound lives on the client, where §5
+puts it, and where the operations being buffered came from a source the client
+does not control.
+
+The bound is on the *connection*, not on the replica. A replica replaying a
+stored trace or importing a snapshot legitimately buffers as much as the input
+demands, and a core that refused would fail the property suite for a reason
+having nothing to do with the property. `MaxPending` is unbounded by default and
+set by whoever attaches a replica to a network. Exceeding it throws rather than
+dropping the oldest: dropping would leave the replica permanently missing an
+operation with nothing to indicate it, which is divergence arrived at quietly,
+and quiet divergence is the one outcome this project exists to prevent.
+
+**And the query that matched nothing.** Implementing the origin check meant
+writing a second query against `document_ops`, which is when the first one was
+read closely. §7's document-size cap has, since Phase 3, filtered on
+`op_type = 'ins'` against a writer that stores `'insert'`. It matched no rows.
+Ever.
+
+Nothing went red. Every test filled a document through a single instance, where
+the in-memory counter incremented by `Accepted` did the work, and the Postgres
+seed of zero was never the number under test. §8 requires exactly the opposite
+property — the cache must be reconstructible and must not be required for
+correctness after a failover — and what was actually shipped was a cap that
+reset to zero on every restart, so a document already over its limit would have
+accepted writes on any cold instance.
+
+This is §13.15 again, from the other direction. The mechanism's absence still
+produced the right *outcome* in every test, because a second mechanism covered
+for it. The test that catches it drops the cache and asserts the reconstructed
+number, which is the only arrangement where the query is the thing being tested.
+The `op_type` literals are now interpolated from the writer's own constants, so
+the two cannot drift again.

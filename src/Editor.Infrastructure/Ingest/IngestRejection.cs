@@ -28,6 +28,12 @@ public static class IngestRejection
     /// <summary>A sequence number was not the next dense value for that replica.</summary>
     public const string SequenceGap = "sequence_gap";
 
+    /// <summary>
+    /// An operation referenced a parent, right origin or delete target the
+    /// document does not contain.
+    /// </summary>
+    public const string UnknownOrigin = "unknown_origin";
+
     /// <summary>The document is at its size cap.</summary>
     public const string DocumentFull = "document_full";
 

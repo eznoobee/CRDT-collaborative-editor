@@ -123,6 +123,24 @@ public sealed class Replica
     public int PendingCount => _pending.Count;
 
     /// <summary>
+    /// How many operations may wait in the pending set (§5).
+    /// </summary>
+    /// <remarks>
+    /// Unbounded by default, and that is deliberate: §5 bounds the pending set
+    /// <em>per connection</em>, and a replica is not a connection. A replica
+    /// replaying a stored trace or importing a snapshot legitimately buffers as
+    /// much as the trace demands, and a core that refused would break the
+    /// property suite for a reason that has nothing to do with the property.
+    /// <para>
+    /// Whoever attaches a replica to a network connection sets this, because
+    /// that is the layer where the bound means something — an unbounded pending
+    /// set fed by a remote peer is a denial-of-service vector, and one fed by a
+    /// local file is not.
+    /// </para>
+    /// </remarks>
+    public int MaxPending { get; set; } = int.MaxValue;
+
+    /// <summary>
     /// Operations discarded because this replica had already applied them.
     /// </summary>
     /// <remarks>
@@ -229,6 +247,18 @@ public sealed class Replica
             }
             else
             {
+                if (_pending.Count >= MaxPending)
+                {
+                    // §5: exceeding the bound is a protocol violation, not
+                    // something to absorb by dropping the oldest. Dropping
+                    // would leave this replica permanently missing an operation
+                    // with nothing to indicate it, which is divergence arrived
+                    // at quietly — the one outcome this project exists to
+                    // prevent. Throwing hands the decision to the connection
+                    // layer, which can close and resync.
+                    throw new PendingSetOverflowException(_pending.Count, MaxPending);
+                }
+
                 _pending.Add(operation);
             }
 
