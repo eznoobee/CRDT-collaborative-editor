@@ -1187,6 +1187,21 @@ Treat every one of these as a hard requirement with a corresponding test.
   (§13.13). The close carries a reason the client can act on, and the client's
   response is the catch-up path — one of the three guaranteed sources of
   duplicate delivery (§5).
+- **Cross-instance delivery carries the batch, not a group send.** Each
+  instance subscribes to a Redis channel per document, while it holds a
+  connection for that document, and publishes every batch it accepts. Every
+  instance then fans out to its own connections under its own §8 deadline.
+
+  SignalR's own backplane would deliver a group send across instances and is
+  deliberately not what carries this: a group send lands on the remote instance
+  as a write into each member's channel with no timeout, so one slow client
+  there stalls that instance's backplane consumer — the stall the per-connection
+  deadline exists to prevent, moved one hop away and invisible from the sender.
+
+  Publishing is best effort. The operations are already committed before the
+  fan-out, so a lost publication costs a remote client latency until its next
+  catch-up rather than an operation; failing the submission instead would turn a
+  backplane hiccup into a rejected keystroke for an operation the server holds.
 - **Catch-up is answered from the client's version vector, never from a
   `server_seq` watermark.** The client says what it holds, per replica, and the
   server returns what that does not cover. A watermark would be wrong for the
@@ -2606,3 +2621,47 @@ attribution that cannot be explained by the code is a finding about the harness,
 not a flake to re-run until it goes away. The tell here was that a sabotage and
 the test it broke had no path between them; the temptation was to call the floor
 test flaky, and running it in isolation appeared to confirm that.
+
+### 13.18 A wait that is already satisfied is not a wait
+
+3b.7's subscription test asserted that an instance keeps carrying a document
+after one of its two connections leaves, and drops it after the second. Both
+assertions were on a counter, each preceded by a poll:
+
+```csharp
+await one.DisposeAsync();
+await WaitFor(() => Backplane(factory).Carrying == 1);
+Assert.Equal(1, Backplane(factory).Carrying);
+```
+
+The sabotage that unsubscribes on the *first* departure — stranding every
+remaining client on that instance — went straight through.
+
+`Carrying` is already 1 when the client is disposed. Disconnect handling runs
+server-side with nothing to await, so the poll's condition was true on entry, it
+returned immediately, and the assertion ran before the mechanism had a chance to
+do anything at all. The test asserted a state that had not yet changed and could
+not yet be wrong. It would have passed against an instance that unsubscribes on
+every departure, and it did.
+
+Two rules come out of it.
+
+**Wait on a transition, not on a state.** A poll for a condition that already
+holds is a no-op with the shape of synchronisation. The second half of the same
+test — waiting for `Carrying == 0` after the last client leaves — is sound for
+exactly this reason: it starts false and has to become true. Where the value
+under test does not change, find one that does; 3b.7 waits on the connection
+count going from two to one, which is a transition the disconnect must complete
+before the assertion means anything.
+
+**Prefer the functional assertion to the counter.** The counter was there to
+make the mechanism observable, which is right (§13.15), but "still subscribed"
+is a proxy. What the rule protects is that the remaining client keeps receiving,
+so the test now has a second instance publish and the remaining client receive
+it. That fails under the sabotage without depending on any timing at all, and it
+states the property in the terms someone would actually complain about.
+
+This is the second time sabotage has caught a *test* rather than the code, and
+both times the test was aimed at the right subject and asserted something that
+was true regardless. That remains the most common way a test passes for no
+reason, and reading it is not how it gets found.

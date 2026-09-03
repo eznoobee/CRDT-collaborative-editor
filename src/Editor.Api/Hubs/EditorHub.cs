@@ -23,6 +23,7 @@ public sealed partial class EditorHub : Hub
     public const string Broadcast = "ReceiveOperations";
 
     private readonly CatchUpReader _catchUp;
+    private readonly DocumentBackplane _backplane;
     private readonly DocumentBroadcaster _broadcaster;
     private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
@@ -34,6 +35,7 @@ public sealed partial class EditorHub : Hub
 
     public EditorHub(
         CatchUpReader catchUp,
+        DocumentBackplane backplane,
         DocumentBroadcaster broadcaster,
         DocumentConnections connections,
         IConnectTicketStore tickets,
@@ -44,6 +46,7 @@ public sealed partial class EditorHub : Hub
         ILogger<EditorHub> logger)
     {
         ArgumentNullException.ThrowIfNull(catchUp);
+        ArgumentNullException.ThrowIfNull(backplane);
         ArgumentNullException.ThrowIfNull(broadcaster);
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
@@ -54,6 +57,7 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(logger);
 
         _catchUp = catchUp;
+        _backplane = backplane;
         _broadcaster = broadcaster;
         _connections = connections;
         _tickets = tickets;
@@ -64,14 +68,18 @@ public sealed partial class EditorHub : Hub
         _logger = logger;
     }
 
-    public override Task OnDisconnectedAsync(Exception? exception)
+    public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        if (TryGetBinding(out var binding))
+        if (TryGetBinding(out var binding)
+            && _connections.Remove(binding.DocumentId, Context.ConnectionId))
         {
-            _connections.Remove(binding.DocumentId, Context.ConnectionId);
+            // The last connection this instance held for the document. Staying
+            // subscribed would mean decoding traffic for a document nobody here
+            // is reading.
+            await _backplane.LeaveAsync(binding.DocumentId).ConfigureAwait(false);
         }
 
-        return base.OnDisconnectedAsync(exception);
+        await base.OnDisconnectedAsync(exception).ConfigureAwait(false);
     }
 
     public override async Task OnConnectedAsync()
@@ -99,6 +107,11 @@ public sealed partial class EditorHub : Hub
 
         Context.Items[BindingKey] = binding.Value;
         _connections.Add(binding.Value.DocumentId, Context.ConnectionId, Context.Abort);
+
+        // Taken before the connection is considered joined, so a batch
+        // published between here and the first send is not one this instance
+        // was not yet listening for.
+        await _backplane.JoinAsync(binding.Value.DocumentId).ConfigureAwait(false);
 
         await Groups.AddToGroupAsync(Context.ConnectionId, Group(binding.Value.DocumentId))
             .ConfigureAwait(false);
@@ -207,6 +220,12 @@ public sealed partial class EditorHub : Hub
                 return Task.CompletedTask;
             },
             Context.ConnectionAborted).ConfigureAwait(false);
+
+        // And then the instances this one cannot see. §8 forbids sticky
+        // sessions, so the other people editing this document are routinely
+        // connected somewhere else; the fan-out above reaches only the
+        // connections this process happens to hold.
+        await _backplane.PublishAsync(message).ConfigureAwait(false);
 
         return SubmitResult.Ok(operations.Count);
     }

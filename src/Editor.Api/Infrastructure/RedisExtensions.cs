@@ -86,6 +86,7 @@ public static class RedisExtensions
         services.AddSingleton(provider => new DocumentBroadcaster(
             provider.GetRequiredService<IOptions<BackpressureOptions>>().Value,
             provider.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<DocumentBackplane>();
 
         services.AddSignalR()
             // Framing only (§6, §13.13a). The payload stays an opaque byte

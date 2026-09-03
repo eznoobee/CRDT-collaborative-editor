@@ -191,13 +191,34 @@ public sealed class DocumentConnections
     public void Add(Guid documentId, string connectionId, Action abort) =>
         _byDocument.GetOrAdd(documentId, _ => new ConcurrentDictionary<string, Action>())[connectionId] = abort;
 
-    public void Remove(Guid documentId, string connectionId)
+    /// <summary>
+    /// Deregisters a connection, reporting whether it was the last one here.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when this instance now holds no connection for
+    /// the document, which is what lets the backplane subscription be dropped.
+    /// </returns>
+    public bool Remove(Guid documentId, string connectionId)
     {
-        if (_byDocument.TryGetValue(documentId, out var connections))
+        if (!_byDocument.TryGetValue(documentId, out var connections))
         {
-            connections.TryRemove(connectionId, out _);
+            return false;
         }
+
+        connections.TryRemove(connectionId, out _);
+        return connections.IsEmpty;
     }
+
+    /// <summary>How many connections this instance holds for the document.</summary>
+    /// <remarks>
+    /// A synchronisation point for tests, and the honest one: disconnect
+    /// handling runs with no reply to await, so a test that asserts immediately
+    /// after a client goes away is asserting against a transition that has not
+    /// happened yet — and passes for that reason rather than for the intended
+    /// one.
+    /// </remarks>
+    public int Count(Guid documentId) =>
+        _byDocument.TryGetValue(documentId, out var connections) ? connections.Count : 0;
 
     /// <summary>Closes one connection, if it is still registered.</summary>
     public void Abort(Guid documentId, string connectionId)
@@ -214,4 +235,15 @@ public sealed class DocumentConnections
         _byDocument.TryGetValue(documentId, out var connections)
             ? [.. connections.Keys.Where(id => !string.Equals(id, except, StringComparison.Ordinal))]
             : [];
+
+    /// <summary>
+    /// Every connection this instance holds for the document.
+    /// </summary>
+    /// <remarks>
+    /// The backplane path has no sender to leave out: the instance that took
+    /// the submission excluded it before publishing, and on any other instance
+    /// every local connection is a recipient.
+    /// </remarks>
+    public IReadOnlyCollection<string> All(Guid documentId) =>
+        _byDocument.TryGetValue(documentId, out var connections) ? [.. connections.Keys] : [];
 }
