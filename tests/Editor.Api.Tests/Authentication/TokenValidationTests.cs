@@ -33,6 +33,28 @@ public sealed partial class TokenValidationTests
         RegexOptions.IgnoreCase)]
     private static partial Regex DisabledValidation();
 
+    /// <summary>
+    /// Matches a check being replaced rather than switched off.
+    /// </summary>
+    /// <remarks>
+    /// Assigning any of these hands the framework a delegate that runs
+    /// <em>instead of</em> the corresponding check, so a one-line lambda
+    /// returning the token unexamined has exactly the effect §7 forbids, while
+    /// the switch above stays <c>true</c> and the other sentinel stays green.
+    /// Found while sabotaging the interop suite: the sabotage that accepted
+    /// forged signatures did not trip the existing scanner, because it never
+    /// wrote the word <c>false</c>.
+    /// <para>
+    /// None of these is assigned anywhere in the repository, so this is a
+    /// ratchet rather than a cleanup. If one is ever genuinely needed, the
+    /// argument for it belongs in §7 before the code.
+    /// </para>
+    /// </remarks>
+    [GeneratedRegex(
+        @"\b(SignatureValidator|IssuerValidator|AudienceValidator|LifetimeValidator|AlgorithmValidator|IssuerSigningKeyValidator|TokenReplayValidator|TokenDecryptionKeyResolver)\s*=[^=]",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ReplacedValidation();
+
     [Fact]
     public void No_validation_switch_is_turned_off_anywhere_including_dev_config()
     {
@@ -76,6 +98,49 @@ public sealed partial class TokenValidationTests
         Assert.True(
             offenders.Count == 0,
             "§7 forbids disabling a token validation check anywhere, including dev config:\n  "
+            + string.Join("\n  ", offenders));
+    }
+
+    [Fact]
+    public void No_validation_check_is_replaced_by_a_delegate_anywhere()
+    {
+        // The other way to turn a check off. §7 says the checks are on; a
+        // custom validator satisfies the letter of that — the switch is still
+        // true — while deciding the answer itself. The scanner above would not
+        // see it, which is how this test came to exist.
+        var root = RepoRoot();
+        var offenders = new List<string>();
+
+        foreach (var directory in new[] { "src", "tests" })
+        {
+            var dir = new DirectoryInfo(Path.Combine(root.FullName, directory));
+            foreach (var file in dir.EnumerateFiles("*.*", SearchOption.AllDirectories))
+            {
+                if (file.FullName.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                    || file.FullName.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                    || file.Extension is not (".cs" or ".json"))
+                {
+                    continue;
+                }
+
+                // This file names the patterns in order to look for them.
+                if (string.Equals(file.Name, "TokenValidationTests.cs", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var text = File.ReadAllText(file.FullName);
+                foreach (var match in ReplacedValidation().Matches(text).Cast<Match>())
+                {
+                    var line = text.Take(match.Index).Count(c => c == '\n') + 1;
+                    offenders.Add($"{Path.GetRelativePath(root.FullName, file.FullName)}:{line}: {match.Value.Trim()}");
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "§7's checks may not be replaced by a delegate that decides the answer itself:\n  "
             + string.Join("\n  ", offenders));
     }
 

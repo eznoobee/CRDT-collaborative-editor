@@ -3,6 +3,7 @@ using Editor.Api.Documents;
 using Editor.Api.Hubs;
 using Editor.Api.Infrastructure;
 using Editor.Api.Logging;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -52,7 +53,16 @@ app.MapNegotiate();
 // bearer token (§7), so it is not behind RequireAuthorization: the credential
 // it accepts is redeemed in OnConnectedAsync, and a connection that arrives
 // without a valid one is aborted there.
-app.MapHub<EditorHub>("/hub/editor");
+app.MapHub<EditorHub>("/hub/editor", options =>
+{
+    // §8 bounds the outbound buffer in bytes, because buffered payload is what
+    // exhausts an app server. Past this the transport stops accepting more and
+    // a send waits — which is why the fan-out puts a timeout on that wait
+    // rather than letting one slow client stall the document.
+    var backpressure = app.Services.GetRequiredService<IOptions<BackpressureOptions>>().Value;
+    options.TransportMaxBufferSize = backpressure.MaxOutboundBytes;
+    options.ApplicationMaxBufferSize = backpressure.MaxOutboundBytes;
+});
 
 await app.RunAsync();
 

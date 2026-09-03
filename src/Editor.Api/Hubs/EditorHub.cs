@@ -1,3 +1,4 @@
+using Crdt.Core;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
 using Editor.Infrastructure.Ingest;
@@ -18,6 +19,13 @@ public sealed partial class EditorHub : Hub
 {
     private const string BindingKey = "editor.binding";
 
+    /// <summary>The client method a fanned-out batch arrives on.</summary>
+    public const string Broadcast = "ReceiveOperations";
+
+    private readonly CatchUpReader _catchUp;
+    private readonly DocumentBackplane _backplane;
+    private readonly DocumentBroadcaster _broadcaster;
+    private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
@@ -26,6 +34,10 @@ public sealed partial class EditorHub : Hub
     private readonly ILogger<EditorHub> _logger;
 
     public EditorHub(
+        CatchUpReader catchUp,
+        DocumentBackplane backplane,
+        DocumentBroadcaster broadcaster,
+        DocumentConnections connections,
         IConnectTicketStore tickets,
         IDocumentRoles roles,
         IngestValidator validator,
@@ -33,6 +45,10 @@ public sealed partial class EditorHub : Hub
         OperationLogBatcher log,
         ILogger<EditorHub> logger)
     {
+        ArgumentNullException.ThrowIfNull(catchUp);
+        ArgumentNullException.ThrowIfNull(backplane);
+        ArgumentNullException.ThrowIfNull(broadcaster);
+        ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(validator);
@@ -40,12 +56,30 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(logger);
 
+        _catchUp = catchUp;
+        _backplane = backplane;
+        _broadcaster = broadcaster;
+        _connections = connections;
         _tickets = tickets;
         _roles = roles;
         _validator = validator;
         _state = state;
         _log = log;
         _logger = logger;
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        if (TryGetBinding(out var binding)
+            && _connections.Remove(binding.DocumentId, Context.ConnectionId))
+        {
+            // The last connection this instance held for the document. Staying
+            // subscribed would mean decoding traffic for a document nobody here
+            // is reading.
+            await _backplane.LeaveAsync(binding.DocumentId).ConfigureAwait(false);
+        }
+
+        await base.OnDisconnectedAsync(exception).ConfigureAwait(false);
     }
 
     public override async Task OnConnectedAsync()
@@ -72,6 +106,13 @@ public sealed partial class EditorHub : Hub
         }
 
         Context.Items[BindingKey] = binding.Value;
+        _connections.Add(binding.Value.DocumentId, Context.ConnectionId, Context.Abort);
+
+        // Taken before the connection is considered joined, so a batch
+        // published between here and the first send is not one this instance
+        // was not yet listening for.
+        await _backplane.JoinAsync(binding.Value.DocumentId).ConfigureAwait(false);
+
         await Groups.AddToGroupAsync(Context.ConnectionId, Group(binding.Value.DocumentId))
             .ConfigureAwait(false);
 
@@ -146,14 +187,105 @@ public sealed partial class EditorHub : Hub
             return SubmitResult.Ok(0);
         }
 
-        await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
+        var appended = await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
 
         // Only after the append. Advancing the expected sequence for a batch
         // that failed to write would reject the client's retry of the very
         // operations the server does not have.
         _state.Accepted(binding.DocumentId, operations);
 
+        // Fanned out after the write, never before: a client that received an
+        // operation the server then failed to persist would hold state no
+        // amount of reconnecting could recover, because catch-up reads the log.
+        //
+        // Sent per connection rather than to the SignalR group, because §8
+        // requires a slow client to be dropped rather than waited for and a
+        // group send exposes no per-connection timeout. The sender is excluded
+        // because it already has these operations — an optimisation, not a
+        // correctness requirement, since §5 makes re-delivery harmless.
+        var message = new OperationBroadcast(
+            binding.DocumentId, batch.Operations, appended.HighestServerSeq);
+
+        await _broadcaster.FanOutAsync(
+            _connections.Others(binding.DocumentId, Context.ConnectionId),
+            (connection, token) => Clients.Client(connection).SendAsync(Broadcast, message, token),
+            connection =>
+            {
+                // §8: dropped to catch-up, which means closed. A client that is
+                // silently starved renders a document that is wrong without
+                // knowing; a closed connection is something it can act on, and
+                // its resync path is catch-up by version vector.
+                Log.BackpressureDrop(_logger, binding.DocumentId, connection);
+                _connections.Abort(binding.DocumentId, connection);
+                return Task.CompletedTask;
+            },
+            Context.ConnectionAborted).ConfigureAwait(false);
+
+        // And then the instances this one cannot see. §8 forbids sticky
+        // sessions, so the other people editing this document are routinely
+        // connected somewhere else; the fan-out above reaches only the
+        // connections this process happens to hold.
+        await _backplane.PublishAsync(message).ConfigureAwait(false);
+
         return SubmitResult.Ok(operations.Count);
+    }
+
+    /// <summary>
+    /// What this connection has missed, given what it already has.
+    /// </summary>
+    /// <param name="known">
+    /// Per replica id, the next sequence number this client expects — its
+    /// version vector.
+    /// </param>
+    /// <param name="forceSnapshot">
+    /// Skips the delta path. Exists so §13.14's rule can be honoured: the
+    /// snapshot floor is exercised on its own, because a fallback that only
+    /// ever runs behind a working fast path is a fallback nobody has tested.
+    /// A client may set it after losing local state.
+    /// </param>
+    /// <remarks>
+    /// The cursor is the version vector, never <c>server_seq</c>. §8 makes
+    /// broadcast unordered, so a client can hold 105 without holding 100, and a
+    /// server_seq watermark would silently skip whatever fell in the gap.
+    /// </remarks>
+    public async Task<CatchUpResult> CatchUpAsync(
+        Dictionary<Guid, long> known, bool forceSnapshot = false)
+    {
+        ArgumentNullException.ThrowIfNull(known);
+
+        if (!TryGetBinding(out var binding))
+        {
+            return CatchUpResult.Rejected(HubErrors.Unauthenticated);
+        }
+
+        // The same two-tier check every other call gets. Catch-up returns the
+        // whole document, so skipping authorization here would be a way to read
+        // one without ever submitting to it.
+        var role = await _roles
+            .GetRoleAsync(binding.DocumentId, binding.UserId, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        if (role is null)
+        {
+            return CatchUpResult.Rejected(HubErrors.NotFound);
+        }
+
+        var vector = new Dictionary<ReplicaId, ulong>();
+        foreach (var (replica, next) in known)
+        {
+            if (next < 0)
+            {
+                return CatchUpResult.Rejected(IngestRejection.Malformed);
+            }
+
+            vector[ReplicaIdConversion.FromGuid(replica)] = (ulong)next;
+        }
+
+        var caught = await _catchUp
+            .ReadAsync(binding.DocumentId, vector, forceSnapshot, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        return new CatchUpResult(null, caught.Snapshot, caught.Operations, caught.ServerSeq);
     }
 
     /// <summary>The SignalR group carrying one document's broadcasts.</summary>
@@ -173,6 +305,12 @@ public sealed partial class EditorHub : Hub
 
     private static partial class Log
     {
+        [LoggerMessage(
+            EventId = 3402,
+            Level = LogLevel.Warning,
+            Message = "Dropped connection {ConnectionId} on document {DocumentId} for backpressure.")]
+        public static partial void BackpressureDrop(ILogger logger, Guid documentId, string connectionId);
+
         [LoggerMessage(
             EventId = 3401,
             Level = LogLevel.Warning,

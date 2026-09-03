@@ -275,6 +275,101 @@ configurable). Exceeding the bound is a protocol violation: reject, log, and
 close. An unbounded pending set is a denial-of-service vector, because origins
 are client-supplied.
 
+**The bound is expressed in operations and in seconds**, not in bytes. Bytes are
+the natural unit for a transport buffer (§8's outbound channel) and the wrong one
+here: what makes a pending set dangerous is the number of distinct missing
+dependencies being tracked and how long they are held, and a thousand one-code-point
+inserts cost the same memory as a thousand large ones. Age is measured from
+when an operation entered the set, not from its arrival, so a cascade that
+releases and re-buffers does not reset the clock.
+
+**Closing for a bound violation must be distinguishable, by the client, from the
+connection dropping.** §13.13: a rejection the rejected party cannot observe is
+not a rejection, and a client that reads "pending set overflowed" as a network
+blip will reconnect and do it again.
+
+### Duplicate delivery
+
+**A client will receive operations it has already applied.** This is guaranteed,
+not incidental: the backplane can deliver the same broadcast twice, catch-up
+after a reconnect re-sends from a version vector that overlaps what was already
+applied, and a client dropped for backpressure (§8) recovers by being sent state
+it partly has. Every one of those paths is required for other reasons.
+
+The server side is covered by the primary key on
+`(document_id, replica_id, seq)`, which makes a duplicate insert a no-op at the
+database (§6). The client side is a decision, and it is made here rather than
+left to be inferred:
+
+> **The client dedupes explicitly before applying, and application remains
+> idempotent underneath it.** Both. Neither alone.
+
+The dedupe is the fast path: an operation whose `Seq` is below the applied
+watermark for its replica is dropped without being applied, and the drop is
+**counted**. The counter is the point — a sudden rise in duplicate deliveries is
+how a resend loop or a misbehaving backplane announces itself, and it is
+invisible if duplicates are silently absorbed.
+
+**That watermark test is complete, and the reason is worth writing down because
+it is not local.** Readiness requires the *exact* next sequence number for the
+replica, not merely that an operation's structural dependencies are present. So
+a replica's operations are applied strictly in order, the applied set never
+contains a per-replica gap, and "below the watermark" is exactly "already
+applied" rather than an approximation of it. The two rules are coupled across
+two private methods and nothing about either says so, which is why
+`CausalReadinessTests` pins it: an operation whose only structural dependency is
+the root is still buffered when it skips a sequence number.
+
+**The second check is the pending set's, and it is the one that is genuinely
+load-bearing.** A duplicate that arrives while the original is still buffered is
+below no watermark — it has not been applied — so the watermark says nothing
+about it, and the pending set has to recognise it by id. Buffering it twice
+applies it twice when the gap closes.
+
+Idempotent application is the floor beneath both. It is not currently reachable:
+between the watermark and the pending set, no duplicate gets as far as being
+applied. It is stated as a constraint rather than a tested path precisely
+because of that — a test for an unreachable path asserts nothing, and writing
+one would be §12's vacuity risk landing on a specification claim rather than on
+code.
+
+> **The trigger.** If the density rule in readiness is ever relaxed — if an
+> operation is applied because its structural dependencies are present, despite
+> skipping a sequence number — then the applied set acquires per-replica gaps,
+> the watermark stops being a complete test for "already applied", and
+> **idempotent application moves from constraint to load-bearing.** At that
+> point it needs its own tests, and they must land in the same change, not
+> after it.
+
+That is written as a trigger rather than a caution because of how the change
+would arrive. Relaxing readiness looks like a latency optimisation — an
+operation that could be applied now is being made to wait — and it is local, one
+comparison in one method. Nothing at the site of the change mentions duplicate
+detection. The coupling is pinned from the readiness side, in
+`CausalReadinessTests` on both implementations, so the relaxation fails a test
+that explains why; this paragraph is what that test's failure should send the
+reader to.
+
+Three consequences worth stating, because they bind future changes:
+
+- **Applying an operation must stay idempotent.** Applying an insert whose id is
+  already present, or a delete whose target is already tombstoned, is a no-op.
+  Anything added to the apply path that is not idempotent — a counter, an
+  activity log, an undo stack, a metric incremented per operation — breaks a
+  guarantee nothing else checks, and breaks it silently.
+- **Dedupe is not a substitute for causal readiness.** An operation may be new
+  *and* not ready; the two tests are independent, and the dedupe check runs
+  first only because it is cheaper.
+- **Relaxing readiness is not a local change.** Applying an operation whose
+  structural dependencies are present but whose sequence skips one looks like a
+  latency optimisation and would silently break duplicate detection, because the
+  watermark test depends on density holding at apply time.
+
+The reason this is written down rather than left to the algorithm: CRDT
+idempotency is real, but it is a property of §5's data structure, not a decision
+the transport made. An assumption nobody wrote down breaks silently the first
+time either path changes — and 3b changes both of them.
+
 ### Tombstones and garbage collection
 
 Deleted elements are tombstoned, not removed. Implement GC based on **causal
@@ -523,6 +618,38 @@ be collected on causal stability alone, because a `RightOrigin` can name one
 **Why now, and not in Phase 4.** Phase 4 binds the format into the client's
 IndexedDB schema. After that, changing it is a migration on every user's
 machine; before it, it is a codec swap behind two tests.
+
+#### The hub protocol carries opaque bytes — a constraint, not a description
+
+**The transport protocol frames messages. It does not encode operations.** A hub
+message carries the §6 binary form as an **opaque byte string**, and §6 remains
+the *sole* authoritative encoding of an operation or a snapshot. This holds
+whatever protocol the hub negotiates, MessagePack included.
+
+Concretely, and these are prohibitions rather than preferences:
+
+- An operation, an element, an id, or a version vector **must not** be passed to
+  the transport's serialiser as a structured object, however convenient. It is
+  encoded by §6's codec first and handed over as bytes.
+- The transport's own type system — MessagePack's maps, arrays, extension types,
+  or any successor's — **must not** appear in the definition of what an operation
+  is. A hub method's parameters carry a document id, a replica id, and a byte
+  string; nothing structural travels outside those bytes.
+- **No canonical-form rule may live in the transport layer.** §6 has exactly one
+  set of canonicality rules and one place they are enforced.
+
+The reason is §13.11, which is where the last serious bug came from. Two
+encodings of the same data, each with its own notion of a correct spelling, is
+precisely the shape that produced a rule both implementations read the same way
+and both got wrong. MessagePack is adopted for framing because it moves a byte
+string without base64-inflating it; adopting its *object model* would buy nothing
+and would recreate that shape — a second encoding, with its own canonical form,
+checked against nothing.
+
+Stated as a constraint because the failure is a later convenience rather than a
+present mistake: the moment someone finds it easier to send an object than to
+call the codec, the second encoding exists, and it will look like a
+simplification in the diff that introduces it.
 
 ### Binary encoding — normative layout
 
@@ -1022,17 +1149,78 @@ Treat every one of these as a hard requirement with a corresponding test.
   SignalR messages. Proven by a test that kills an instance mid-session and
   asserts clients still converge.
 
+  **"Converge" is asserted against §9's normalised JSON of each client's full
+  element state — tombstones included — not against the visible text.** Two
+  replicas can render identical text while disagreeing about the tree beneath it,
+  and that disagreement is exactly what produces divergence on the *next*
+  concurrent edit, so comparing rendered text would pass on documents that are
+  already broken. This is the comparison the conformance corpus already makes,
+  which means a convergence failure is diagnosable with the tooling that exists.
+
   "Stateless" was the original wording and it is not achievable: validating an
   operation without loading the document requires a cached version vector.
   Reconstructible is the property that actually matters.
 - Hot path (receive op → validate → persist → broadcast) must not load full
   document state. Validate against the version vector and the referenced parent
   and right origin only.
+- **Broadcast carries `server_seq` and is not ordered by it.** The server assigns
+  `server_seq` under the per-document advisory lock (§6) and sends it with every
+  operation, but the fan-out makes no ordering promise: the backplane does not
+  guarantee order across instances, and building on the assumption that it does
+  would make correctness depend on a property Redis pub/sub does not offer.
+  Ordering is the receiver's problem and it already has the machinery — causal
+  readiness (§5) is what makes an out-of-order arrival safe, and `server_seq` is
+  what makes catch-up queries answerable. Requiring ordered fan-out would also
+  serialise it, which is the opposite of what §8 is for.
 - Batch operation persistence: buffer for up to 50 ms or 100 ops, whichever
   comes first, then write in one round trip under the per-document advisory lock
   (§6).
-- Backpressure: bounded per-connection outbound channel. If a client cannot keep
-  up, drop it to catch-up-via-snapshot rather than growing the buffer unbounded.
+- Backpressure: bounded per-connection outbound channel, **bounded in bytes**,
+  because what exhausts an app server here is buffered payload rather than
+  message count. If a client cannot keep up, drop it to catch-up-via-snapshot
+  rather than growing the buffer unbounded.
+
+  **"Drop to catch-up" means the connection is closed and the client reconnects
+  and resyncs**, not that the server quietly stops sending and hopes. A client
+  that is silently starved cannot tell it is missing operations and will render a
+  document that is wrong without knowing; closing is observable, starving is not
+  (§13.13). The close carries a reason the client can act on, and the client's
+  response is the catch-up path — one of the three guaranteed sources of
+  duplicate delivery (§5).
+- **Cross-instance delivery carries the batch, not a group send.** Each
+  instance subscribes to a Redis channel per document, while it holds a
+  connection for that document, and publishes every batch it accepts. Every
+  instance then fans out to its own connections under its own §8 deadline.
+
+  SignalR's own backplane would deliver a group send across instances and is
+  deliberately not what carries this: a group send lands on the remote instance
+  as a write into each member's channel with no timeout, so one slow client
+  there stalls that instance's backplane consumer — the stall the per-connection
+  deadline exists to prevent, moved one hop away and invisible from the sender.
+
+  Publishing is best effort. The operations are already committed before the
+  fan-out, so a lost publication costs a remote client latency until its next
+  catch-up rather than an operation; failing the submission instead would turn a
+  backplane hiccup into a rejected keystroke for an operation the server holds.
+- **Catch-up is answered from the client's version vector, never from a
+  `server_seq` watermark.** The client says what it holds, per replica, and the
+  server returns what that does not cover. A watermark would be wrong for the
+  same reason the bullet above makes broadcast unordered: a client can hold
+  `server_seq` 105 without holding 100, so "everything after your highest" skips
+  whatever fell in the gap — and skips it silently, leaving a client that
+  renders a plausible document and converges with nobody. What a client actually
+  knows is per replica and dense (§5), which is exactly what a version vector
+  expresses and what a single number cannot.
+
+  Above a configured operation count the answer is a snapshot instead, because
+  replaying a week of deltas costs more than sending the state. The threshold is
+  configuration, not a constant: where the two cross depends on the document.
+  The snapshot path is also reachable on demand, which is not a convenience —
+  it is the only way to exercise a floor that otherwise runs solely behind a
+  working fast path (§13.14).
+
+  Catch-up returns the whole document, so it is a read and is authorized like
+  one: the §7 role check runs on every call, not once at connect.
 - Snapshot compaction and tombstone GC run in a background service, jittered and
   guarded by an advisory lock so multiple instances do not duplicate work.
 
@@ -1121,6 +1309,31 @@ asserts the two files are byte-identical. Any divergence fails the build.
 runner is a vitest suite. Neither invokes the other — coupling the .NET test run
 to a Node toolchain buys nothing and makes each side harder to run alone. The
 comparison is a third step over two artefacts.
+
+**And a second check the corpus cannot make: the two implementations meeting
+over a real socket.** The conformance runner compares two files; it never opens
+a connection, never frames a message, and never exercises the path where one
+implementation's bytes reach the other's decoder. Neither does the .NET suite,
+which drives the server over an in-memory transport with the C# core on both
+ends — an arrangement that agrees with itself by construction.
+
+So the interop suite starts the published API as its own process and connects
+the TypeScript core to it over TCP, with three requirements that are what make
+it worth running:
+
+- **The harness uses the shipped core's own codec.** A second encoder written
+  for the test would check the harness against the server rather than the
+  product against it.
+- **The decisive assertion is on bytes the server produced** — above all the §6
+  snapshot the C# core encodes from state it rebuilt out of Postgres, which the
+  TypeScript core has to decode into an identical normalised document. Two
+  TypeScript replicas agreeing with each other is not interoperability.
+- **Authentication is real, with no bypass added to the product.** §7's rules
+  hold in this configuration too, so the harness generates a certificate and
+  serves OIDC metadata over genuine HTTPS rather than relaxing the requirement
+  that metadata be fetched over TLS. A development bypass is a permanent
+  weakness bought to make a test easier, and it would also make every other
+  assertion in the suite a statement about a configuration nobody deploys.
 
 Because the comparison is byte-for-byte, **both the trace schema and the result
 format are specified here, in full, before either runner is written.** Neither
@@ -1291,10 +1504,10 @@ reviewed. At the end of each phase, stop and report.
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
 | 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
-| 3b | Causal delivery over the wire, scale-out | Two real clients converge; an instance killed mid-session and clients still converge |
+| 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
-| 6 | Security hardening | Every requirement in §7 has a passing test |
+| 6 | Security hardening | Every requirement in §7 has a passing test; **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
 | 7 | Scale + observability | Load test hits the §8 targets; dashboards exist |
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
@@ -1372,6 +1585,77 @@ not a property anyone can read off the source; it has to be demonstrated. When
 sabotage does *not* produce a failure, the finding is not "the check is broken" —
 it is "the corpus does not reach this shape", and that is the more useful of the
 two answers.
+
+**The practice applies to a new test as much as to an established check**, and
+that is where it pays most often. Phase 3 ran sixteen sabotages; fifteen
+confirmed a check and one caught a *test* — a shutdown-race test written against
+the wrong path, which passed whether or not the code was correct and would have
+sat in the suite forever counted as coverage of a race it never touched. Right
+subject, wrong path is the most common way a test passes for no reason, and no
+amount of reading finds it: a test asserting something true either way looks
+exactly like a test asserting something true because the code is right.
+Coverage that would be relied on is worse than none.
+
+So: **a test written for a specific defect is not finished until the fix has
+been removed and the test has been seen to fail.**
+
+**A sabotage run reports on whatever was built, not on whatever is on disk.**
+Restore the file and rebuild before believing the next result — and restore it
+in a way the build system can see. The 3b.6 harness restored with `mv`, which
+preserves the backup's modification time; the restored source was therefore
+*older* than the artefacts compiled from the sabotaged version, so MSBuild
+skipped the recompile and every following run silently executed the previous
+sabotage. See §13.17: the direction that matters is not the one that showed up.
+
+### Name the vacuity risk before writing the test
+
+**Every task in a phase breakdown states how its test could pass meaninglessly,
+written before the test exists.** Not after, and not as a review step — as part
+of proposing the work.
+
+Sabotage catches a vacuous check afterwards, by breaking the code and watching
+nothing happen. That works and it is why sabotage is a standing practice, but it
+only fires on checks someone thought to sabotage, and it costs a full cycle each
+time. Naming the risk up front is the same question asked earlier and cheaper:
+*what would make this test pass whether or not the code is right?*
+
+The Phase 3b breakdown was the first written this way and it paid immediately.
+The wire-protocol task's stated risk was "measuring `byte[]` length rather than
+the framed message" — which would have shown two protocols as identical, because
+the base64 inflation being measured lives in the frame and not in the payload.
+That measurement would have looked correct, produced a plausible number, and
+decided the protocol wrongly. Nothing about the resulting code would have looked
+wrong afterwards.
+
+A second thing this format surfaces: **a task whose verification needs
+infrastructure that does not exist yet is written, not done.** The breakdown says
+so, and the task stays open until the later task closes it, rather than being
+marked complete on the strength of a suite that cannot fail.
+
+3b.2 is the worked example and it paid. Its broadcast tests could not distinguish
+per-instance fan-out from a working backplane, so they were held open until
+3b.7's two-instance test existed — and the fan-out really was per-instance. A
+client connected to another server received nothing. Sabotaging the publish
+fails four of 3b.7's five tests and would have failed none of 3b.2's. Marked
+done in isolation, that ships covered by green tests until Phase 7's load
+testing puts two instances behind one load balancer.
+
+### A guard runs on a schedule something else keeps
+
+**A check whose invocation is a judgement call is a check that is skipped exactly
+when it matters.** Attach every guard to something that happens anyway.
+
+§12's phase preflight was built after Phase 2.5's six silent red pushes, for
+precisely the failure that then recurred across seven tasks of Phase 3b
+(§13.20). The tool was not missing. Running it was left to discretion, and
+discretion said "the local suite is green" seven times.
+
+So the fix for that class is never a stronger intention. `check-workflows.sh`
+detects the specific defect, but the reason it will keep working is where it
+sits: first among the preflight's local gates, and the preflight runs at every
+task boundary rather than at the phase report. The same shape applies to any
+guard added later — bind it to the commit, the gate, or the build, not to
+someone remembering it is relevant.
 
 ### Hand-written fixtures for every canonical form
 
@@ -2092,3 +2376,494 @@ document the caller cannot see would leak exactly what the 404 rule protects.
 None of these are changes of direction. They are the places where §7's rules,
 read literally, could each be satisfied by an implementation that defeated their
 purpose.
+
+### 13.13 A rejection the rejected party cannot observe is not a rejection
+
+Phase 3 refused an unauthenticated hub connection in `OnConnectedAsync`, first
+with `Context.Abort()` and then by throwing. Both are the documented way to
+refuse a SignalR connection. Neither is observable to the client: SignalR
+completes its handshake *before* invoking the hub, so `StartAsync` has already
+returned success by the time the connection is torn down. Every rejected client
+believed it was connected, and what it saw afterwards — a connection closing
+shortly after opening — is indistinguishable from a network blip.
+
+The server was correct throughout. It redeemed no ticket, established no
+binding, and would have refused every subsequent call. A server-side test suite
+asserting on server state would have passed, and did.
+
+**The general form: a rejection that is not observable to the rejected party is
+not a rejection, and no amount of server-side testing can detect that class of
+defect.** The server's own view is identical in both worlds. What separates them
+lives entirely in what the *client* can observe, so the test has to be written
+from the client's side and has to assert on what the client is told — not on
+what the server recorded.
+
+This is a security finding rather than a usability one, and the reason is the
+direction the failure runs in. A client that cannot tell refusal from a blip
+retries, and a retrying client is indistinguishable from an attacker probing;
+worse, a client that believes it is connected will surface a working editor to
+someone holding no valid credential, and only fail when they type. The failure
+is deferred to the moment of most confusion and attributed to the wrong cause.
+
+The fix was to move the observable part of the refusal to where the client can
+see it — SignalR's own negotiate request, before a transport exists, answering
+401 — while leaving the authoritative single-use redemption in the hub. Note the
+shape: the check that *enforces* and the check the client can *see* ended up in
+two different places, and both are needed. An enforcement point is not
+automatically a signalling point.
+
+**It applies again in 3b and Phase 4.** Every rejection either phase adds is
+subject to it: a batch dropped for exceeding a pending-set bound, a client
+refused during a scale-out failover, an offline client whose queued operations
+are refused on reconnect. In each case the question is not "did the server
+refuse" but "can the client tell it was refused, and tell it apart from a
+network failure". The second is what needs the test.
+
+### 13.13a MessagePack for framing, and the measurement that decides it
+
+§7 caps a hub message at 64 KB. Phase 3 found that the default JSON hub protocol
+base64-encodes a `byte[]` argument, so 64 KB of message admits roughly 47 KB of
+operations and every keystroke batch pays a third of itself in encoding overhead.
+
+Two fixes were on the table. **Raise the cap to ~88 KB** so 64 KB of payload fits
+inside base64: no protocol change, no client work, no new dependency, and 33% more
+bandwidth forever. Or **switch the hub protocol to MessagePack**, which carries a
+byte string without inflating it.
+
+MessagePack is chosen, on a narrower argument than "binary is better". The hub
+payload is already a single opaque `byte[]` holding §6's format, so MessagePack is
+used for **framing only** — its object model is not used, and §6 stays the sole
+authoritative encoding (see §6, *The hub protocol carries opaque bytes*). The
+alternative reading, where operations become MessagePack objects, would create a
+second encoding with its own canonical-form rules; §13.11 is what happens then.
+
+**The decision is contingent on two measurements, not one.** Wire bytes are the
+obvious one. The second is **client bundle size** with
+`@microsoft/signalr-protocol-msgpack`: bandwidth saved per keystroke is paid for
+once per page load, and on the slow connection this project keeps citing, a
+materially larger bundle is a real cost in the same currency. Both figures get
+reported, and the choice is made against both. If the bundle cost turns out to
+dominate, raising the cap is the honest answer and this entry gets amended rather
+than quietly ignored.
+
+The measurement itself carries the trap: **the inflation lives in the frame, not
+in the payload.** Measuring `byte[]` length would show the two protocols as
+identical and decide this wrongly, with a plausible number and nothing about the
+result looking wrong afterwards. What gets measured is the framed message on the
+wire, via `IHubProtocol.WriteMessage`, which is exactly what the connection
+sends minus transport framing that is identical for both.
+
+**The numbers.** Framed hub message, bytes:
+
+| document | payload | JSON frame | MessagePack frame | saved |
+|---|---|---|---|---|
+| one keystroke | 30 | 209 | 161 | 23.0% |
+| keystroke batch (16) | 61 | 253 | 192 | 24.1% |
+| paste at the run cap (256) | 542 | 893 | 674 | 24.5% |
+| 256 separate inserts, no run | 1,500 | 2,169 | 1,632 | 24.8% |
+| a batch near the cap | 121,772 | 162,533 | 121,907 | 25.0% |
+
+Base64 adds a third to the payload, so the saving relative to the JSON frame is
+a quarter — 0.33/1.33 — approached from below as the fixed frame overhead
+(method name, document id, replica id) is amortised.
+
+Under §7's 64 KB message cap, **JSON admits 49,023 payload bytes and MessagePack
+65,403**. Phase 3's "about 47 KB" was an estimate; 49,023 is the measurement.
+
+Client bundle, gzipped bytes:
+
+| bundle | minified | gzipped | delta |
+|---|---|---|---|
+| CRDT core alone | 8,399 | 3,135 | — |
+| core + SignalR | 64,167 | 17,317 | +14,182 |
+| core + SignalR + MessagePack | 94,192 | 25,390 | +22,255 |
+
+**The MessagePack protocol costs 8,073 gzipped bytes, 46.6% on top of the
+SignalR client.** That is not trivial and it is the honest case against this
+decision.
+
+**The call, against both figures: MessagePack.** Three reasons, in order of
+weight.
+
+The bundle cost is paid once per page load and is cacheable; the wire saving
+accrues per message and is not. At 253 versus 192 bytes for a keystroke batch,
+8 KB of bundle is repaid after roughly 130 batches — a few minutes of typing —
+and every batch after that is profit.
+
+Second, and this is what actually decides it: on the slow connection the bundle
+argument is about, **the document dominates the bundle by three orders of
+magnitude.** §8's case is 5.3 MiB of binary snapshot (§13.9). Against that,
+8 KB is noise, and optimising it while shipping 5.3 MiB would be a strange place
+to economise.
+
+Third, the cap becomes honest. A "64 KB message limit" that admits 49 KB of
+operations is a number that will mislead whoever next reasons about batch sizing;
+under MessagePack the cap means what it says.
+
+**JSON is withdrawn from the hub's supported protocols, not merely deprioritised.**
+Supporting both would let a client negotiate JSON and silently take the worse
+wire and the smaller effective cap — a downgrade nobody would observe. A client
+that cannot speak MessagePack now fails to connect, and §13.13 is the reason a
+loud failure is the better one. A test asserts the refusal rather than assuming
+it.
+
+### 13.14 Test a bound where it is the only guarantee
+
+§7 bounds role-cache staleness at five seconds and gets there two ways: eager
+pub/sub invalidation makes the usual case immediate, and a five-second TTL is
+the fallback. Two tests were written — one revoking through the writer, one
+deleting the membership row behind the writer's back so no invalidation is ever
+published.
+
+Only the second found the bug, and the bug was worth finding: a local cache
+entry refreshed from a Redis hit took a fresh five seconds regardless of how
+little was left on the shared entry it read, so an expiry landing near the
+boundary restarted the clock. Worst case was very nearly ten seconds — double
+§7's bound. The eager-invalidation test stayed green throughout, because eager
+invalidation was working perfectly.
+
+**The rule: where a guarantee has a fast path and a fallback, the bound must be
+tested with the fast path disabled.** Testing it with both running measures the
+fast path and says nothing about the bound, and the fast path is precisely the
+thing that is unavailable in the situations the bound exists for — a lost
+message, an instance partitioned from Redis, a row changed by an operator with
+`psql`. A test that only ever exercises the happy path is measuring the
+optimisation and reporting it as the guarantee.
+
+This generalises past caches. Anywhere this system has a fast path and a
+correctness floor — causal delivery's buffer against its resend, a reconnecting
+client's delta against a full snapshot — the floor gets its own test with the
+fast path switched off.
+
+### 13.15 A mechanism whose absence still converges must be asserted directly
+
+**Wherever removing a mechanism leaves the system still producing the right
+answer, that mechanism has to be observable and asserted on its own terms. Never
+inferred from the outcome.**
+
+This is the third form of one discovery, and writing it once generally is
+overdue.
+
+- **§13.7, the mutation gate.** Stryker reported 0.00% across 227 mutants and
+  exited zero while the same suite killed those mutations by hand. The suite's
+  *outcome* — green — was identical whether or not the gate was measuring
+  anything.
+- **§13.11, the canonical-form bug.** Two implementations agreed byte for byte
+  on every trace in the corpus. The agreement was real and the shared reading of
+  §6 was wrong; only deliberately breaking one side showed that the comparison
+  could not have noticed.
+- **§5's duplicate counter.** Delete the dedupe entirely and every convergence
+  test still passes, because the CRDT is idempotent and re-applying a duplicate
+  is a no-op. The mechanism's whole purpose is to make a resend loop *visible*,
+  and a resend loop is invisible in the outcome by construction.
+
+The common shape: the observable result is the same on both sides of the change,
+so no assertion phrased in terms of the result can distinguish them. Convergence
+is the weakest of these — it holds under a large family of wrong
+implementations, including several that do no work at all — which is exactly why
+it is the assertion that feels most reassuring to write.
+
+The rule in practice: when adding a mechanism, ask what test fails if it is
+deleted. If the honest answer is "none, the system still gets the right answer",
+then either the mechanism is unnecessary, or it exists for an operational reason
+— speed, load, a signal for a human — and that reason is what has to be measured
+and asserted. Counting the drops, timing the path, or asserting the call did not
+happen. Not "and the document still matches".
+
+This is what §12's vacuity rule is for at the level of a single mechanism, and
+what the sabotage practice catches when the rule was not applied.
+
+**Its next instance was this same counter** (§13.21). `DuplicatesDropped` was
+asserted directly, in three suites — and not in the one the mutation gate
+drives, so the gate saw a counter nothing asserted and said so the first time it
+ran. Assert the mechanism directly, *in the suite that measures it*.
+
+### 13.16 The server has no pending set, and a query that matched nothing
+
+Two findings from 3b.4, related only in that the second was found while
+implementing the first.
+
+**The server rejects a non-ready operation rather than buffering one.** §5
+describes a bounded pending set and justifies the bound by noting that origins
+are client-supplied — an unbounded set is a denial-of-service vector. That
+reasoning is sound for a *peer* receiving a broadcast. It does not transfer to
+the ingest path, and following it literally would have added the vector it
+warns about.
+
+A client can only reference an element it knows about, and under this
+architecture it knows about exactly two kinds. Its own earlier operations: §7's
+density rule already guarantees the server holds them, because it refused
+anything else. And other replicas' operations: it learned of those from a
+broadcast, and §8 sends a broadcast only after the write commits. There is no
+third kind and no race between them — an operation referencing something the
+server does not have is a bug or an attack, never a legitimate ordering
+accident.
+
+So buffering one means holding an id that may never arrive, indexed by a key an
+attacker chooses. Rejecting removes the vector instead of bounding it, and
+leaves the server with no pending set to bound at all. §7's pending-set cap
+therefore has no server-side subject; the bound lives on the client, where §5
+puts it, and where the operations being buffered came from a source the client
+does not control.
+
+The bound is on the *connection*, not on the replica. A replica replaying a
+stored trace or importing a snapshot legitimately buffers as much as the input
+demands, and a core that refused would fail the property suite for a reason
+having nothing to do with the property. `MaxPending` is unbounded by default and
+set by whoever attaches a replica to a network. Exceeding it throws rather than
+dropping the oldest: dropping would leave the replica permanently missing an
+operation with nothing to indicate it, which is divergence arrived at quietly,
+and quiet divergence is the one outcome this project exists to prevent.
+
+**And the query that matched nothing.** Implementing the origin check meant
+writing a second query against `document_ops`, which is when the first one was
+read closely. §7's document-size cap has, since Phase 3, filtered on
+`op_type = 'ins'` against a writer that stores `'insert'`. It matched no rows.
+Ever.
+
+Nothing went red. Every test filled a document through a single instance, where
+the in-memory counter incremented by `Accepted` did the work, and the Postgres
+seed of zero was never the number under test. §8 requires exactly the opposite
+property — the cache must be reconstructible and must not be required for
+correctness after a failover — and what was actually shipped was a cap that
+reset to zero on every restart, so a document already over its limit would have
+accepted writes on any cold instance.
+
+This is §13.15 again, from the other direction. The mechanism's absence still
+produced the right *outcome* in every test, because a second mechanism covered
+for it. The test that catches it drops the cache and asserts the reconstructed
+number, which is the only arrangement where the query is the thing being tested.
+The `op_type` literals are now interpolated from the writer's own constants, so
+the two cannot drift again.
+
+### 13.17 The verification apparatus is not exempt
+
+The 3b.6 sabotage run reported that the snapshot-floor test failed under two
+sabotages that could not reach it — one removed a role check, the other a
+negative-sequence guard, and neither is on the floor's path. Run alone, the
+floor test passed five times out of five. The failure was not in the code and
+not in the test. It was in the harness.
+
+Each sabotage backed the file up with `cp`, patched it, built, ran, and restored
+with `mv`. `mv` preserves the *backup's* modification time, so the restored
+source came back older than the artefacts built from the sabotaged version.
+MSBuild compared timestamps, concluded nothing had changed, and skipped the
+recompile. Every run after the first sabotage executed the previous sabotage's
+binary. The "clean" baseline in between was not clean.
+
+The direction that showed up is the harmless one: a sabotage credited to the
+wrong test, noticed because the attribution made no sense. The direction that
+matters is the opposite one, and it is silent. Sabotage a check, build nothing,
+watch the *previous* clean build pass, and record "sabotage caught by nothing —
+the corpus does not reach this shape." That is a finding about the corpus, it
+reads as a real result, and it is the exact conclusion §12 says to take
+seriously. It would have certified a test that catches nothing, using the
+practice whose whole purpose is to prevent that.
+
+So the rule is general, and wider than one build system:
+
+> **Every claim about a check's behaviour under sabotage is a claim about a
+> specific binary. Establish that the binary is the one you think it is —
+> restore in a way the build system can observe, and rebuild — or the result is
+> about a state you are no longer in.**
+
+Three earlier entries (§13.13, §13.15, §13.16) are all instances of a mechanism
+that could not be observed failing. This is the same shape one level up: the
+apparatus that observes the mechanisms was itself unobserved. Nothing checks the
+checker, so the only defence is that its results have to *make sense* — an
+attribution that cannot be explained by the code is a finding about the harness,
+not a flake to re-run until it goes away. The tell here was that a sabotage and
+the test it broke had no path between them; the temptation was to call the floor
+test flaky, and running it in isolation appeared to confirm that.
+
+### 13.18 A wait that is already satisfied is not a wait
+
+3b.7's subscription test asserted that an instance keeps carrying a document
+after one of its two connections leaves, and drops it after the second. Both
+assertions were on a counter, each preceded by a poll:
+
+```csharp
+await one.DisposeAsync();
+await WaitFor(() => Backplane(factory).Carrying == 1);
+Assert.Equal(1, Backplane(factory).Carrying);
+```
+
+The sabotage that unsubscribes on the *first* departure — stranding every
+remaining client on that instance — went straight through.
+
+`Carrying` is already 1 when the client is disposed. Disconnect handling runs
+server-side with nothing to await, so the poll's condition was true on entry, it
+returned immediately, and the assertion ran before the mechanism had a chance to
+do anything at all. The test asserted a state that had not yet changed and could
+not yet be wrong. It would have passed against an instance that unsubscribes on
+every departure, and it did.
+
+Two rules come out of it.
+
+**Wait on a transition, not on a state.** A poll for a condition that already
+holds is a no-op with the shape of synchronisation. The second half of the same
+test — waiting for `Carrying == 0` after the last client leaves — is sound for
+exactly this reason: it starts false and has to become true. Where the value
+under test does not change, find one that does; 3b.7 waits on the connection
+count going from two to one, which is a transition the disconnect must complete
+before the assertion means anything.
+
+**Prefer the functional assertion to the counter.** The counter was there to
+make the mechanism observable, which is right (§13.15), but "still subscribed"
+is a proxy. What the rule protects is that the remaining client keeps receiving,
+so the test now has a second instance publish and the remaining client receive
+it. That fails under the sabotage without depending on any timing at all, and it
+states the property in the terms someone would actually complain about.
+
+This is the second time sabotage has caught a *test* rather than the code, and
+both times the test was aimed at the right subject and asserted something that
+was true regardless. That remains the most common way a test passes for no
+reason, and reading it is not how it gets found.
+
+### 13.19 The sentinel matched the syntax, not the property
+
+§7 forbids turning a token check off anywhere, and `TokenValidationTests` has
+enforced that since Phase 3 by scanning every `.cs` and `.json` file in the
+repository for one of the named switches assigned `false`. It has been treated
+as covering the rule.
+
+It covers one spelling of it. Sabotaging the interop suite meant weakening
+signature validation, and the way to do that is not to write `false` anywhere:
+
+```csharp
+SignatureValidator = (token, _) => new JsonWebToken(token),
+```
+
+`ValidateIssuerSigningKey` stays `true`, `RequireSignedTokens` stays `true`, the
+options test still passes, and the scanner sees nothing — because the check has
+been *replaced* rather than switched off. The same shape exists for
+`IssuerValidator`, `AudienceValidator`, `LifetimeValidator` and the rest: each
+is a framework extension point that runs instead of the check it is named for.
+
+The scanner now flags an assignment to any of them. None is assigned anywhere
+today, so it is a ratchet rather than a cleanup, and if one is ever genuinely
+needed the argument belongs in §7 before the code.
+
+The general point is the one worth keeping. **A guard written as a pattern match
+covers the instances of the pattern, not the property.** It is easy to read such
+a guard as enforcing the rule, because the rule is what its name says; what it
+actually enforces is "nobody wrote it that way". This one had gone unexamined
+for a phase and a half because it had never been the target: the sabotages that
+found things were aimed at the code the check protects, not at the check itself.
+
+**Every textual guard in this repository has the same weakness.** The
+architecture test looks for project references; a reflection-loaded assembly is
+not one. The secret scan looks for secret-shaped strings; a credential assembled
+from parts at runtime is not one. The redaction sentinel looks for a sentinel
+value; a field that reaches the log by a path the sentinel never travels is not
+one. Each checks an instance and is read as checking the property.
+
+**Scheduled: a guard audit pass**, asking of each check in turn — the
+architecture test, the secret scan, the redaction sentinel, the mutation
+ratchet, the workflow check, this one — *what is the `SignatureValidator`
+equivalent here? What defeats this without matching its pattern?* It is a
+distinct piece of work rather than a note, because the answer for each guard is
+specific and reading the guard is not how the answer is found.
+
+Which is the strongest justification the sabotage practice has yet had.
+**Sabotage is the only technique in this project that tests a property rather
+than a pattern.** Every other check — the scanners above, the type system, the
+tests themselves — asserts something written down in advance, and therefore
+asserts the form it was written in. Sabotage asks the different question: given
+an implementation that is actually wrong, does anything go red? It is the only
+one that can discover the gap between "the guard matches" and "the guard holds",
+because it approaches from outside the guard's own vocabulary.
+
+### 13.20 Seven tasks reported against a workflow that never ran
+
+Editing `ci.yml` during 3b.1 inserted a step above a trailing
+`working-directory:` line that belonged to the step before it, leaving two
+`working-directory` keys on one step. GitHub Actions rejects a duplicate mapping
+key and fails the run before scheduling anything.
+
+Every push from 3b.1 through 3b.8 was a startup failure. Eight jobs — the .NET
+suite, cross-implementation conformance, the mutation gate, the secret scan —
+did not run at all for seven consecutive tasks, each of which was reported as
+complete.
+
+Nothing about that is visible without going and looking. A startup failure has
+no failing step, no log, and no annotation; the run list shows a red mark like
+any other. Its one tell is cosmetic: with the file unparseable the run cannot
+read the workflow's `name:`, so it is listed by path instead — `.github/workflows/ci.yml`
+where every green run above it says `CI`. And locally nothing goes red, because
+no local tool reads this file. Even a YAML parser is no help: PyYAML, and every
+other library in common use, accepts duplicate keys silently with the last value
+winning. "It parses" was true and meant nothing.
+
+Two things follow, and only the second is new.
+
+**§12's preflight already covers this and was not run.** It requires a status
+file naming the pushed commit and refuses one that lists no jobs — which is
+exactly what these runs produced. The rule existed, was written after the same
+class of failure in Phase 2.5 (§12), and was skipped for seven tasks because
+each one ended in a local green suite that felt like enough. A gate that is only
+consulted when someone remembers is not a gate; the preflight is now run at
+every task boundary rather than at the phase report.
+
+**And the failure should never have needed a remote check to find.** A workflow
+file that the CI provider will reject is a local defect in a local file, and
+`scripts/check-workflows.sh` now fails on it before the push — duplicate keys
+specifically, plus a missing `name`, since an unnamed workflow is listed by path
+and therefore looks exactly like a startup failure in the one place the
+difference shows. It runs first among the preflight's local gates, because a
+green job table is meaningless if the run that produced it executed nothing.
+
+The wider point is the one §13.17 made about the sabotage harness, arriving from
+the other direction: **the machinery that reports on the work is not covered by
+the work's own tests.** A test suite says nothing about whether CI ran it. Both
+findings are the same shape — an apparatus trusted because its output looked
+normal — and in both cases the output was normal precisely because nothing had
+happened.
+
+### 13.21 A ratchet keyed on line numbers is not a ratchet
+
+With the workflow fixed (§13.20), the mutation gate ran for the first time since
+3b.1 and reported 34 newly-undetected mutants — apparent coverage collapse
+across `Replica.cs`.
+
+Thirty of them were the same mutants as before, moved. The floor keyed each
+entry as `file:line:column:mutator`, and 3b.4 added 54 lines near the top of
+`Replica.cs`, so every known entry below the insertion arrived at a new address
+and read as new.
+
+That direction is only noise, and its danger is what the noise invites: the
+obvious response is to paste the new list into the floor, which is how a
+ratchet becomes a rubber stamp. The direction that actually matters is the
+silent one. After a shift, a genuinely new undetected mutant that lands on a
+line number a moved entry used to occupy is absorbed as already-known. The gate
+stays green while coverage falls, which is the exact failure the floor exists to
+prevent, caused by the floor's own key.
+
+The key is now the mutated source line's **text**, with the mutator and its
+replacement: `file:mutator:replacement:line text`. It changes when the code
+changes and not before, which is when re-review is wanted. Entries are counted
+rather than set-membership, because two mutants of the same shape on identical
+lines are two gaps and collapsing them would let one become covered while the
+other quietly took its place.
+
+**And under the noise there was a real finding**, which is the argument against
+re-baselining without reading. Four mutants were genuinely new, and two of them
+were `DuplicatesDropped++` — deleted, and turned into a decrement. §13.15 was
+written about that very counter: a mechanism whose absence still converges has
+to be asserted directly. It *was* asserted — in `Editor.Api.Tests` and in the
+TypeScript suite, but not in `Crdt.Core.Tests`, which is the only suite the
+mutation gate drives. The watermark-path increment had no assertion where it is
+measured, and the gate said so the first time it was allowed to run.
+
+Worth reading with §13.15 rather than beside it: that entry named a class of
+defect, and this is that class producing its next instance, in the very
+mechanism the entry was written about. "Assert the mechanism directly" turns out
+to carry an unstated second half — *in the suite that measures it*. A counter
+asserted in three suites and unasserted in the one the gate drives is, to the
+gate, a counter nothing asserts.
+
+The general rule: **a ratchet's key has to be as stable as the property it
+tracks.** A key that moves for reasons unrelated to the property produces false
+alarms, which train the reader to clear them in bulk, and false silence, which
+is unobservable. Position is the most tempting such key and the least stable
+one.

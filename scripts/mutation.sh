@@ -95,25 +95,43 @@ if denominator == 0:
 # the suite; §13.7 records how that was found out.
 print(f"mutation score: {detected / denominator * 100:.2f}%  (reported, not gated)")
 
-def identify(path, mutant):
+def identify(path, source, mutant):
+    """A key that survives edits elsewhere in the file.
+
+    Keyed on line NUMBER, this ratchet was invalidated by any insertion above
+    a mutant: adding 54 lines to Replica.cs re-flagged thirty known entries as
+    erosion at once. That direction is merely noisy. The other one is not — a
+    genuinely new undetected mutant landing on a line number a shifted entry
+    used to occupy is absorbed as already-known, and the check stays green
+    while coverage falls. So the key is the mutated source line's TEXT plus
+    the mutator and its replacement, which changes when the code changes and
+    not before.
+    """
     start = mutant["location"]["start"]
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
-    return f'{name}:{start["line"]}:{start["column"]}:{mutant["mutatorName"]}'
+    lines = source.splitlines()
+    index = start["line"] - 1
+    text = " ".join(lines[index].split()) if 0 <= index < len(lines) else ""
+    replacement = " ".join(str(mutant.get("replacement", "")).split())[:60]
+    return f'{name}:{mutant["mutatorName"]}:{replacement}:{text}'
 
-undetected = {
-    identify(path, mutant)
+# Counted rather than a set: two mutants of the same shape on identical source
+# lines are two gaps, and collapsing them would let one become covered while
+# the other silently took its place in the floor.
+undetected = collections.Counter(
+    identify(path, file.get("source", ""), mutant)
     for path, file in report.get("files", {}).items()
     for mutant in file.get("mutants", [])
     if mutant.get("status") in ("Survived", "NoCoverage")
-}
+)
 
 with open(sys.argv[2], encoding="utf-8") as handle:
-    known = set(json.load(handle)["undetected"])
+    known = collections.Counter(json.load(handle)["undetected"])
 
-appeared = sorted(undetected - known)
-gone = sorted(known - undetected)
+appeared = sorted((undetected - known).elements())
+gone = sorted((known - undetected).elements())
 
-print(f"undetected: {len(undetected)}   known: {len(known)}")
+print(f"undetected: {sum(undetected.values())}   known: {sum(known.values())}")
 
 if gone:
     # Not a failure: an entry can vanish because a test now kills it, or merely

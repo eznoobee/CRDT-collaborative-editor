@@ -25,8 +25,6 @@ public sealed class IngestValidationTests
 
     public IngestValidationTests(EditorFixture fixture) => _fixture = fixture;
 
-    private sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
-
     [Fact]
     public async Task An_oversized_message_closes_the_connection()
     {
@@ -337,6 +335,121 @@ public sealed class IngestValidationTests
     }
 
     [Fact]
+    public async Task An_operation_referencing_an_element_the_document_lacks_is_rejected()
+    {
+        // §5's readiness, enforced rather than buffered. A client can only
+        // reference an element it knows about, and it knows about exactly two
+        // kinds: its own earlier operations, which density guarantees the
+        // server holds, and other replicas' operations, which it learned from a
+        // broadcast the server sent only after committing them. So this is a
+        // bug or an attack, never a race — and buffering it would be buffering
+        // an id that may never arrive, which is the denial of service §5 warns
+        // about.
+        await using var session = await SessionAsync("unknown-parent");
+
+        var replica = ReplicaIdConversion.FromGuid(session.Negotiated.ReplicaId);
+        var absent = new ElementId(ReplicaIdConversion.FromGuid(Guid.CreateVersion7()), 41);
+
+        var orphan = OperationBinary.Encode(
+        [
+            new InsertOperation(new ElementId(replica, 0), new Rune('a'), absent, Side.Right, null),
+        ]);
+
+        Assert.Equal(IngestRejection.UnknownOrigin, (await session.SubmitAsync(orphan)).Code);
+    }
+
+    [Fact]
+    public async Task A_delete_for_an_element_the_document_lacks_is_rejected()
+    {
+        await using var session = await SessionAsync("unknown-target");
+
+        var replica = ReplicaIdConversion.FromGuid(session.Negotiated.ReplicaId);
+        var absent = new ElementId(ReplicaIdConversion.FromGuid(Guid.CreateVersion7()), 7);
+
+        var orphan = OperationBinary.Encode(
+            [new DeleteOperation(new ElementId(replica, 0), absent)]);
+
+        Assert.Equal(IngestRejection.UnknownOrigin, (await session.SubmitAsync(orphan)).Code);
+    }
+
+    [Fact]
+    public async Task An_operation_may_reference_one_created_earlier_in_the_same_batch()
+    {
+        // The ordinary case, and the one an over-strict check would break:
+        // every batch of typed characters after the first references an element
+        // the batch itself creates. Without this, the origin check would reject
+        // everything a person types.
+        await using var session = await SessionAsync("same-batch");
+
+        Assert.Null((await session.SubmitAsync(session.Writer.Type("hello"))).Code);
+    }
+
+    [Fact]
+    public async Task An_operation_may_not_reference_one_created_later_in_the_same_batch()
+    {
+        // Order within the batch matters. A forward reference is not something
+        // a client can produce by typing, and accepting it would mean accepting
+        // a batch whose elements cannot be placed in the order they arrive.
+        await using var session = await SessionAsync("forward-reference");
+
+        var replica = ReplicaIdConversion.FromGuid(session.Negotiated.ReplicaId);
+        var later = new ElementId(replica, 1);
+
+        var forward = OperationBinary.Encode(
+        [
+            new InsertOperation(new ElementId(replica, 0), new Rune('a'), later, Side.Right, null),
+            new InsertOperation(later, new Rune('b'), null, Side.Right, null),
+        ]);
+
+        Assert.Equal(IngestRejection.UnknownOrigin, (await session.SubmitAsync(forward)).Code);
+    }
+
+    [Fact]
+    public async Task The_document_size_cap_is_reconstructed_from_postgres()
+    {
+        // §8: an in-memory per-document cache must be reconstructible and must
+        // not be required for correctness after a failover. The size counter is
+        // such a cache, and until 3b.4 its Postgres query matched no rows at
+        // all — it filtered on op_type 'ins' against a writer storing 'insert'
+        // — so a cold instance read zero live bytes and would have accepted
+        // writes into a document already at its cap.
+        //
+        // Nothing went red for a whole phase, because every test filled the
+        // document through one instance and the in-memory counter did the work.
+        // This test drops the cache first, which is the only way the query is
+        // ever the thing under test (§13.16).
+        await using var session = await SessionAsync("cold-cap", limits: new Dictionary<string, string?>
+        {
+            ["Ingest:MaxDocumentBytes"] = "4096",
+        });
+
+        var filled = 0;
+        while (filled < 4096 - 256)
+        {
+            Assert.Null((await session.SubmitAsync(session.Writer.Type(new string('a', 256)))).Code);
+            filled += 256;
+        }
+
+        var state = session.Factory.Services.GetRequiredService<DocumentIngestState>();
+        state.Forget(session.Negotiated.DocumentId);
+
+        var reconstructed = await state.LiveBytesAsync(
+            session.Negotiated.DocumentId, TestContext.Current.CancellationToken);
+
+        Assert.Equal(filled, reconstructed);
+
+        // And the cap still fires on the cold instance, which is the behaviour
+        // the number exists for.
+        var results = new List<string?>();
+        for (var batch = 0; batch < 4; batch++)
+        {
+            results.Add((await session.SubmitAsync(session.Writer.Type(new string('a', 256)))).Code);
+        }
+
+        Assert.Contains(IngestRejection.DocumentFull, results);
+    }
+
+    [Fact]
     public async Task A_document_at_its_replica_cap_refuses_another_connection()
     {
         // Refused at negotiate, not at the first keystroke: a client that
@@ -505,6 +618,7 @@ public sealed class IngestValidationTests
                         await factory.Server.CreateWebSocketClient()
                             .ConnectAsync(context.Uri, cancellationToken);
                 })
+            .AddMessagePackProtocol()
             .Build();
 
         await connection.StartAsync(TestContext.Current.CancellationToken);

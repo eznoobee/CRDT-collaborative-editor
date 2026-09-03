@@ -2,6 +2,7 @@ import { compareElementId, elementKey, type ElementId } from './elementId';
 import type { ElementState, VersionVectorEntry } from './elementState';
 import type { InsertOperation, DeleteOperation, Operation, Side } from './operation';
 import { compareReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
+import { PendingSetOverflowError } from './pendingSetOverflow';
 
 interface Node {
   id: ElementId;
@@ -40,6 +41,27 @@ export class Replica {
   private readonly versionVectorByKey = new Map<string, { replica: ReplicaId; count: bigint }>();
   private readonly log: Operation[] = [];
   private pending: Operation[] = [];
+
+  /**
+   * Operations discarded because this replica had already applied or buffered
+   * them.
+   *
+   * Diagnostic, not a health check. §5 guarantees this is non-zero in normal
+   * operation; what is worth alerting on is its rate.
+   */
+  duplicatesDropped = 0;
+
+  /**
+   * How many operations may wait in the pending set (§5).
+   *
+   * Unbounded by default, deliberately: §5 bounds the pending set *per
+   * connection*, and a replica is not a connection. A replica replaying a
+   * stored trace legitimately buffers as much as the trace demands. Whoever
+   * attaches a replica to a network connection sets this, because that is the
+   * layer where an unbounded buffer fed by a remote peer is a denial-of-service
+   * vector and one fed by a local file is not.
+   */
+  maxPending = Number.MAX_SAFE_INTEGER;
   private nextSeq = 0n;
 
   constructor(id: ReplicaId) {
@@ -263,11 +285,30 @@ export class Replica {
 
   apply(operation: Operation): void {
     if (this.hasSeen(operation)) {
+      // Counted, not merely skipped (§5). Duplicate delivery is guaranteed —
+      // the backplane can repeat a broadcast, catch-up re-sends what a client
+      // already has, a client dropped for backpressure recovers by being resent
+      // state — so this is never zero and is not itself a problem. A sudden
+      // rise in it is how a resend loop announces itself, and that signal does
+      // not exist if duplicates are silently absorbed.
+      this.duplicatesDropped += 1;
       return;
     }
 
     if (!this.isReady(operation)) {
-      if (!this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+      if (this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+        // Already buffered. This is the duplicate the watermark cannot see,
+        // because the operation has not been applied yet, and buffering it
+        // twice would apply it twice when the gap closes.
+        this.duplicatesDropped += 1;
+      } else {
+        if (this.pending.length >= this.maxPending) {
+          // §5: a protocol violation, not something to absorb by dropping the
+          // oldest. Dropping would leave this replica permanently missing an
+          // operation with nothing to indicate it — divergence arrived at
+          // quietly, which is the one outcome this project exists to prevent.
+          throw new PendingSetOverflowError(this.pending.length, this.maxPending);
+        }
         this.pending.push(operation);
       }
       return;
