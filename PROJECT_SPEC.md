@@ -275,6 +275,63 @@ configurable). Exceeding the bound is a protocol violation: reject, log, and
 close. An unbounded pending set is a denial-of-service vector, because origins
 are client-supplied.
 
+**The bound is expressed in operations and in seconds**, not in bytes. Bytes are
+the natural unit for a transport buffer (§8's outbound channel) and the wrong one
+here: what makes a pending set dangerous is the number of distinct missing
+dependencies being tracked and how long they are held, and a thousand one-code-point
+inserts cost the same memory as a thousand large ones. Age is measured from
+when an operation entered the set, not from its arrival, so a cascade that
+releases and re-buffers does not reset the clock.
+
+**Closing for a bound violation must be distinguishable, by the client, from the
+connection dropping.** §13.13: a rejection the rejected party cannot observe is
+not a rejection, and a client that reads "pending set overflowed" as a network
+blip will reconnect and do it again.
+
+### Duplicate delivery
+
+**A client will receive operations it has already applied.** This is guaranteed,
+not incidental: the backplane can deliver the same broadcast twice, catch-up
+after a reconnect re-sends from a version vector that overlaps what was already
+applied, and a client dropped for backpressure (§8) recovers by being sent state
+it partly has. Every one of those paths is required for other reasons.
+
+The server side is covered by the primary key on
+`(document_id, replica_id, seq)`, which makes a duplicate insert a no-op at the
+database (§6). The client side is a decision, and it is made here rather than
+left to be inferred:
+
+> **The client dedupes explicitly before applying, and application remains
+> idempotent underneath it.** Both. Neither alone.
+
+The dedupe is the fast path: an operation whose `Seq` is at or below the highest
+**contiguous** applied sequence for its replica is dropped without being applied,
+and the drop is **counted**. The counter is the point — a sudden rise in
+duplicate deliveries is how a resend loop or a misbehaving backplane announces
+itself, and it is invisible if duplicates are silently absorbed.
+
+Idempotency is the correctness floor, and it is genuinely load-bearing rather
+than belt-and-braces: operations applied out of causal order leave gaps, so the
+contiguous watermark lags what has actually been applied, and a re-delivered
+operation sitting in such a gap passes the dedupe check. It must then be
+harmless. Per §13.14 the floor gets its own test with the fast path disabled.
+
+Two consequences worth stating, because they bind future changes:
+
+- **Applying an operation must stay idempotent.** Applying an insert whose id is
+  already present, or a delete whose target is already tombstoned, is a no-op.
+  Anything added to the apply path that is not idempotent — a counter, an
+  activity log, an undo stack, a metric incremented per operation — breaks a
+  guarantee nothing else checks, and breaks it silently.
+- **Dedupe is not a substitute for causal readiness.** An operation may be new
+  *and* not ready; the two tests are independent, and the dedupe check runs
+  first only because it is cheaper.
+
+The reason this is written down rather than left to the algorithm: CRDT
+idempotency is real, but it is a property of §5's data structure, not a decision
+the transport made. An assumption nobody wrote down breaks silently the first
+time either path changes — and 3b changes both of them.
+
 ### Tombstones and garbage collection
 
 Deleted elements are tombstoned, not removed. Implement GC based on **causal
@@ -523,6 +580,38 @@ be collected on causal stability alone, because a `RightOrigin` can name one
 **Why now, and not in Phase 4.** Phase 4 binds the format into the client's
 IndexedDB schema. After that, changing it is a migration on every user's
 machine; before it, it is a codec swap behind two tests.
+
+#### The hub protocol carries opaque bytes — a constraint, not a description
+
+**The transport protocol frames messages. It does not encode operations.** A hub
+message carries the §6 binary form as an **opaque byte string**, and §6 remains
+the *sole* authoritative encoding of an operation or a snapshot. This holds
+whatever protocol the hub negotiates, MessagePack included.
+
+Concretely, and these are prohibitions rather than preferences:
+
+- An operation, an element, an id, or a version vector **must not** be passed to
+  the transport's serialiser as a structured object, however convenient. It is
+  encoded by §6's codec first and handed over as bytes.
+- The transport's own type system — MessagePack's maps, arrays, extension types,
+  or any successor's — **must not** appear in the definition of what an operation
+  is. A hub method's parameters carry a document id, a replica id, and a byte
+  string; nothing structural travels outside those bytes.
+- **No canonical-form rule may live in the transport layer.** §6 has exactly one
+  set of canonicality rules and one place they are enforced.
+
+The reason is §13.11, which is where the last serious bug came from. Two
+encodings of the same data, each with its own notion of a correct spelling, is
+precisely the shape that produced a rule both implementations read the same way
+and both got wrong. MessagePack is adopted for framing because it moves a byte
+string without base64-inflating it; adopting its *object model* would buy nothing
+and would recreate that shape — a second encoding, with its own canonical form,
+checked against nothing.
+
+Stated as a constraint because the failure is a later convenience rather than a
+present mistake: the moment someone finds it easier to send an object than to
+call the codec, the second encoding exists, and it will look like a
+simplification in the diff that introduces it.
 
 ### Binary encoding — normative layout
 
@@ -1022,17 +1111,44 @@ Treat every one of these as a hard requirement with a corresponding test.
   SignalR messages. Proven by a test that kills an instance mid-session and
   asserts clients still converge.
 
+  **"Converge" is asserted against §9's normalised JSON of each client's full
+  element state — tombstones included — not against the visible text.** Two
+  replicas can render identical text while disagreeing about the tree beneath it,
+  and that disagreement is exactly what produces divergence on the *next*
+  concurrent edit, so comparing rendered text would pass on documents that are
+  already broken. This is the comparison the conformance corpus already makes,
+  which means a convergence failure is diagnosable with the tooling that exists.
+
   "Stateless" was the original wording and it is not achievable: validating an
   operation without loading the document requires a cached version vector.
   Reconstructible is the property that actually matters.
 - Hot path (receive op → validate → persist → broadcast) must not load full
   document state. Validate against the version vector and the referenced parent
   and right origin only.
+- **Broadcast carries `server_seq` and is not ordered by it.** The server assigns
+  `server_seq` under the per-document advisory lock (§6) and sends it with every
+  operation, but the fan-out makes no ordering promise: the backplane does not
+  guarantee order across instances, and building on the assumption that it does
+  would make correctness depend on a property Redis pub/sub does not offer.
+  Ordering is the receiver's problem and it already has the machinery — causal
+  readiness (§5) is what makes an out-of-order arrival safe, and `server_seq` is
+  what makes catch-up queries answerable. Requiring ordered fan-out would also
+  serialise it, which is the opposite of what §8 is for.
 - Batch operation persistence: buffer for up to 50 ms or 100 ops, whichever
   comes first, then write in one round trip under the per-document advisory lock
   (§6).
-- Backpressure: bounded per-connection outbound channel. If a client cannot keep
-  up, drop it to catch-up-via-snapshot rather than growing the buffer unbounded.
+- Backpressure: bounded per-connection outbound channel, **bounded in bytes**,
+  because what exhausts an app server here is buffered payload rather than
+  message count. If a client cannot keep up, drop it to catch-up-via-snapshot
+  rather than growing the buffer unbounded.
+
+  **"Drop to catch-up" means the connection is closed and the client reconnects
+  and resyncs**, not that the server quietly stops sending and hopes. A client
+  that is silently starved cannot tell it is missing operations and will render a
+  document that is wrong without knowing; closing is observable, starving is not
+  (§13.13). The close carries a reason the client can act on, and the client's
+  response is the catch-up path — one of the three guaranteed sources of
+  duplicate delivery (§5).
 - Snapshot compaction and tombstone GC run in a background service, jittered and
   guarded by an advisory lock so multiple instances do not duplicate work.
 
@@ -1291,7 +1407,7 @@ reviewed. At the end of each phase, stop and report.
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
 | 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
-| 3b | Wire protocol decision, causal delivery, scale-out | Protocol settled and measured **before** any throughput number; two real clients converge; an instance killed mid-session and clients still converge |
+| 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test |
@@ -1385,6 +1501,32 @@ Coverage that would be relied on is worse than none.
 
 So: **a test written for a specific defect is not finished until the fix has
 been removed and the test has been seen to fail.**
+
+### Name the vacuity risk before writing the test
+
+**Every task in a phase breakdown states how its test could pass meaninglessly,
+written before the test exists.** Not after, and not as a review step — as part
+of proposing the work.
+
+Sabotage catches a vacuous check afterwards, by breaking the code and watching
+nothing happen. That works and it is why sabotage is a standing practice, but it
+only fires on checks someone thought to sabotage, and it costs a full cycle each
+time. Naming the risk up front is the same question asked earlier and cheaper:
+*what would make this test pass whether or not the code is right?*
+
+The Phase 3b breakdown was the first written this way and it paid immediately.
+The wire-protocol task's stated risk was "measuring `byte[]` length rather than
+the framed message" — which would have shown two protocols as identical, because
+the base64 inflation being measured lives in the frame and not in the payload.
+That measurement would have looked correct, produced a plausible number, and
+decided the protocol wrongly. Nothing about the resulting code would have looked
+wrong afterwards.
+
+A second thing this format surfaces: a task whose risk can only be closed by a
+*later* task is not independently verifiable, and the breakdown should say so
+rather than let it be marked done in isolation. Phase 3b's broadcast task cannot
+be verified without the two-instance test that comes five tasks later, because a
+single-instance broadcast test passes with the backplane doing nothing at all.
 
 ### Hand-written fixtures for every canonical form
 
@@ -2147,6 +2289,39 @@ refused during a scale-out failover, an offline client whose queued operations
 are refused on reconnect. In each case the question is not "did the server
 refuse" but "can the client tell it was refused, and tell it apart from a
 network failure". The second is what needs the test.
+
+### 13.13a MessagePack for framing, and the measurement that decides it
+
+§7 caps a hub message at 64 KB. Phase 3 found that the default JSON hub protocol
+base64-encodes a `byte[]` argument, so 64 KB of message admits roughly 47 KB of
+operations and every keystroke batch pays a third of itself in encoding overhead.
+
+Two fixes were on the table. **Raise the cap to ~88 KB** so 64 KB of payload fits
+inside base64: no protocol change, no client work, no new dependency, and 33% more
+bandwidth forever. Or **switch the hub protocol to MessagePack**, which carries a
+byte string without inflating it.
+
+MessagePack is chosen, on a narrower argument than "binary is better". The hub
+payload is already a single opaque `byte[]` holding §6's format, so MessagePack is
+used for **framing only** — its object model is not used, and §6 stays the sole
+authoritative encoding (see §6, *The hub protocol carries opaque bytes*). The
+alternative reading, where operations become MessagePack objects, would create a
+second encoding with its own canonical-form rules; §13.11 is what happens then.
+
+**The decision is contingent on two measurements, not one.** Wire bytes are the
+obvious one. The second is **client bundle size** with
+`@microsoft/signalr-protocol-msgpack`: bandwidth saved per keystroke is paid for
+once per page load, and on the slow connection this project keeps citing, a
+materially larger bundle is a real cost in the same currency. Both figures get
+reported, and the choice is made against both. If the bundle cost turns out to
+dominate, raising the cap is the honest answer and this entry gets amended rather
+than quietly ignored.
+
+The measurement itself carries the trap: **the inflation lives in the frame, not
+in the payload.** Measuring `byte[]` length would show the two protocols as
+identical and decide this wrongly, with a plausible number and nothing about the
+result looking wrong afterwards. What gets measured is the framed message on the
+wire.
 
 ### 13.14 Test a bound where it is the only guarantee
 
