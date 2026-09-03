@@ -1507,7 +1507,7 @@ reviewed. At the end of each phase, stop and report.
 | 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
-| 6 | Security hardening | Every requirement in §7 has a passing test |
+| 6 | Security hardening | Every requirement in §7 has a passing test; **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
 | 7 | Scale + observability | Load test hits the §8 targets; dashboards exist |
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
@@ -1627,11 +1627,35 @@ That measurement would have looked correct, produced a plausible number, and
 decided the protocol wrongly. Nothing about the resulting code would have looked
 wrong afterwards.
 
-A second thing this format surfaces: a task whose risk can only be closed by a
-*later* task is not independently verifiable, and the breakdown should say so
-rather than let it be marked done in isolation. Phase 3b's broadcast task cannot
-be verified without the two-instance test that comes five tasks later, because a
-single-instance broadcast test passes with the backplane doing nothing at all.
+A second thing this format surfaces: **a task whose verification needs
+infrastructure that does not exist yet is written, not done.** The breakdown says
+so, and the task stays open until the later task closes it, rather than being
+marked complete on the strength of a suite that cannot fail.
+
+3b.2 is the worked example and it paid. Its broadcast tests could not distinguish
+per-instance fan-out from a working backplane, so they were held open until
+3b.7's two-instance test existed — and the fan-out really was per-instance. A
+client connected to another server received nothing. Sabotaging the publish
+fails four of 3b.7's five tests and would have failed none of 3b.2's. Marked
+done in isolation, that ships covered by green tests until Phase 7's load
+testing puts two instances behind one load balancer.
+
+### A guard runs on a schedule something else keeps
+
+**A check whose invocation is a judgement call is a check that is skipped exactly
+when it matters.** Attach every guard to something that happens anyway.
+
+§12's phase preflight was built after Phase 2.5's six silent red pushes, for
+precisely the failure that then recurred across seven tasks of Phase 3b
+(§13.20). The tool was not missing. Running it was left to discretion, and
+discretion said "the local suite is green" seven times.
+
+So the fix for that class is never a stronger intention. `check-workflows.sh`
+detects the specific defect, but the reason it will keep working is where it
+sits: first among the preflight's local gates, and the preflight runs at every
+task boundary rather than at the phase report. The same shape applies to any
+guard added later — bind it to the commit, the gate, or the build, not to
+someone remembering it is relevant.
 
 ### Hand-written fixtures for every canonical form
 
@@ -2549,6 +2573,11 @@ happen. Not "and the document still matches".
 This is what §12's vacuity rule is for at the level of a single mechanism, and
 what the sabotage practice catches when the rule was not applied.
 
+**Its next instance was this same counter** (§13.21). `DuplicatesDropped` was
+asserted directly, in three suites — and not in the one the mutation gate
+drives, so the gate saw a counter nothing asserted and said so the first time it
+ran. Assert the mechanism directly, *in the suite that measures it*.
+
 ### 13.16 The server has no pending set, and a query that matched nothing
 
 Two findings from 3b.4, related only in that the second was found while
@@ -2718,12 +2747,32 @@ needed the argument belongs in §7 before the code.
 The general point is the one worth keeping. **A guard written as a pattern match
 covers the instances of the pattern, not the property.** It is easy to read such
 a guard as enforcing the rule, because the rule is what its name says; what it
-actually enforces is "nobody wrote it that way". Every scanner in this project
-is in that position — the redaction sentinel, the architecture test, this one —
-and the only way to find the gap is to try to defeat it, which is what sabotage
-is for. This one had gone unexamined for a phase and a half because it had never
-been the target: the sabotages that found things were aimed at the code the
-check protects, not at the check itself.
+actually enforces is "nobody wrote it that way". This one had gone unexamined
+for a phase and a half because it had never been the target: the sabotages that
+found things were aimed at the code the check protects, not at the check itself.
+
+**Every textual guard in this repository has the same weakness.** The
+architecture test looks for project references; a reflection-loaded assembly is
+not one. The secret scan looks for secret-shaped strings; a credential assembled
+from parts at runtime is not one. The redaction sentinel looks for a sentinel
+value; a field that reaches the log by a path the sentinel never travels is not
+one. Each checks an instance and is read as checking the property.
+
+**Scheduled: a guard audit pass**, asking of each check in turn — the
+architecture test, the secret scan, the redaction sentinel, the mutation
+ratchet, the workflow check, this one — *what is the `SignatureValidator`
+equivalent here? What defeats this without matching its pattern?* It is a
+distinct piece of work rather than a note, because the answer for each guard is
+specific and reading the guard is not how the answer is found.
+
+Which is the strongest justification the sabotage practice has yet had.
+**Sabotage is the only technique in this project that tests a property rather
+than a pattern.** Every other check — the scanners above, the type system, the
+tests themselves — asserts something written down in advance, and therefore
+asserts the form it was written in. Sabotage asks the different question: given
+an implementation that is actually wrong, does anything go red? It is the only
+one that can discover the gap between "the guard matches" and "the guard holds",
+because it approaches from outside the guard's own vocabulary.
 
 ### 13.20 Seven tasks reported against a workflow that never ran
 
@@ -2805,6 +2854,13 @@ to be asserted directly. It *was* asserted — in `Editor.Api.Tests` and in the
 TypeScript suite, but not in `Crdt.Core.Tests`, which is the only suite the
 mutation gate drives. The watermark-path increment had no assertion where it is
 measured, and the gate said so the first time it was allowed to run.
+
+Worth reading with §13.15 rather than beside it: that entry named a class of
+defect, and this is that class producing its next instance, in the very
+mechanism the entry was written about. "Assert the mechanism directly" turns out
+to carry an unstated second half — *in the suite that measures it*. A counter
+asserted in three suites and unasserted in the one the gate drives is, to the
+gate, a counter nothing asserts.
 
 The general rule: **a ratchet's key has to be as stable as the property it
 tracks.** A key that moves for reasons unrelated to the property produces false
