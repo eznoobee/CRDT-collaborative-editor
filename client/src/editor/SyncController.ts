@@ -1,5 +1,6 @@
 import { Replica, decodeSnapshot, parseReplicaId } from '../crdt';
 import { Backoff, DEFAULT_BACKOFF, type BackoffOptions } from './backoff';
+import { recoveryFor } from './rejections';
 import type { DocumentSession } from './DocumentSession';
 
 /** What the server answered a submission with (§7). */
@@ -50,6 +51,18 @@ export interface Transport {
 /** How the controller reports what it is doing (§9, §13.13). */
 export type SyncState = 'offline' | 'connecting' | 'live' | 'stopped';
 
+/**
+ * A refusal the user has to be told about (§9, §13.13).
+ *
+ * @param code - The server's code, verbatim, so a report names it.
+ * @param lost - Operations discarded as unrecoverable. Non-zero only for a
+ * resync, which is §5's one exception to "do not drop".
+ */
+export interface SyncProblem {
+  readonly code: string;
+  readonly lost: number;
+}
+
 export interface SyncOptions {
   readonly backoff?: BackoffOptions;
   readonly random?: () => number;
@@ -87,6 +100,9 @@ export class SyncController {
   private current: SyncState = 'offline';
   private stopped = false;
   private draining = false;
+  private problemState: SyncProblem | null = null;
+  private readOnlyState = false;
+  private retried = new Set<string>();
 
   constructor(
     session: DocumentSession,
@@ -123,6 +139,23 @@ export class SyncController {
 
   get state(): SyncState {
     return this.current;
+  }
+
+  /**
+   * The refusal the user needs to see, if any.
+   *
+   * @remarks
+   * §13.13: a rejection the rejected party cannot observe is not a rejection.
+   * Every code the server can return sets this, so no refusal reaches the
+   * client and stops there.
+   */
+  get problem(): SyncProblem | null {
+    return this.problemState;
+  }
+
+  /** Whether this client may still author (§7's mid-session demotion). */
+  get readOnly(): boolean {
+    return this.readOnlyState;
   }
 
   /** Batches authored and not yet accepted, oldest first. */
@@ -186,6 +219,12 @@ export class SyncController {
     this.replicaId = session.replicaId;
     this.backoff.reset();
 
+    // Cleared on a connection that succeeded. The server re-reads the role at
+    // negotiate, so a demotion that has been reversed should not leave the
+    // client read-only until it reloads — and one that has not will refuse the
+    // first submission again, which restores this immediately.
+    this.readOnlyState = false;
+
     await this.reconcile(refused);
 
     this.setState('live');
@@ -247,7 +286,12 @@ export class SyncController {
 
     this.draining = true;
     try {
-      while (this.outbox.length > 0 && this.current === 'live' && !this.stopped) {
+      while (
+        this.outbox.length > 0
+        && this.current === 'live'
+        && !this.stopped
+        && !this.readOnlyState
+      ) {
         const batch = this.outbox[0]!;
 
         let outcome: SubmitOutcome;
@@ -261,18 +305,98 @@ export class SyncController {
         }
 
         if (outcome.code !== null) {
-          // 4.6 turns each code into its own recovery. Until then the batch
-          // stays queued rather than being silently discarded, because
-          // discarding is the one outcome that loses a user's work.
-          return;
+          // The recovery says whether this loop keeps going. Calling drain
+          // again from inside it would hit the re-entrancy guard and silently
+          // do nothing, which is how "retries once" becomes "never retries".
+          if (await this.recover(outcome.code, batch) === 'halt') {
+            return;
+          }
+
+          continue;
         }
 
         this.outbox.shift();
+
+        // Cleared only on an acceptance. A batch that succeeded after a
+        // catch-up is the case the retry budget exists for; leaving it marked
+        // would make the next unrelated unknown_origin unrecoverable.
+        this.retried.delete(key(batch));
         this.changed();
       }
     } finally {
       this.draining = false;
     }
+  }
+
+  /**
+   * Acts on one refusal, per §9's table.
+   *
+   * @remarks
+   * The batch is never discarded except by a resync, which §5 names as its one
+   * exception to "do not drop" — and which reports what was lost, because
+   * losing a user's unsent work silently is the failure this whole path exists
+   * to avoid.
+   */
+  private async recover(code: string, batch: Uint8Array): Promise<'continue' | 'halt'> {
+    switch (recoveryFor(code)) {
+      case 'catch-up-and-retry': {
+        // The server does not have something this batch references. Once, and
+        // once only: a second occurrence after a successful catch-up is a bug
+        // in this client, and retrying a bug forever is a loop that looks like
+        // a network problem.
+        const seen = key(batch);
+        if (this.retried.has(seen)) {
+          this.fail(code, 0);
+          return 'halt';
+        }
+
+        this.retried.add(seen);
+        await this.reconcile(false);
+        return 'continue';
+      }
+
+      case 'resync': {
+        // §5's GC watermark passed the elements this batch refers to. They are
+        // gone from the server and cannot be reconstructed, so the work is
+        // lost — and the number is reported rather than the queue quietly
+        // emptying.
+        const lost = this.outbox.length;
+        this.outbox = [];
+        await this.reconcile(true);
+        this.fail(code, lost);
+        return 'halt';
+      }
+
+      case 'read-only':
+        // Demoted mid-session (§7). Still connected, still receiving, no longer
+        // authoring — and the outbox is kept, because the work may become
+        // submittable again if the role is restored.
+        this.readOnlyState = true;
+        this.fail(code, 0);
+        return 'halt';
+
+      case 'reconnect':
+        // Expected to clear on its own: a replica slot freeing up, a ticket
+        // being reissued. The outbox survives the reconnection.
+        this.fail(code, 0);
+        this.setState('offline');
+        this.retry();
+        return 'halt';
+
+      case 'stop':
+      default:
+        // Retrying cannot help. The outbox is kept for diagnosis rather than
+        // discarded, because it is the evidence.
+        this.fail(code, 0);
+        this.stopped = true;
+        this.setState('stopped');
+        return 'halt';
+    }
+  }
+
+  private fail(code: string, lost: number): void {
+    this.problemState = { code, lost };
+    this.changed();
   }
 
   private retry(): void {
@@ -293,4 +417,17 @@ export class SyncController {
       listener();
     }
   }
+}
+
+/**
+ * Identifies a batch for the retry budget.
+ *
+ * @remarks
+ * The bytes, not the object. A batch rebuilt from the store after a reload is a
+ * different object and the same work, and a budget keyed on identity would give
+ * it a fresh retry on every page load — which is the loop the budget exists to
+ * stop.
+ */
+function key(batch: Uint8Array): string {
+  return Array.from(batch).join(',');
 }
