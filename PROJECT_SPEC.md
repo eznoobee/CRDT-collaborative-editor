@@ -329,9 +329,26 @@ applies it twice when the gap closes.
 Idempotent application is the floor beneath both. It is not currently reachable:
 between the watermark and the pending set, no duplicate gets as far as being
 applied. It is stated as a constraint rather than a tested path precisely
-because of that — the day readiness is relaxed to apply an operation whose
-dependencies exist despite a sequence gap, the watermark becomes an
-approximation and the floor becomes the only thing left.
+because of that — a test for an unreachable path asserts nothing, and writing
+one would be §12's vacuity risk landing on a specification claim rather than on
+code.
+
+> **The trigger.** If the density rule in readiness is ever relaxed — if an
+> operation is applied because its structural dependencies are present, despite
+> skipping a sequence number — then the applied set acquires per-replica gaps,
+> the watermark stops being a complete test for "already applied", and
+> **idempotent application moves from constraint to load-bearing.** At that
+> point it needs its own tests, and they must land in the same change, not
+> after it.
+
+That is written as a trigger rather than a caution because of how the change
+would arrive. Relaxing readiness looks like a latency optimisation — an
+operation that could be applied now is being made to wait — and it is local, one
+comparison in one method. Nothing at the site of the change mentions duplicate
+detection. The coupling is pinned from the readiness side, in
+`CausalReadinessTests` on both implementations, so the relaxation fails a test
+that explains why; this paragraph is what that test's failure should send the
+reader to.
 
 Three consequences worth stating, because they bind future changes:
 
@@ -2426,3 +2443,41 @@ This generalises past caches. Anywhere this system has a fast path and a
 correctness floor — causal delivery's buffer against its resend, a reconnecting
 client's delta against a full snapshot — the floor gets its own test with the
 fast path switched off.
+
+### 13.15 A mechanism whose absence still converges must be asserted directly
+
+**Wherever removing a mechanism leaves the system still producing the right
+answer, that mechanism has to be observable and asserted on its own terms. Never
+inferred from the outcome.**
+
+This is the third form of one discovery, and writing it once generally is
+overdue.
+
+- **§13.7, the mutation gate.** Stryker reported 0.00% across 227 mutants and
+  exited zero while the same suite killed those mutations by hand. The suite's
+  *outcome* — green — was identical whether or not the gate was measuring
+  anything.
+- **§13.11, the canonical-form bug.** Two implementations agreed byte for byte
+  on every trace in the corpus. The agreement was real and the shared reading of
+  §6 was wrong; only deliberately breaking one side showed that the comparison
+  could not have noticed.
+- **§5's duplicate counter.** Delete the dedupe entirely and every convergence
+  test still passes, because the CRDT is idempotent and re-applying a duplicate
+  is a no-op. The mechanism's whole purpose is to make a resend loop *visible*,
+  and a resend loop is invisible in the outcome by construction.
+
+The common shape: the observable result is the same on both sides of the change,
+so no assertion phrased in terms of the result can distinguish them. Convergence
+is the weakest of these — it holds under a large family of wrong
+implementations, including several that do no work at all — which is exactly why
+it is the assertion that feels most reassuring to write.
+
+The rule in practice: when adding a mechanism, ask what test fails if it is
+deleted. If the honest answer is "none, the system still gets the right answer",
+then either the mechanism is unnecessary, or it exists for an operational reason
+— speed, load, a signal for a human — and that reason is what has to be measured
+and asserted. Counting the drops, timing the path, or asserting the call did not
+happen. Not "and the document still matches".
+
+This is what §12's vacuity rule is for at the level of a single mechanism, and
+what the sabotage practice catches when the rule was not applied.
