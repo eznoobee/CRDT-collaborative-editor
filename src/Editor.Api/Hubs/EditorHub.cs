@@ -21,6 +21,8 @@ public sealed partial class EditorHub : Hub
     /// <summary>The client method a fanned-out batch arrives on.</summary>
     public const string Broadcast = "ReceiveOperations";
 
+    private readonly DocumentBroadcaster _broadcaster;
+    private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
@@ -29,6 +31,8 @@ public sealed partial class EditorHub : Hub
     private readonly ILogger<EditorHub> _logger;
 
     public EditorHub(
+        DocumentBroadcaster broadcaster,
+        DocumentConnections connections,
         IConnectTicketStore tickets,
         IDocumentRoles roles,
         IngestValidator validator,
@@ -36,6 +40,8 @@ public sealed partial class EditorHub : Hub
         OperationLogBatcher log,
         ILogger<EditorHub> logger)
     {
+        ArgumentNullException.ThrowIfNull(broadcaster);
+        ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(validator);
@@ -43,12 +49,24 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(logger);
 
+        _broadcaster = broadcaster;
+        _connections = connections;
         _tickets = tickets;
         _roles = roles;
         _validator = validator;
         _state = state;
         _log = log;
         _logger = logger;
+    }
+
+    public override Task OnDisconnectedAsync(Exception? exception)
+    {
+        if (TryGetBinding(out var binding))
+        {
+            _connections.Remove(binding.DocumentId, Context.ConnectionId);
+        }
+
+        return base.OnDisconnectedAsync(exception);
     }
 
     public override async Task OnConnectedAsync()
@@ -75,6 +93,8 @@ public sealed partial class EditorHub : Hub
         }
 
         Context.Items[BindingKey] = binding.Value;
+        _connections.Add(binding.Value.DocumentId, Context.ConnectionId, Context.Abort);
+
         await Groups.AddToGroupAsync(Context.ConnectionId, Group(binding.Value.DocumentId))
             .ConfigureAwait(false);
 
@@ -160,16 +180,28 @@ public sealed partial class EditorHub : Hub
         // operation the server then failed to persist would hold state no
         // amount of reconnecting could recover, because catch-up reads the log.
         //
-        // The sender is excluded because it already has these operations. That
-        // is an optimisation and not a correctness requirement — §5 makes
-        // re-delivery harmless — but the exclusion is asserted, because a hub
-        // echoing every batch to its author doubles fan-out for nothing.
-        await Clients.GroupExcept(Group(binding.DocumentId), Context.ConnectionId)
-            .SendAsync(
-                Broadcast,
-                new OperationBroadcast(binding.DocumentId, batch.Operations, appended.HighestServerSeq),
-                Context.ConnectionAborted)
-            .ConfigureAwait(false);
+        // Sent per connection rather than to the SignalR group, because §8
+        // requires a slow client to be dropped rather than waited for and a
+        // group send exposes no per-connection timeout. The sender is excluded
+        // because it already has these operations — an optimisation, not a
+        // correctness requirement, since §5 makes re-delivery harmless.
+        var message = new OperationBroadcast(
+            binding.DocumentId, batch.Operations, appended.HighestServerSeq);
+
+        await _broadcaster.FanOutAsync(
+            _connections.Others(binding.DocumentId, Context.ConnectionId),
+            (connection, token) => Clients.Client(connection).SendAsync(Broadcast, message, token),
+            connection =>
+            {
+                // §8: dropped to catch-up, which means closed. A client that is
+                // silently starved renders a document that is wrong without
+                // knowing; a closed connection is something it can act on, and
+                // its resync path is catch-up by version vector.
+                Log.BackpressureDrop(_logger, binding.DocumentId, connection);
+                _connections.Abort(binding.DocumentId, connection);
+                return Task.CompletedTask;
+            },
+            Context.ConnectionAborted).ConfigureAwait(false);
 
         return SubmitResult.Ok(operations.Count);
     }
@@ -191,6 +223,12 @@ public sealed partial class EditorHub : Hub
 
     private static partial class Log
     {
+        [LoggerMessage(
+            EventId = 3402,
+            Level = LogLevel.Warning,
+            Message = "Dropped connection {ConnectionId} on document {DocumentId} for backpressure.")]
+        public static partial void BackpressureDrop(ILogger logger, Guid documentId, string connectionId);
+
         [LoggerMessage(
             EventId = 3401,
             Level = LogLevel.Warning,

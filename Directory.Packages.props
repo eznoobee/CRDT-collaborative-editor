@@ -1,17 +1,15 @@
 <Project>
-
   <!-- Central package management. Versions live here only; project files
        reference packages without a Version attribute. -->
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-
   <ItemGroup Label="Testing">
     <!-- Two test stacks on purpose; AGENTS.md explains which is which.
          Editor.Api.Tests and Conformance run on xunit.v3 under
          Microsoft.Testing.Platform, which is what .NET 10 expects. -->
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.0.0" />
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
-
     <!-- Crdt.Core.Tests runs on xunit v2 under VSTest, because Stryker drives
          VSTest and does not support Microsoft.Testing.Platform
          (stryker-net#3094). Mutation score is the only check on Crdt.Core that
@@ -20,7 +18,6 @@
     <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
   </ItemGroup>
-
   <ItemGroup Label="Persistence">
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
@@ -31,7 +28,6 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
   </ItemGroup>
-
   <ItemGroup Label="Transport and auth">
     <!-- Approved for Phase 3 (PROJECT_SPEC.md §7, §8). JwtBearer validates the
          OIDC tokens; the Redis backplane fans SignalR out across instances so
@@ -44,7 +40,6 @@
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Protocols.MessagePack" Version="10.0.11" />
     <PackageVersion Include="StackExchange.Redis" Version="2.9.38" />
   </ItemGroup>
-
   <ItemGroup Label="Integration testing">
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
     <!-- Drives the hub the way a browser does, so the connect-ticket handshake
@@ -53,5 +48,4 @@
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.14.0" />
     <PackageVersion Include="Testcontainers.Redis" Version="4.14.0" />
   </ItemGroup>
-
 </Project>

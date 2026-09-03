@@ -1,3 +1,4 @@
+using Editor.Api.Hubs;
 using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Tickets;
 using Microsoft.AspNetCore.SignalR;
@@ -76,6 +77,16 @@ public static class RedisExtensions
         // broadcasts it should receive routinely land on different instances.
         // The backplane is what makes that work; without it a document is only
         // collaborative among the clients that happened to hit one server.
+        services.AddOptions<BackpressureOptions>()
+            .Bind(configuration.GetSection(BackpressureOptions.Section))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        services.AddSingleton<DocumentConnections>();
+        services.AddSingleton(provider => new DocumentBroadcaster(
+            provider.GetRequiredService<IOptions<BackpressureOptions>>().Value,
+            provider.GetRequiredService<TimeProvider>()));
+
         services.AddSignalR()
             // Framing only (§6, §13.13a). The payload stays an opaque byte
             // string in §6's format; MessagePack's object model is not used and
