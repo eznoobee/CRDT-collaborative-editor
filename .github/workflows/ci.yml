@@ -150,6 +150,7 @@ jobs:
       # this phase.
       - name: Measure
         run: node measure.mjs
+        working-directory: tests/browser
 
       - name: Client bundle size (§13.13a)
         # The second figure the protocol decision rests on. Reported, not
@@ -159,7 +160,6 @@ jobs:
         run: |
           npm --prefix ../../client ci
           node bundle-metrics.mjs
-        working-directory: tests/browser
 
   mutation:
     name: Crdt.Core mutation score

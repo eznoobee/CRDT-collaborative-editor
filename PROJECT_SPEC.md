@@ -2724,3 +2724,49 @@ and the only way to find the gap is to try to defeat it, which is what sabotage
 is for. This one had gone unexamined for a phase and a half because it had never
 been the target: the sabotages that found things were aimed at the code the
 check protects, not at the check itself.
+
+### 13.20 Seven tasks reported against a workflow that never ran
+
+Editing `ci.yml` during 3b.1 inserted a step above a trailing
+`working-directory:` line that belonged to the step before it, leaving two
+`working-directory` keys on one step. GitHub Actions rejects a duplicate mapping
+key and fails the run before scheduling anything.
+
+Every push from 3b.1 through 3b.8 was a startup failure. Eight jobs — the .NET
+suite, cross-implementation conformance, the mutation gate, the secret scan —
+did not run at all for seven consecutive tasks, each of which was reported as
+complete.
+
+Nothing about that is visible without going and looking. A startup failure has
+no failing step, no log, and no annotation; the run list shows a red mark like
+any other. Its one tell is cosmetic: with the file unparseable the run cannot
+read the workflow's `name:`, so it is listed by path instead — `.github/workflows/ci.yml`
+where every green run above it says `CI`. And locally nothing goes red, because
+no local tool reads this file. Even a YAML parser is no help: PyYAML, and every
+other library in common use, accepts duplicate keys silently with the last value
+winning. "It parses" was true and meant nothing.
+
+Two things follow, and only the second is new.
+
+**§12's preflight already covers this and was not run.** It requires a status
+file naming the pushed commit and refuses one that lists no jobs — which is
+exactly what these runs produced. The rule existed, was written after the same
+class of failure in Phase 2.5 (§12), and was skipped for seven tasks because
+each one ended in a local green suite that felt like enough. A gate that is only
+consulted when someone remembers is not a gate; the preflight is now run at
+every task boundary rather than at the phase report.
+
+**And the failure should never have needed a remote check to find.** A workflow
+file that the CI provider will reject is a local defect in a local file, and
+`scripts/check-workflows.sh` now fails on it before the push — duplicate keys
+specifically, plus a missing `name`, since an unnamed workflow is listed by path
+and therefore looks exactly like a startup failure in the one place the
+difference shows. It runs first among the preflight's local gates, because a
+green job table is meaningless if the run that produced it executed nothing.
+
+The wider point is the one §13.17 made about the sabotage harness, arriving from
+the other direction: **the machinery that reports on the work is not covered by
+the work's own tests.** A test suite says nothing about whether CI ran it. Both
+findings are the same shape — an apparatus trusted because its output looked
+normal — and in both cases the output was normal precisely because nothing had
+happened.

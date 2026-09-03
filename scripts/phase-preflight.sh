@@ -124,9 +124,14 @@ run_gate() {
   fi
 }
 
+# First, because a workflow GitHub cannot parse means the job table above came
+# from a run that executed nothing — and an empty run reports failure with no
+# failing step to look at.
+run_gate "workflows" ./scripts/check-workflows.sh
 run_gate "format" dotnet format --verify-no-changes
 run_gate "tests" ./scripts/run-tests.sh
 run_gate "conformance" ./scripts/conformance.sh
+run_gate "interop" ./scripts/interop.sh
 run_gate "mutation" ./scripts/mutation.sh
 
 if [[ ${#failures[@]} -gt 0 ]]; then
