@@ -40,6 +40,15 @@ export class Replica {
   private readonly versionVectorByKey = new Map<string, { replica: ReplicaId; count: bigint }>();
   private readonly log: Operation[] = [];
   private pending: Operation[] = [];
+
+  /**
+   * Operations discarded because this replica had already applied or buffered
+   * them.
+   *
+   * Diagnostic, not a health check. §5 guarantees this is non-zero in normal
+   * operation; what is worth alerting on is its rate.
+   */
+  duplicatesDropped = 0;
   private nextSeq = 0n;
 
   constructor(id: ReplicaId) {
@@ -263,11 +272,23 @@ export class Replica {
 
   apply(operation: Operation): void {
     if (this.hasSeen(operation)) {
+      // Counted, not merely skipped (§5). Duplicate delivery is guaranteed —
+      // the backplane can repeat a broadcast, catch-up re-sends what a client
+      // already has, a client dropped for backpressure recovers by being resent
+      // state — so this is never zero and is not itself a problem. A sudden
+      // rise in it is how a resend loop announces itself, and that signal does
+      // not exist if duplicates are silently absorbed.
+      this.duplicatesDropped += 1;
       return;
     }
 
     if (!this.isReady(operation)) {
-      if (!this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+      if (this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+        // Already buffered. This is the duplicate the watermark cannot see,
+        // because the operation has not been applied yet, and buffering it
+        // twice would apply it twice when the gap closes.
+        this.duplicatesDropped += 1;
+      } else {
         this.pending.push(operation);
       }
       return;

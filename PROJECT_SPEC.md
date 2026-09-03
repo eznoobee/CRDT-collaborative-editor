@@ -304,19 +304,36 @@ left to be inferred:
 > **The client dedupes explicitly before applying, and application remains
 > idempotent underneath it.** Both. Neither alone.
 
-The dedupe is the fast path: an operation whose `Seq` is at or below the highest
-**contiguous** applied sequence for its replica is dropped without being applied,
-and the drop is **counted**. The counter is the point — a sudden rise in
-duplicate deliveries is how a resend loop or a misbehaving backplane announces
-itself, and it is invisible if duplicates are silently absorbed.
+The dedupe is the fast path: an operation whose `Seq` is below the applied
+watermark for its replica is dropped without being applied, and the drop is
+**counted**. The counter is the point — a sudden rise in duplicate deliveries is
+how a resend loop or a misbehaving backplane announces itself, and it is
+invisible if duplicates are silently absorbed.
 
-Idempotency is the correctness floor, and it is genuinely load-bearing rather
-than belt-and-braces: operations applied out of causal order leave gaps, so the
-contiguous watermark lags what has actually been applied, and a re-delivered
-operation sitting in such a gap passes the dedupe check. It must then be
-harmless. Per §13.14 the floor gets its own test with the fast path disabled.
+**That watermark test is complete, and the reason is worth writing down because
+it is not local.** Readiness requires the *exact* next sequence number for the
+replica, not merely that an operation's structural dependencies are present. So
+a replica's operations are applied strictly in order, the applied set never
+contains a per-replica gap, and "below the watermark" is exactly "already
+applied" rather than an approximation of it. The two rules are coupled across
+two private methods and nothing about either says so, which is why
+`CausalReadinessTests` pins it: an operation whose only structural dependency is
+the root is still buffered when it skips a sequence number.
 
-Two consequences worth stating, because they bind future changes:
+**The second check is the pending set's, and it is the one that is genuinely
+load-bearing.** A duplicate that arrives while the original is still buffered is
+below no watermark — it has not been applied — so the watermark says nothing
+about it, and the pending set has to recognise it by id. Buffering it twice
+applies it twice when the gap closes.
+
+Idempotent application is the floor beneath both. It is not currently reachable:
+between the watermark and the pending set, no duplicate gets as far as being
+applied. It is stated as a constraint rather than a tested path precisely
+because of that — the day readiness is relaxed to apply an operation whose
+dependencies exist despite a sequence gap, the watermark becomes an
+approximation and the floor becomes the only thing left.
+
+Three consequences worth stating, because they bind future changes:
 
 - **Applying an operation must stay idempotent.** Applying an insert whose id is
   already present, or a delete whose target is already tombstoned, is a no-op.
@@ -326,6 +343,10 @@ Two consequences worth stating, because they bind future changes:
 - **Dedupe is not a substitute for causal readiness.** An operation may be new
   *and* not ready; the two tests are independent, and the dedupe check runs
   first only because it is cheaper.
+- **Relaxing readiness is not a local change.** Applying an operation whose
+  structural dependencies are present but whose sequence skips one looks like a
+  latency optimisation and would silently break duplicate detection, because the
+  watermark test depends on density holding at apply time.
 
 The reason this is written down rather than left to the algorithm: CRDT
 idempotency is real, but it is a property of §5's data structure, not a decision

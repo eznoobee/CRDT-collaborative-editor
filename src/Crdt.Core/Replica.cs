@@ -123,6 +123,15 @@ public sealed class Replica
     public int PendingCount => _pending.Count;
 
     /// <summary>
+    /// Operations discarded because this replica had already applied them.
+    /// </summary>
+    /// <remarks>
+    /// Diagnostic, not a health check. §5 guarantees this is non-zero in normal
+    /// operation; what is worth alerting on is its rate.
+    /// </remarks>
+    public long DuplicatesDropped { get; private set; }
+
+    /// <summary>
     /// Inserts <paramref name="value"/> at <paramref name="index"/> in the
     /// visible text, applying it locally and returning the operation to broadcast.
     /// </summary>
@@ -198,12 +207,27 @@ public sealed class Replica
 
         if (HasSeen(operation))
         {
+            // Counted, not merely skipped (§5). Duplicate delivery is
+            // guaranteed — the backplane can repeat a broadcast, catch-up
+            // re-sends what a client already has, a client dropped for
+            // backpressure recovers by being resent state — so the number is
+            // never zero and is not itself a problem. A sudden rise in it is
+            // how a resend loop announces itself, and that signal does not
+            // exist if duplicates are silently absorbed.
+            DuplicatesDropped++;
             return;
         }
 
         if (!IsReady(operation))
         {
-            if (!_pending.Any(p => p.Id.Equals(operation.Id)))
+            if (_pending.Any(p => p.Id.Equals(operation.Id)))
+            {
+                // Already buffered. This is the duplicate the watermark cannot
+                // see, because the operation has not been applied yet (§5), and
+                // buffering it twice would apply it twice when the gap closes.
+                DuplicatesDropped++;
+            }
+            else
             {
                 _pending.Add(operation);
             }

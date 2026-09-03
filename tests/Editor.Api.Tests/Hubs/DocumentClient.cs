@@ -1,8 +1,11 @@
 using System.Net.Http.Json;
 using System.Threading.Channels;
+using Crdt.Core;
 using Editor.Api.Hubs;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
+using Editor.Infrastructure.Persistence;
+using Editor.Infrastructure.Serialization;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
@@ -34,6 +37,7 @@ public sealed class DocumentClient : IAsyncDisposable
         Connection = connection;
         Negotiated = negotiated;
         Writer = new ReplicaWriter(negotiated.ReplicaId);
+        Replica = new Replica(ReplicaIdConversion.FromGuid(negotiated.ReplicaId));
     }
 
     public HubConnection Connection { get; }
@@ -42,6 +46,41 @@ public sealed class DocumentClient : IAsyncDisposable
 
     /// <summary>Produces this client's own operations, in sequence.</summary>
     public ReplicaWriter Writer { get; }
+
+    /// <summary>
+    /// This client's own copy of the document, as a real replica.
+    /// </summary>
+    /// <remarks>
+    /// Operations are applied into it explicitly by the test rather than
+    /// automatically on arrival, because the order in which a test applies them
+    /// is the variable under test: §8 makes broadcast unordered, so a test that
+    /// applied in arrival order would only ever exercise the order this
+    /// particular run happened to produce.
+    /// </remarks>
+    public Replica Replica { get; }
+
+    /// <summary>§9's normalised form of what this client believes the document is.</summary>
+    public string Normalised => SnapshotSerializer.Serialize(Replica);
+
+    /// <summary>Decodes a broadcast and applies it to <see cref="Replica"/>.</summary>
+    public void Apply(OperationBroadcast broadcast)
+    {
+        ArgumentNullException.ThrowIfNull(broadcast);
+
+        foreach (var operation in OperationBinary.Decode(broadcast.Operations))
+        {
+            Replica.Apply(operation);
+        }
+    }
+
+    /// <summary>Applies this client's own batch, as a real client would locally.</summary>
+    public void ApplyLocal(byte[] operations)
+    {
+        foreach (var operation in OperationBinary.Decode(operations))
+        {
+            Replica.Apply(operation);
+        }
+    }
 
     /// <summary>Everything received so far, in arrival order.</summary>
     public IReadOnlyList<OperationBroadcast> Received
