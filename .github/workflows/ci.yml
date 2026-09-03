@@ -69,6 +69,63 @@ jobs:
       # PROJECT_SPEC.md §9: any divergence between the two cores fails the build.
       - run: ./scripts/conformance.sh
 
+  interop:
+    name: TypeScript core against the running server
+    runs-on: ubuntu-latest
+
+    # Real infrastructure, because the point of this job is that nothing is
+    # simulated: §9's conformance runner compares two files and the .NET suite
+    # drives the server in memory, and neither can fail the way a deployment
+    # fails.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: editor
+          POSTGRES_PASSWORD: editor
+          POSTGRES_DB: editor
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U editor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      # The harness seeds memberships directly, because there is no admin API
+      # yet to create a document through.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Interop
+        env:
+          EDITOR_TEST_POSTGRES: "Host=localhost;Port=5432;Username=editor;Password=editor;Database=editor"
+          EDITOR_TEST_REDIS: "localhost:6379"
+        run: ./scripts/interop.sh
+
   browser-metrics:
     name: Browser document load metric
     runs-on: ubuntu-latest

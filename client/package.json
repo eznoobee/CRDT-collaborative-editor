@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --build --force",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:interop": "vitest run --config vitest.interop.config.ts"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.11",

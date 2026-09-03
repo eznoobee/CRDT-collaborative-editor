@@ -1310,6 +1310,31 @@ runner is a vitest suite. Neither invokes the other — coupling the .NET test r
 to a Node toolchain buys nothing and makes each side harder to run alone. The
 comparison is a third step over two artefacts.
 
+**And a second check the corpus cannot make: the two implementations meeting
+over a real socket.** The conformance runner compares two files; it never opens
+a connection, never frames a message, and never exercises the path where one
+implementation's bytes reach the other's decoder. Neither does the .NET suite,
+which drives the server over an in-memory transport with the C# core on both
+ends — an arrangement that agrees with itself by construction.
+
+So the interop suite starts the published API as its own process and connects
+the TypeScript core to it over TCP, with three requirements that are what make
+it worth running:
+
+- **The harness uses the shipped core's own codec.** A second encoder written
+  for the test would check the harness against the server rather than the
+  product against it.
+- **The decisive assertion is on bytes the server produced** — above all the §6
+  snapshot the C# core encodes from state it rebuilt out of Postgres, which the
+  TypeScript core has to decode into an identical normalised document. Two
+  TypeScript replicas agreeing with each other is not interoperability.
+- **Authentication is real, with no bypass added to the product.** §7's rules
+  hold in this configuration too, so the harness generates a certificate and
+  serves OIDC metadata over genuine HTTPS rather than relaxing the requirement
+  that metadata be fetched over TLS. A development bypass is a permanent
+  weakness bought to make a test easier, and it would also make every other
+  assertion in the suite a statement about a configuration nobody deploys.
+
 Because the comparison is byte-for-byte, **both the trace schema and the result
 format are specified here, in full, before either runner is written.** Neither
 may be inferred from whichever implementation happens to exist first.
@@ -2665,3 +2690,37 @@ This is the second time sabotage has caught a *test* rather than the code, and
 both times the test was aimed at the right subject and asserted something that
 was true regardless. That remains the most common way a test passes for no
 reason, and reading it is not how it gets found.
+
+### 13.19 The sentinel matched the syntax, not the property
+
+§7 forbids turning a token check off anywhere, and `TokenValidationTests` has
+enforced that since Phase 3 by scanning every `.cs` and `.json` file in the
+repository for one of the named switches assigned `false`. It has been treated
+as covering the rule.
+
+It covers one spelling of it. Sabotaging the interop suite meant weakening
+signature validation, and the way to do that is not to write `false` anywhere:
+
+```csharp
+SignatureValidator = (token, _) => new JsonWebToken(token),
+```
+
+`ValidateIssuerSigningKey` stays `true`, `RequireSignedTokens` stays `true`, the
+options test still passes, and the scanner sees nothing — because the check has
+been *replaced* rather than switched off. The same shape exists for
+`IssuerValidator`, `AudienceValidator`, `LifetimeValidator` and the rest: each
+is a framework extension point that runs instead of the check it is named for.
+
+The scanner now flags an assignment to any of them. None is assigned anywhere
+today, so it is a ratchet rather than a cleanup, and if one is ever genuinely
+needed the argument belongs in §7 before the code.
+
+The general point is the one worth keeping. **A guard written as a pattern match
+covers the instances of the pattern, not the property.** It is easy to read such
+a guard as enforcing the rule, because the rule is what its name says; what it
+actually enforces is "nobody wrote it that way". Every scanner in this project
+is in that position — the redaction sentinel, the architecture test, this one —
+and the only way to find the gap is to try to defeat it, which is what sabotage
+is for. This one had gone unexamined for a phase and a half because it had never
+been the target: the sabotages that found things were aimed at the code the
+check protects, not at the check itself.
