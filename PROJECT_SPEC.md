@@ -409,6 +409,15 @@ converges: one browser tab that never returns blocks GC forever. A replica is
 - Replica liveness is tracked in `document_replicas`.
 - A retired replica that reconnects is told to resync from a snapshot and
   discard local state.
+- **`retired_at` must actually be set**, by a background job on `T_retire` of
+  inactivity. The column has existed since Phase 2 and nothing writes it, which
+  makes every rule above true on paper and inert in fact. Two things depend on
+  it: §9's offline window, which warns a user before their work is discarded and
+  cannot be verified end to end while no replica is ever retired; and Phase 7's
+  GC, whose causal-stability frontier never advances while one abandoned tab
+  counts as live. **Owned by Phase 7** and named here so it is not rediscovered
+  there — a Phase 4 client that warns correctly about a discard that never
+  happens is the shape §13.15 warns about.
 
 **GC watermark.** Each document has a watermark: the causal-stability frontier
 below which elements may have been collected. An operation referencing an
@@ -1066,6 +1075,55 @@ Treat every one of these as a hard requirement with a corresponding test.
   operations attributed to someone else, and every replica would converge on the
   result. Server assignment, recorded in `document_replicas` against the user,
   is what makes the per-operation comparison mean anything.
+
+  **A client may ask to resume a replica it already owns, and the server
+  verifies rather than trusts.** `negotiate` accepts an optional claimed replica
+  id. The server reissues it only if every one of these holds:
+
+  1. the `document_replicas` row exists;
+  2. its `user_id` is the caller;
+  3. its `document_id` is the document being negotiated;
+  4. no live connection currently holds it.
+
+  If any check fails the server mints a fresh id instead of refusing, and the
+  response always names the id that was actually assigned. It is never an error
+  to ask: a client whose stored replica has been retired, or whose tab crashed
+  and left a stale claim, needs to get a working session rather than a 4xx it
+  cannot act on (§13.13). It also never tells the caller *which* check failed —
+  "that replica belongs to someone else" is a fact about another user's session.
+
+  **The security property, stated so it cannot be eroded by a later
+  convenience: resumption is authorization to CONTINUE a replica, not
+  authorization to author as one.** Tier-1 stays exactly what it is — the
+  submitted `ReplicaId` must equal *this connection's binding*, not "one of the
+  ids you own". Widening it to a set would reopen §13.12's attack from inside
+  the owner's own account: a user with two documents, or two replicas on one
+  document, could attribute operations to whichever replica suited them, and
+  every peer would converge on it.
+
+  Check 4 is what keeps the two statements consistent, and it is a claim on the
+  replica taken at `negotiate` — not at connect. The ticket exists before the
+  connection does, so a claim taken only when the socket opens leaves a window
+  in which two `negotiate` calls both succeed for one replica. The claim is
+  therefore atomic (Redis `SET … NX`), scoped to `(document, replica)`, taken
+  before the ticket is issued, held while a connection is bound, refreshed by
+  the hub, and released on disconnect — with a TTL, because a process that dies
+  holding a claim must not strand the replica forever. Two tabs cannot hold one
+  replica id, which is the whole point: §5's tie-break assumes one author per
+  id, and two live authors sharing one id can produce two different operations
+  with the same `ElementId`.
+
+  **Why resumption rather than the alternatives.** A client that reloads holds
+  an outbox of operations it authored under its previous replica id, and tier-1
+  will reject every one of them under a fresh binding. Re-authoring the outbox
+  under the new id changes operation identity, so any operation the server
+  already received arrives a second time under a new name and the CRDT — which
+  deduplicates by id and is right to — inserts the characters twice. That is
+  silent text corruption, and it happens precisely in the case the outbox exists
+  for: a partially-delivered batch. Accepting submissions from a
+  retired-but-owned replica is the same widening of tier-1 described above.
+  Resumption is the only one of the three that leaves both the outbox and the
+  anti-forgery check intact.
 - The ticket and any token must never be written to logs. Configure request
   logging to redact them explicitly, and add a test that drives a connection
   using a **known sentinel value** through the real logging pipeline —
@@ -1276,9 +1334,52 @@ is a stress target, not a steady state.
   ops merge in. There is no server round trip in the typing path.
 - IndexedDB persists the local replica and an outbox of unsent operations, so a
   full offline session survives a page reload and syncs on reconnect.
+
+  **Both are stored in §6's binary encoding**: the replica as a snapshot body,
+  the outbox as operation-batch bodies. Not a JSON shape invented for the
+  browser. §6 is the sole authoritative encoding and a second one acquires
+  canonical-form rules of its own, which is where §13.11's bug came from — and
+  this store is read by a *different build* from the one that wrote it more
+  often than any other artefact in the system, because a browser holds whatever
+  version the user last loaded.
+
+  The store carries its own schema version alongside §6's format version, and
+  **an unrecognised version at either level is rejected explicitly** — §6's rule,
+  which that section calls the one with no exceptions, applies here with the
+  most force. A best-effort parse of a store written by a newer build produces a
+  replica that is subtly wrong and then submits operations derived from it.
+  Rejection means discarding local state and resyncing, which loses unsent work
+  and says so; a bad parse loses correctness and does not.
+
+  **A reload resumes the replica rather than becoming a new one** (§7). The
+  outbox holds operations authored under the stored replica id, and they are
+  submittable only under a binding for that same id.
+
+- **Every rejection the server can return has exactly one defined client
+  recovery, and each produces a visible change of state.** A code the client
+  swallows is a client that appears to work and silently is not (§13.13).
+
+  | Code | Recovery |
+  |---|---|
+  | `not_found` | The document is gone or access was revoked. Stop the session, surface it, do not retry. |
+  | `forbidden` | Demoted to viewer mid-session. Drop to read-only, keep receiving, surface it; the outbox is unsendable and must not be discarded silently. |
+  | `malformed` | A bug in this client. Stop submitting, surface it, keep local state for diagnosis; retrying cannot help. |
+  | `too_many_replicas` | §7's cap. Retry with backoff, having released any claim held; surface it if it persists. |
+  | `unknown_origin` | The server does not have an operation this batch references. Catch up by version vector, then resubmit once. Repeated occurrence is a bug, not a race. |
+  | `resync_required` | §5's GC watermark: the referenced id is at or below it and is gone. Discard local state, take a snapshot, and report the unsent operations as lost — this is the one case where §5's "do not drop" rule has an exception, so it is the one the user has to be told about. |
+
+  `resync_required` is specified here before anything emits it. §5 defines the
+  condition and the server side arrives with GC; defining the client contract
+  now means that implementation is written against a stated shape rather than
+  inventing one late, when the pressure will be to make it whatever the client
+  already happens to tolerate.
+
 - Reconnect with exponential backoff and jitter. On reconnect, send the local
   version vector and receive only the missing operations.
-- Presence (remote cursors) is ephemeral and never persisted.
+- Presence (remote cursors) is ephemeral and never persisted. **Deferred beyond
+  Phase 4**, explicitly: it needs a hub surface that does not exist, §11's Phase
+  4 done-when does not require it, and leaving it implied invites it being
+  half-built as a side effect of the editor. It is its own task when it comes.
 - **Cursors are anchored to `ElementId`, not to integer indices**, with a
   left/right bias for the gap between elements. An integer index is invalidated
   by any concurrent edit earlier in the document, which makes remote cursors
@@ -1289,6 +1390,11 @@ is a stress target, not a steady state.
   astral-plane characters. Deleting an emoji ZWJ sequence removes one code
   point, not the whole visible glyph — this is accepted behaviour, not a bug.
 
+  **The layer lives above the core, not inside it.** §1 makes the core
+  code-points-only and dependency-free; a core that knew about UTF-16 offsets
+  would be a core that knew about the DOM, and the same code has to run in the
+  conformance runner where there is no DOM at all.
+
 ### Offline window
 
 Offline editing is supported for up to `T_retire` (7 days, §5). Beyond that the
@@ -1298,6 +1404,14 @@ The client **records the last successful sync time and surfaces the remaining
 window in the UI.** It must warn as the window nears expiry and must not
 silently accept edits that will be discarded. Accepting an hour of offline work
 and then throwing it away without warning is a data-loss bug, not a limitation.
+
+The client half of this is Phase 4 and the server half is not: nothing sets
+`retired_at` until Phase 7 (§5). So the warning can be built and tested against
+a clock, and **the discard it warns about cannot be observed end to end until
+retirement exists.** That is stated rather than glossed, because a client that
+warns correctly about something that never happens passes every test anyone
+would write for it — §13.15's shape, and §12's rule that a task whose
+verification needs infrastructure that does not exist yet is written, not done.
 
 ### Conformance testing
 
@@ -1505,10 +1619,10 @@ reviewed. At the end of each phase, stop and report.
 | 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
 | 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
-| 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
+| 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test; **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
-| 7 | Scale + observability | Load test hits the §8 targets; dashboards exist |
+| 7 | Scale + observability | Load test hits the §8 targets; dashboards exist; **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
 (a) built every project with warnings-as-errors, (b) run at least one real
