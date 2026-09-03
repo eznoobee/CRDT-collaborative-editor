@@ -2770,3 +2770,44 @@ the work's own tests.** A test suite says nothing about whether CI ran it. Both
 findings are the same shape — an apparatus trusted because its output looked
 normal — and in both cases the output was normal precisely because nothing had
 happened.
+
+### 13.21 A ratchet keyed on line numbers is not a ratchet
+
+With the workflow fixed (§13.20), the mutation gate ran for the first time since
+3b.1 and reported 34 newly-undetected mutants — apparent coverage collapse
+across `Replica.cs`.
+
+Thirty of them were the same mutants as before, moved. The floor keyed each
+entry as `file:line:column:mutator`, and 3b.4 added 54 lines near the top of
+`Replica.cs`, so every known entry below the insertion arrived at a new address
+and read as new.
+
+That direction is only noise, and its danger is what the noise invites: the
+obvious response is to paste the new list into the floor, which is how a
+ratchet becomes a rubber stamp. The direction that actually matters is the
+silent one. After a shift, a genuinely new undetected mutant that lands on a
+line number a moved entry used to occupy is absorbed as already-known. The gate
+stays green while coverage falls, which is the exact failure the floor exists to
+prevent, caused by the floor's own key.
+
+The key is now the mutated source line's **text**, with the mutator and its
+replacement: `file:mutator:replacement:line text`. It changes when the code
+changes and not before, which is when re-review is wanted. Entries are counted
+rather than set-membership, because two mutants of the same shape on identical
+lines are two gaps and collapsing them would let one become covered while the
+other quietly took its place.
+
+**And under the noise there was a real finding**, which is the argument against
+re-baselining without reading. Four mutants were genuinely new, and two of them
+were `DuplicatesDropped++` — deleted, and turned into a decrement. §13.15 was
+written about that very counter: a mechanism whose absence still converges has
+to be asserted directly. It *was* asserted — in `Editor.Api.Tests` and in the
+TypeScript suite, but not in `Crdt.Core.Tests`, which is the only suite the
+mutation gate drives. The watermark-path increment had no assertion where it is
+measured, and the gate said so the first time it was allowed to run.
+
+The general rule: **a ratchet's key has to be as stable as the property it
+tracks.** A key that moves for reasons unrelated to the property produces false
+alarms, which train the reader to clear them in bulk, and false silence, which
+is unobservable. Position is the most tempting such key and the least stable
+one.

@@ -126,6 +126,13 @@ public sealed class CausalReadinessTests
         Assert.Equal(4, overflow.Bound);
         Assert.Equal(4, overflow.Pending);
         Assert.Equal(4, replica.PendingCount);
+
+        // The numbers are in the message too, because that is what reaches a
+        // log. §5 requires the close to be explicable, and an overflow that
+        // says only "the bound was exceeded" leaves whoever reads it unable to
+        // tell a misconfigured bound from a client sending nonsense.
+        Assert.Contains("4", overflow.Message, StringComparison.Ordinal);
+        Assert.Contains("bound", overflow.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -158,10 +165,25 @@ public sealed class CausalReadinessTests
 
         replica.Apply(operation);
         var once = replica.Text;
+        Assert.Equal(0, replica.DuplicatesDropped);
+
+        replica.Apply(operation);
         replica.Apply(operation);
 
         Assert.Equal(once, replica.Text);
         Assert.Equal(0, replica.PendingCount);
+
+        // The count, and not only the absence of an effect. §13.15: dropping a
+        // duplicate and never noticing one produce the same document, so the
+        // number is the only thing that separates them — and the rate is how a
+        // resend loop announces itself.
+        //
+        // This is the watermark path specifically: the operation is already
+        // applied, so the pending set never sees it. The mutation gate is what
+        // found this missing, having survived both `DuplicatesDropped++` being
+        // deleted and being turned into a decrement while every other
+        // assertion here stayed green.
+        Assert.Equal(2, replica.DuplicatesDropped);
     }
 
     [Fact]

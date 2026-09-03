@@ -18,6 +18,14 @@ cd "$(dirname "$0")/.."
 : "${EDITOR_TEST_POSTGRES:?set EDITOR_TEST_POSTGRES to a Postgres connection string}"
 : "${EDITOR_TEST_REDIS:?set EDITOR_TEST_REDIS to a Redis configuration string}"
 
+echo "==> Restore"
+# Not optional and not implied. A clean checkout has no obj/project.assets.json,
+# and `dotnet ef` fails with NETSDK1004 before it reaches the database — which a
+# local run never sees, because obj/ is already populated there. That difference
+# is the whole reason this line exists.
+dotnet restore CollaborativeEditor.slnx
+
+echo
 echo "==> Schema"
 # The API deliberately does not migrate on startup, so something has to. The
 # .NET suite's fixture does it for its own database; this job has its own.
