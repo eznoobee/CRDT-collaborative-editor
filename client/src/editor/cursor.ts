@@ -44,10 +44,15 @@ export function anchorAt(replica: Replica, index: number, bias: Bias = 'after'):
   if (bias === 'after') {
     // The gap after the element at index - 1. At the very start there is no
     // such element, and null means "the beginning" rather than "unknown".
-    return { element: index <= 0 ? null : visible[Math.min(index, visible.length) - 1], bias };
+    //
+    // The index is clamped rather than trusted: it comes from the DOM, and a
+    // selection can outlive the text it pointed at by a frame. `?? null` is the
+    // same decision made once more — an out-of-range index means an edge, and
+    // an edge is what null names.
+    return { element: index <= 0 ? null : visible[Math.min(index, visible.length) - 1] ?? null, bias };
   }
 
-  return { element: index >= visible.length ? null : visible[Math.max(index, 0)], bias };
+  return { element: index >= visible.length ? null : visible[Math.max(index, 0)] ?? null, bias };
 }
 
 /**
@@ -95,7 +100,12 @@ export function resolve(replica: Replica, anchor: Anchor): number {
 
   if (anchor.bias === 'after') {
     for (let at = index - 1; at >= 0; at--) {
-      const key = elementKey(all[at]);
+      const previous = all[at];
+      if (previous === undefined) {
+        continue;
+      }
+
+      const key = elementKey(previous);
       if (alive.has(key)) {
         return visible.findIndex((id) => elementKey(id) === key) + 1;
       }
@@ -105,7 +115,12 @@ export function resolve(replica: Replica, anchor: Anchor): number {
   }
 
   for (let at = index + 1; at < all.length; at++) {
-    const key = elementKey(all[at]);
+    const next = all[at];
+    if (next === undefined) {
+      continue;
+    }
+
+    const key = elementKey(next);
     if (alive.has(key)) {
       return visible.findIndex((id) => elementKey(id) === key);
     }

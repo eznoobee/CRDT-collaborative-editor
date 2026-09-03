@@ -140,7 +140,10 @@ describe('the bias', () => {
     const stranger = new Replica(REMOTE);
     stranger.insert(0, 'z');
 
-    const anchor = { element: stranger.visibleIds[0], bias: 'after' as const };
+    const unknown = stranger.visibleIds[0];
+    expect(unknown).toBeDefined();
+
+    const anchor = { element: unknown ?? null, bias: 'after' as const };
 
     expect(resolve(local, anchor)).toBe(0);
   });
