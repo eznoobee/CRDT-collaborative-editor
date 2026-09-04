@@ -42,10 +42,24 @@ services:
     build:
       context: .
       dockerfile: src/Editor.Api/Dockerfile
-    command:
-      - "./migrate"
-      - "--connection"
-      - "Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+    # `command`, not `entrypoint`: the image's ENTRYPOINT is
+    # ["dotnet", "Editor.Api.dll"] and this appends to it, so the container runs
+    # `dotnet Editor.Api.dll --migrate`. An earlier version of this file put a
+    # whole command line here and got `dotnet Editor.Api.dll ./migrate ...` —
+    # the API, started with arguments it ignored, failing later and elsewhere.
+    command: ["--migrate"]
+
+    environment:
+      Postgres__ConnectionString: Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # The migrator builds the same host the API builds, so it validates the
+      # same configuration: a deployment with a missing issuer fails here rather
+      # than after the schema is half-applied.
+      Oidc__Issuer: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
+      Oidc__Audience: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env}
+      Oidc__MetadataAddress: ${OIDC_METADATA_ADDRESS:?set OIDC_METADATA_ADDRESS in .env}
+      Oidc__ClientId: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      Redis__Configuration: ${REDIS_CONFIGURATION:?set REDIS_CONFIGURATION in .env}
+
     depends_on:
       postgres:
         condition: service_healthy
