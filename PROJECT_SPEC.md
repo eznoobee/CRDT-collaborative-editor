@@ -1139,6 +1139,40 @@ Treat every one of these as a hard requirement with a corresponding test.
   appears in no sink. "No log line contains a token" is not testable as stated;
   this is.
 
+**How the browser obtains a token (Phase 4.9)**
+- **Authorization Code with PKCE, and no client secret.** A public client cannot
+  keep one; shipping a secret to a browser is publishing it. The code verifier
+  is generated per attempt from a CSPRNG, the challenge is `S256`, and the
+  verifier is discarded the moment the code is redeemed.
+
+  PKCE's mechanism is that the token endpoint refuses a code presented without
+  the verifier that produced its challenge — which means a login that succeeds
+  proves nothing about PKCE, because a compliant server enforces it and a client
+  that omitted the verifier entirely would simply fail later. What has to be
+  tested is the challenge derivation, the freshness of the verifier across
+  attempts, and one exchange against an endpoint that actually checks.
+- **The access token lives in memory only.** Never `localStorage`, never
+  `sessionStorage`, never IndexedDB, never a cookie this application sets,
+  never a URL. The requirement is a sweep rather than a lookup: after a complete
+  login, no browser store and no URL the page can reach contains the token or
+  the code verifier.
+- **The token must never reach the SignalR connection URL.** §7 puts a
+  single-use 60-second ticket in the `access_token` query parameter precisely so
+  a bearer JWT is not there — URLs reach proxy logs, browser history and
+  `Referer`, none of which this application's redaction controls. 4.9 changes
+  how tokens are obtained and therefore has to re-assert that guarantee rather
+  than inherit it: the hub URL carries the ticket and nothing else.
+- **Refresh is delegated to the provider's library, not hand-rolled.** Token
+  refresh looks simple and has a long history of subtle bugs — clock skew,
+  concurrent refreshes racing, a rotated refresh token discarded on retry — and
+  none of them are what this project is for.
+- **A refresh that fails is a client state, not an exception.** §9's contract:
+  the client goes offline with its own problem code, keeps its outbox, and says
+  a sign-in is needed. Anything else loses unsent work while a login prompt is
+  pending, which is the §9 failure this whole path exists to avoid.
+- The redirect URI is exact-match, and the `state` parameter is verified on
+  return.
+
 **Authorization**
 - Every hub method and every endpoint re-checks document membership.
 - Two checks, at different costs:
@@ -1381,6 +1415,15 @@ is a stress target, not a steady state.
   now means that implementation is written against a stated shape rather than
   inventing one late, when the pressure will be to make it whatever the client
   already happens to tolerate.
+
+  **`sign_in_required` joins the table** and is the one entry no server emits:
+  it is raised by the client itself when the token source cannot produce a
+  valid token — the refresh failed, the session expired, the user signed out
+  elsewhere. It behaves like a lost connection and not like a rejection: state
+  goes `offline`, the outbox is kept in full, submission stops, and the message
+  says a sign-in is needed. §7 requires this rather than an exception, because
+  an unhandled rejection in the refresh path discards unsent work at exactly
+  the moment the user is being asked to log in again.
 
 - Reconnect with exponential backoff and jitter. On reconnect, send the local
   version vector and receive only the missing operations.
@@ -2913,6 +2956,22 @@ an implementation that is actually wrong, does anything go red? It is the only
 one that can discover the gap between "the guard matches" and "the guard holds",
 because it approaches from outside the guard's own vocabulary.
 
+**The same shape, in the process rather than the code.** Twice in Phase 4 a
+commit went out with a client gate red, because the verification was chained
+onto the same command line as the commit and its output read afterwards. The
+habit was the defect, and the structural fix was to put the client's gates in
+the preflight — but the diagnosis is the part worth keeping. The preflight ran
+the .NET suite, conformance, interop, the mutation gate and the workflow check,
+and never ran the client's lint, typecheck, unit tests or build. **The one area
+of the repository where these mistakes were being made was the one area the
+preflight could not see.**
+
+That is this entry's shape exactly, one level up: the guard covered a set of
+instances and was read as covering the property "the gates are green". Ask of a
+process guard what this entry asks of a textual one — not "does it check
+something" but "what passes it without being correct" — and the answer here was
+available before the fact: everything the guard does not look at.
+
 ### 13.20 Seven tasks reported against a workflow that never ran
 
 Editing `ci.yml` during 3b.1 inserted a step above a trailing
@@ -3080,3 +3139,70 @@ job has been filed as flaky, its next real failure is filed the same way. The
 diagnosability of a check is part of the check, not a convenience for whoever
 reads it — and a retry, a longer timeout or a wider deadline treats the symptom
 while leaving the next occurrence exactly as illegible as this one.
+
+### 13.24 The running count: tests that pass for the wrong reason
+
+The dominant defect class in this project is not a wrong implementation. It is a
+**check that cannot fail** — a test whose assertion is true whether or not the
+code is correct, a guard that matches a pattern instead of a property, a
+criterion satisfiable without the thing it names. This entry keeps the count,
+because the frequency is the argument. Anyone asking why this project spends so
+much of its time on tests that test tests should be shown this list rather than
+an opinion.
+
+| # | Phase | What passed for the wrong reason | How it was found |
+|---|---|---|---|
+| 1 | 3 | A shutdown-race test written against the wrong path; passed whether or not the code was correct | Sabotage |
+| 2 | 2.5 | The cross-implementation comparison did not fire when a run-encoding guard was dropped — the corpus never reached the shape (§13.11) | Sabotage |
+| 3 | 3b | `DuplicatesDropped++` asserted in three suites and not in the one the mutation gate drives — to the gate, a counter nothing asserts (§13.15, §13.21) | Mutation gate, once §13.20 let it run |
+| 4 | 4 | 4.8's end-to-end test stayed green with the reconnect catch-up removed: the author had nothing to catch up on (§12) | Sabotage |
+| 5 | 4 | "Retries once after a catch-up" was in fact "never retries" — the recovery called `drain()` from inside `drain()` and hit the re-entrancy guard. The assertion passed, about a recovery that never happened | Writing the paired test |
+| 6 | 4 | The editor was uncontrolled-equivalent and passed 98 tests, because the remote-edit test fed `session.text` back into the component | Sabotage (`value` → `defaultValue`) |
+
+Six occurrences across four phases, and the two most recent are the same shape
+as each other: an assertion that was *about* a mechanism, satisfied by a path
+that did not involve the mechanism. Note what found them. Four of six were found
+by deliberately breaking something; one by the mutation gate, which is sabotage
+mechanised; one by writing the pair a rule already required. **Reading found
+none of them.** That is not a comment on care — each of these was read, by
+someone who had just written it and knew what it was for.
+
+The related family, where the same shape appears somewhere other than a test:
+§13.19 (a guard matching syntax rather than property), §13.21 (a ratchet keyed
+on position rather than property), §13.22 (a done-when satisfiable while the
+deliverable is absent), and §13.19's process instance below. They are the same
+defect wearing different clothes, and they are why the practices in §12 are
+practices rather than preferences.
+
+**Append to this table whenever another is found.** A count that stops being
+maintained becomes an anecdote, which is the genre this project is trying to
+leave.
+
+### 13.25 Report what was compared, not what was intended
+
+Every valid record in the client's IndexedDB store failed to load, reporting:
+
+> unsupported store version 1; this build understands 1
+
+The message is not merely unhelpful; it is evidence *against* the actual cause,
+because it names the one thing that was fine. The real failure was two lines
+away: `instanceof Uint8Array` returns false for a `Uint8Array` that crossed the
+structured-clone boundary into another realm, so the payload check failed and
+the error path chosen was the version one.
+
+This is the one defect in Phase 4 that reading would never have found. The code
+is correct-looking in the strongest sense — `instanceof` is the idiomatic check,
+and it works everywhere except across the boundary this code exists to cross.
+
+The generalisation is about the message rather than the bug: **an error must
+report what was actually compared, not what the author intended to compare.**
+"Unsupported version 1; this build understands 1" is a sentence that cannot be
+true, and a message that cannot be true is worse than no message, because it
+sends the reader to the wrong file with confidence. Where a check has several
+failure modes, say which one fired and with what values — and if the values
+make the sentence absurd, that absurdity is the finding.
+
+Same family as §13.23: a failure that cannot explain itself costs more than the
+failure. There it was a harness, here a product error path, and the cost is
+identical — time spent in the wrong place, and a real cause filed as something
+else.
