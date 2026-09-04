@@ -151,11 +151,17 @@ export async function startWalk(): Promise<Walk> {
   );
 
   if (up.status !== 0) {
-    const logs = compose([...files, 'logs', '--no-color', '--tail', '60'], env).output;
+    const logs = compose([...files, 'logs', '--no-color', '--tail', '200'], env).output;
+
+    // Services first, because once the images build the cause is always in a
+    // container and never in the layer stream — and the layer stream is a
+    // thousand times longer. §13.23, learned twice: the previous version of
+    // this message led with the build and truncated the exception that
+    // explained everything.
     throw new Error(
       'the stack did not come up.\n'
-      + `--- the last of what the build said ---\n${tail(up.output, 60)}\n`
-      + `--- what the services said ---\n${tail(logs, 60) || '(no service ever started)'}`,
+      + `--- what the services said ---\n${logs.trim() || '(no service ever started)'}\n`
+      + `--- how compose ended ---\n${tail(up.output, 12)}`,
     );
   }
 

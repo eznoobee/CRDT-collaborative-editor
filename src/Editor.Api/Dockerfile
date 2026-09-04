@@ -62,18 +62,6 @@ COPY src/ src/
 RUN dotnet publish src/Editor.Api/Editor.Api.csproj \
         --no-restore -c Release -o /app
 
-# The migration bundle, built here and shipped in the same image (§4). A
-# self-contained executable that applies the schema and exits — so the migrator
-# and the API are provably the same build, which a separate SDK-based image
-# would not be. `dotnet ef` itself needs the SDK; the bundle does not.
-COPY dotnet-tools.json ./
-RUN dotnet tool restore \
- && dotnet ef migrations bundle \
-        --project src/Editor.Infrastructure \
-        --startup-project src/Editor.Infrastructure \
-        --configuration Release \
-        --output /app/migrate --force
-
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 COPY --from=build /app .

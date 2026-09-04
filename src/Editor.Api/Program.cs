@@ -36,6 +36,22 @@ builder.Services.AddEditorPersistence(builder.Configuration);
 
 var app = builder.Build();
 
+// §4's migrator: the same image, a different argument, and a process that
+// applies the schema and exits. The serving path never migrates — §8 assumes
+// several instances and they would race — but "the API does not migrate at
+// startup" is a statement about the serving path, not about the assembly.
+//
+// This replaced an EF migrations bundle, which needed the SDK at build time and
+// EF's design-time host at run time, and died in that host with a segfault the
+// walk could see and nothing could explain. The application's own DbContext
+// registration is the one the application uses; there is no second construction
+// path to be wrong.
+if (args.Contains("--migrate"))
+{
+    await app.Services.ApplyMigrationsAsync();
+    return;
+}
+
 // First in the pipeline, before anything reads the scheme or the client address.
 app.UseForwardedHeaders();
 
