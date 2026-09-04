@@ -1336,6 +1336,26 @@ measurement point is not a falsifiable claim.
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
 | Document load, **browser**, 100k live characters + 500k tombstones | reported, no threshold — see below |
 
+**Every performance number is reported with the build that produced it**, and a
+number without one is not a result. At minimum: the runtime configuration
+(`Debug`/`Release` for .NET, the resolved `NODE_ENV` and whether minification
+ran for the client), the runner class (§13.7), and the commit. A figure missing
+any of these cannot be compared to a later figure, which makes it unfalsifiable
+— it can never be shown to have regressed, only replaced.
+
+This is a rule written from a near-miss rather than a failure (§13.26). The
+end-to-end harness was found to be building a development bundle, and the first
+instinct was that §13.13a's client-bundle figures — which a design decision
+turned on — had the same problem. They did not: that harness uses esbuild, pulls
+in no React, and sets minification explicitly. But **neither measurement
+recorded which build it measured**, so answering the question took reading the
+harness rather than reading the number, and the answer could easily have gone
+the other way.
+
+It is stated here, before §8's outstanding targets are measured, because the
+cost of adding it afterwards is re-running everything — and because the pressure
+at that point will be to accept the numbers already in hand.
+
 **Document load is two numbers, not one.** The original §8 scoped the 500 ms
 target to the server and said explicitly that a browser target, if wanted later,
 "constrains the snapshot format and must be specified separately". That
@@ -1674,6 +1694,43 @@ reviewed. At the end of each phase, stop and report.
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
 | 6 | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
 | 7 | Scale + observability | Load test hits the §8 targets; **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
+
+### The deferred register
+
+Everything this project has knowingly put off, and the phase that owns it. It
+lives here rather than in the entries that created it because a deferral scattered
+across five sections is a deferral nobody can count — and because Phases 6 and 7
+hold almost all of it, which is exactly where the pressure to declare done will
+be highest.
+
+**A row leaves this table when the thing is verified, not when it is written**
+(§12: a task whose verification needs infrastructure that does not exist yet is
+written, not done).
+
+| # | Deferred | Owner | Why it was deferred | Where it is stated |
+|---|---|---|---|---|
+| 1 | `retired_at` actually set by a background job on `T_retire` inactivity | **7** | Needs no new subsystem; blocks two things below and was not on Phase 4's critical path | §5 |
+| 2 | §9's offline-window discard verified end to end | **7** | Blocked by 1. The client half is written and unit-tested against an injected clock; the discard it warns about cannot happen yet | §9, 4.7 |
+| 3 | `resync_required` emitted server-side | **7** | Needs GC. The client contract was specified first, deliberately, so the server is written against a stated shape | §5, §9, §13.13 |
+| 4 | GC of causally stable tombstones, and the watermark that gates it | **7** | Depends on 1: the stability frontier never advances while an abandoned tab counts as live | §5 |
+| 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **7** | 3b's done-when was the protocol settled *before* any throughput number. Outstanding, never skipped | §8 |
+| 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7** | Nothing of it exists today beyond `/health/live` | §10 |
+| 7 | `/health/ready` probing Postgres and Redis | **7** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
+| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
+| 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
+| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6** | §7 requires them; nothing implements them | §7 |
+| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6** | Same | §7 |
+| 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
+| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
+| 14 | Presence — remote cursors, ephemeral, never persisted | **unassigned** | Deferred out of Phase 4 explicitly: it needs a hub surface that does not exist, and leaving it implied invited it being half-built as a side effect of the editor | §9 |
+| 15 | An admin path to create a document and grant membership | **unassigned** | Both interop harnesses seed through `psql` because there is no such path. Until there is, no test exercises document creation and no user can make one | §9, harness |
+| 16 | Opening a document you have not been given the id of — a list, or any navigation at all | **unassigned** | 4.10 opens `/d/{id}` and nothing produces an id. Follows 15 | §9 |
+
+**Rows 14–16 have no owner, and that is the finding.** The first was deferred
+with a reason and no destination; the second and third were never deferred at
+all — they are gaps that only became visible once there was an application to
+open. A phase with no owner is not scheduled, and §13.22 is what happens to work
+that nothing is committed to doing.
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
 (a) built every project with warnings-as-errors, (b) run at least one real
@@ -2955,6 +3012,24 @@ asserts the form it was written in. Sabotage asks the different question: given
 an implementation that is actually wrong, does anything go red? It is the only
 one that can discover the gap between "the guard matches" and "the guard holds",
 because it approaches from outside the guard's own vocabulary.
+
+**One pattern, three places.** This entry is about a guard in the code; the two
+below are the same defect in the process and in the build, and they are worth
+reading as one thing rather than three:
+
+| Where | The instruction that was checked | The property that was not |
+|---|---|---|
+| **Code** (this entry) | `ValidateX = false` appears nowhere | no validation check is *disabled*, by any means — `SignatureValidator = …` does it without writing `false` |
+| **Process** (below) | the preflight's gates all pass | *the gates that exist cover where mistakes are made* — it ran five suites and never the client's |
+| **Build** (§13.26) | `npm run build` was invoked | *the bundle is the one that ships* — vitest's `NODE_ENV=test` made it a development build |
+
+The sentence that generalises all three: **a build command is an intention; the
+bundle is the fact** — and so for the rest. Every one of these guards was
+checking that the right instruction had been given, and reading as if it had
+checked that the right thing was true. §13.21 (a ratchet keyed on position
+rather than on the property it tracks) and §13.22 (a done-when satisfiable while
+the deliverable is absent) are the same defect again, in a tool and in the
+contract. Five places now; the count is kept in §13.24.
 
 **The same shape, in the process rather than the code.** Twice in Phase 4 a
 commit went out with a client gate red, because the verification was chained
