@@ -1691,8 +1691,8 @@ reviewed. At the end of each phase, stop and report.
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
 | 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed; **and the client exists as a client** — a browser loads the app, authenticates, opens a document and types, with the text visible (§13.22) |
-| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
 | 5b | The artefact runs at all | The walk in §13.27 reaches sign-in against `docker compose up` and a `.env`, with nothing seeded and nothing run by hand: the image contains the client, the schema is applied by something, TLS termination is stated, and the smoke test asserts an endpoint that touches Postgres |
+| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
 | 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7), and the walk in §13.27 completes end to end: a new user signs in, makes a document, invites another, and both edit it |
 | 6b | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
 | 7 | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
@@ -3035,6 +3035,7 @@ reading as one thing rather than three:
 | **Code** (this entry) | `ValidateX = false` appears nowhere | no validation check is *disabled*, by any means — `SignatureValidator = …` does it without writing `false` |
 | **Process** (below) | the preflight's gates all pass | *the gates that exist cover where mistakes are made* — it ran five suites and never the client's |
 | **Build** (§13.26) | `npm run build` was invoked | *the bundle is the one that ships* — vitest's `NODE_ENV=test` made it a development build |
+| **Deployment** (§13.28) | `/health/live` answered 200 | *the stack is usable* — it came up against an empty database and the probe never touched it |
 
 The sentence that generalises all three: **a build command is an intention; the
 bundle is the fact** — and so for the rest. Every one of these guards was
@@ -3042,7 +3043,7 @@ checking that the right instruction had been given, and reading as if it had
 checked that the right thing was true. §13.21 (a ratchet keyed on position
 rather than on the property it tracks) and §13.22 (a done-when satisfiable while
 the deliverable is absent) are the same defect again, in a tool and in the
-contract. Five places now; the count is kept in §13.24.
+contract. Six places now; the count is kept in §13.24.
 
 **The same shape, in the process rather than the code.** Twice in Phase 4 a
 commit went out with a client gate red, because the verification was chained
@@ -3377,10 +3378,29 @@ one is wrong.
 
 **The general form.** A conjunction of complete criteria is not a complete
 criterion. Coverage of the parts says nothing about coverage of the seams,
-because a seam belongs to no part. And the failure is self-concealing in a
-specific way: the harness that works around the gap is written by the same
-person who would otherwise have noticed it, and the workaround makes every later
-test pass.
+because a seam belongs to no part.
+
+**The self-concealment mechanism, stated as something to watch for rather than
+as what happened once.** The person who writes a harness around a missing
+feature is the same person who would otherwise have noticed it was missing — and
+the workaround makes every later test pass, so the evidence of the gap is
+consumed in the act of creating it. Both harnesses in this repository seed
+documents through `psql`, and both filed that as a harness detail.
+
+So it has a check of its own, to be asked whenever a harness reaches past the
+product:
+
+> **Every time a test harness does something the application cannot do, that is
+> a finding until proved otherwise.** Write down which product capability is
+> missing, then decide whether it is deferred — with an owner — or simply
+> absent. "The harness seeds it" is a description of a workaround, never a
+> justification for one.
+
+The tell is a harness step that has no counterpart in the product: a direct
+database write, a hand-built row, a value conjured that nothing issues. Each is
+a sentence beginning "in real life this would come from…", and the end of that
+sentence is either a feature or a gap. This will recur, because harnesses are
+written under pressure to get to the interesting assertion.
 
 **The audit that catches it is not per-phase.** No amount of re-reading a
 phase's done-when finds a hole outside it. What finds it is walking what a user
@@ -3405,3 +3425,55 @@ those (nothing applies migrations) sitting underneath a green Compose smoke test
 that passes because `/health/live` does not touch the database. That is this
 entry and §13.19 in the same object: a check that confirms the process started,
 read as confirming the system works.
+
+### 13.28 The smoke test was green over an empty database
+
+Of the five findings the first cold-start walk produced (§13.27), four were
+about the **artefact** and one about the code. That ratio is the diagnostic
+result, and it has a plain explanation: every done-when in this project has
+tested *behaviour*, the behaviour has been correct throughout, and the
+deployment was never anyone's criterion. So it rotted quietly under eleven
+phases of green — not because anyone skipped a check, but because no check was
+ever pointed at it.
+
+The sharpest of the four deserves its own entry.
+
+**The Compose smoke test has passed since Phase 0. A stack it passes over cannot
+serve a single request that touches Postgres.** Nothing applies migrations in a
+deployment: the API deliberately does not migrate at startup — a good decision,
+made for good reasons — and no other part of the deployment does it either. Both
+test harnesses run `dotnet ef database update` themselves and neither noticed
+that this made them the only things that ever had. A fresh `docker compose up`
+therefore comes up against an empty schema.
+
+The job that was supposed to catch this asserts that `/health/live` returns 200.
+It does return 200. It returns 200 because liveness means *the process is
+running*, which is exactly what it says and exactly what it should mean — and
+`/health/ready`, the endpoint that would probe Postgres and Redis, does not
+exist yet (register row 7), for the honest reason that an endpoint returning
+healthy without checking anything is worse than none.
+
+So every part of this is individually defensible and the composition is a check
+that cannot fail for the reason anyone reads it as covering:
+
+> The guard tested what it looked at. Everyone read it as testing what it was
+> there for.
+
+That is §13.19's pattern — the sentinel matching syntax rather than property —
+in its purest form yet, because here there is not even a mistake to point at.
+The liveness probe is correct. The name is honest. The failure is entirely in
+the inference drawn from a green tick, and no amount of reading the smoke test
+would find it: the defect is not in the check, it is in the gap between what the
+check covers and what its greenness is taken to mean.
+
+**The general rule this yields, beyond the two it inherits:** *a smoke test must
+exercise the narrowest thing that would break if the deployment were wrong.* A
+process that starts is the widest possible signal and the cheapest to satisfy.
+One request that reads a row is worth more than any number of liveness probes,
+and it is what Phase 5b's done-when now asks for.
+
+**And it is why 5b runs before 5.** Until the artefact starts against its own
+schema, every green report in this repository is a report about a test host.
+Phase 6's subject is authorization surfaces in a deployment and 6b's is controls
+in the shipped configuration; neither is trustworthy while the published image
+contains no application at all (register row 18).
