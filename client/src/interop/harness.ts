@@ -187,6 +187,36 @@ async function reachable(url: string, deadlineMs: number): Promise<boolean> {
 }
 
 /**
+ * Waits for Kestrel to say which port it actually bound.
+ *
+ * @remarks
+ * Asked for rather than guessed. Picking a port and hoping is a harness that
+ * fails for a reason unrelated to anything it tests, and the failure it produces
+ * — "API did not start" — looks identical to a genuine startup bug, so the one
+ * time it matters nobody can tell them apart. Port 0 makes the kernel choose and
+ * Kestrel announce, which cannot collide.
+ */
+function listeningOn(log: string[], deadlineMs: number): Promise<string> {
+  const deadline = Date.now() + deadlineMs;
+
+  return new Promise((resolve, reject) => {
+    const poll = setInterval(() => {
+      const found = /Now listening on:\s*(http:\/\/\S+)/.exec(log.join(''));
+      if (found?.[1] !== undefined) {
+        clearInterval(poll);
+        resolve(found[1].replace(/\/$/, ''));
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        clearInterval(poll);
+        reject(new Error('never announced a listening address'));
+      }
+    }, 50);
+  });
+}
+
+/**
  * Starts the API as its own process.
  *
  * @remarks
@@ -203,14 +233,14 @@ export async function startApi(oidc: Oidc, log: string[]): Promise<Api> {
   }
 
   const dll = join(REPO, 'src/Editor.Api/bin/Debug/net10.0/Editor.Api.dll');
-  const port = 5000 + Math.floor(Math.random() * 3000);
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const started = Date.now();
 
   const child: ChildProcess = spawn('dotnet', [dll], {
     cwd: join(REPO, 'src/Editor.Api'),
     env: {
       ...process.env,
-      ASPNETCORE_URLS: baseUrl,
+      // Port 0: the kernel picks, Kestrel announces, and nothing here guesses.
+      ASPNETCORE_URLS: 'http://127.0.0.1:0',
       ASPNETCORE_ENVIRONMENT: 'Development',
       SSL_CERT_FILE: oidc.caFile,
       Oidc__Issuer: oidc.issuer,
@@ -219,6 +249,10 @@ export async function startApi(oidc: Oidc, log: string[]): Promise<Api> {
       Postgres__ConnectionString: postgres,
       Redis__Configuration: redis,
       Logging__LogLevel__Default: 'Warning',
+
+      // The one category kept at Information, because the address it prints is
+      // how this harness learns where to connect.
+      'Logging__LogLevel__Microsoft.Hosting.Lifetime': 'Information',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -226,9 +260,28 @@ export async function startApi(oidc: Oidc, log: string[]): Promise<Api> {
   child.stdout?.on('data', (chunk: Buffer) => log.push(chunk.toString()));
   child.stderr?.on('data', (chunk: Buffer) => log.push(chunk.toString()));
 
+  // Everything the next person needs to tell a real startup bug from a sick
+  // runner: how long it waited, whether the process died, and what it said.
+  const died = () => (child.exitCode === null && child.signalCode === null
+    ? 'still running'
+    : `exited with code ${child.exitCode} signal ${child.signalCode}`);
+  const evidence = (why: string) =>
+    new Error(
+      `API did not start (${why}) after ${Date.now() - started}ms; process ${died()}.\n`
+      + `${log.join('') || '(the process logged nothing at all)'}`,
+    );
+
+  let baseUrl: string;
+  try {
+    baseUrl = await listeningOn(log, 60_000);
+  } catch {
+    child.kill('SIGKILL');
+    throw evidence('never announced a listening address');
+  }
+
   if (!(await reachable(`${baseUrl}/health/live`, 30_000))) {
     child.kill('SIGKILL');
-    throw new Error(`API did not start:\n${log.join('')}`);
+    throw evidence(`${baseUrl}/health/live never answered`);
   }
 
   return {
