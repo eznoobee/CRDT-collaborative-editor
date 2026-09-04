@@ -1691,9 +1691,12 @@ reviewed. At the end of each phase, stop and report.
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
 | 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
 | 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed; **and the client exists as a client** — a browser loads the app, authenticates, opens a document and types, with the text visible (§13.22) |
-| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
-| 6 | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
-| 7 | Scale + observability | Load test hits the §8 targets; **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
+| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
+| 5b | The artefact runs at all | The walk in §13.27 reaches sign-in against `docker compose up` and a `.env`, with nothing seeded and nothing run by hand: the image contains the client, the schema is applied by something, TLS termination is stated, and the smoke test asserts an endpoint that touches Postgres |
+| 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7), and the walk in §13.27 completes end to end: a new user signs in, makes a document, invites another, and both edit it |
+| 6b | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
+| 7 | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
+| 8 | Presence | Remote cursors survive concurrent edits: a cursor anchored in text another replica is editing lands where §9's anchoring says it should, and nothing about presence is persisted or replayed |
 
 ### The deferred register
 
@@ -1717,20 +1720,30 @@ written, not done).
 | 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7** | Nothing of it exists today beyond `/health/live` | §10 |
 | 7 | `/health/ready` probing Postgres and Redis | **7** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
 | 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
-| 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
-| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6** | §7 requires them; nothing implements them | §7 |
-| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6** | Same | §7 |
-| 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
-| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
-| 14 | Presence — remote cursors, ephemeral, never persisted | **unassigned** | Deferred out of Phase 4 explicitly: it needs a hub surface that does not exist, and leaving it implied invited it being half-built as a side effect of the editor | §9 |
-| 15 | An admin path to create a document and grant membership | **unassigned** | Both interop harnesses seed through `psql` because there is no such path. Until there is, no test exercises document creation and no user can make one | §9, harness |
-| 16 | Opening a document you have not been given the id of — a list, or any navigation at all | **unassigned** | 4.10 opens `/d/{id}` and nothing produces an id. Follows 15 | §9 |
+| 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
+| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b** | §7 requires them; nothing implements them | §7 |
+| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b** | Same | §7 |
+| 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
+| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
+| 14 | Presence — remote cursors, ephemeral, never persisted | **8** | Deferred out of Phase 4 explicitly. Given its own phase rather than hung off 7: beside the performance targets it would be the row someone closes badly to finish the phase | §9 |
+| 15 | Creating a document, and granting membership | **6** | Both harnesses seed through `psql` because there is no such path. See §13.27 — this is not a deferral, it is a hole nobody had stood in front of | §9, §13.27 |
+| 16 | Listing what you can reach, and revoking access | **6** | 4.10 opens `/d/{id}` and nothing in the product produces an id | §9, §13.27 |
+| 17 | The Compose stack configured to serve and authenticate the application | **5b** | `docker-compose.yml` sets no `Oidc__ClientId` and no `Spa__RootPath`, so `/config` answers with an empty client id and the app refuses to start a login it cannot finish | §13.27 |
+| 18 | The published image containing a client at all | **5b** | The Dockerfile copies `src/` and the client lives in `client/`. The one artefact this project publishes has no application in it | §13.27 |
+| 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
+| 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
+| 21 | Signing out, and switching accounts | **6** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
 
-**Rows 14–16 have no owner, and that is the finding.** The first was deferred
-with a reason and no destination; the second and third were never deferred at
-all — they are gaps that only became visible once there was an application to
-open. A phase with no owner is not scheduled, and §13.22 is what happens to work
-that nothing is committed to doing.
+**Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
+cold start with nothing seeded. None of them was deferred; each was a step
+nobody had tried to take. Rows 17–20 are about the deployment artefact rather
+than the code, and they are grouped as **Phase 5b** because they share a failure
+mode — the thing that ships is not the thing that was tested — and because
+until they are done the answer to "does this work?" is "no test can tell you".
+
+Row 14 is the one deferral here with a reason and, until now, no destination. A
+phase with no owner is not scheduled, and §13.22 is what happens to work nothing
+is committed to doing.
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
 (a) built every project with warnings-as-errors, (b) run at least one real
@@ -2997,7 +3010,7 @@ from parts at runtime is not one. The redaction sentinel looks for a sentinel
 value; a field that reaches the log by a path the sentinel never travels is not
 one. Each checks an instance and is read as checking the property.
 
-**Scheduled: a guard audit pass**, asking of each check in turn — the
+**Scheduled into Phase 6b: a guard audit pass**, asking of each check in turn — the
 architecture test, the secret scan, the redaction sentinel, the mutation
 ratchet, the workflow check, this one — *what is the `SignatureValidator`
 equivalent here? What defeats this without matching its pattern?* It is a
@@ -3342,3 +3355,53 @@ measurement bug is to distrust every measurement, and the useful response is to
 go and look at each one. Neither harness recorded *which* build it measured,
 which is the actual gap: a number without its build mode is a number that cannot
 be checked later.
+
+### 13.27 A hole between criteria, and the walk that finds it
+
+Nothing in this product creates a document.
+
+Eleven phases of criteria were satisfied without anyone noticing, because every
+one of them tested a system that already had a document in it. Phase 2's schema
+has a `documents` table and a `document_members` table and integration tests
+that write to both. Phase 3's authorization tests seed a membership and check it
+is enforced. Phase 4's client opens `/d/{id}`. Both harnesses seed through
+`psql` because there is no path to do it otherwise, and each recorded that as a
+harness detail rather than as a missing feature.
+
+Every criterion was individually complete. **The gap is between them, and it is
+invisible from inside any one of them** — each assumed the thing it needed was
+somebody else's, and no criterion's field of view includes the question "where
+did this come from?" §13.22 was a criterion adjacent to its deliverable; this is
+the other shape: a set of criteria that jointly leave a hole, where no single
+one is wrong.
+
+**The general form.** A conjunction of complete criteria is not a complete
+criterion. Coverage of the parts says nothing about coverage of the seams,
+because a seam belongs to no part. And the failure is self-concealing in a
+specific way: the harness that works around the gap is written by the same
+person who would otherwise have noticed it, and the workaround makes every later
+test pass.
+
+**The audit that catches it is not per-phase.** No amount of re-reading a
+phase's done-when finds a hole outside it. What finds it is walking what a user
+does from a cold start with nothing seeded — no database rows, no environment,
+no fixtures — and following the path until it breaks:
+
+> Deploy the artefact this project publishes. Reach it. Sign in. Create a
+> document. Find it again tomorrow. Let someone else in. Type. Leave.
+
+Do the walk with nothing in hand. The first step that cannot be taken is the
+finding, and then keep walking past it on paper, because the interesting gaps
+cluster after the first one — nobody has been down there either.
+
+**Run it at least once per phase from Phase 5 on, and record the step where it
+stopped.** A walk that gets further than the last one is progress that no test
+suite reports; a walk that stops in the same place twice is a row in the
+deferred register that is not moving.
+
+The first walk, run at the end of Phase 4, produced register rows 15 through 21
+— five of them about the deployment artefact rather than the code, and one of
+those (nothing applies migrations) sitting underneath a green Compose smoke test
+that passes because `/health/live` does not touch the database. That is this
+entry and §13.19 in the same object: a check that confirms the process started,
+read as confirming the system works.
