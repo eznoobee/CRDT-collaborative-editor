@@ -90,6 +90,66 @@ The server is a **relay plus durable log**, not an authority on document content
 It validates, persists, orders causally, and fans out. It does not transform or
 resolve operations.
 
+### The deployment shape
+
+Stated here because it had no owner for eleven phases and rotted quietly under
+green CI (§13.27, §13.28). Each decision names the alternative rejected **and
+the reason**, because a note saying "rejected" is not something anyone can
+overturn later on evidence — and circumstances change.
+
+```
+  browser ──TLS──▶ reverse proxy ──plaintext, private network──▶ api
+                                                                  │
+                                                   postgres ◀─────┤
+                                                   redis    ◀─────┘
+       migrator ──runs to completion, then exits──▶ postgres
+```
+
+**TLS terminates at the reverse proxy, not in Kestrel.** The API speaks
+plaintext on a network no client can reach, and learns its external scheme from
+`X-Forwarded-Proto` — accepted only from the proxy's address, never from a
+client.
+
+- *Rejected: terminating in Kestrel.* Not because it cannot — it can — but
+  because every deployment target this is likely to meet (a load balancer, an
+  ingress controller, a platform router) terminates in front anyway, so an API
+  that only works when it holds the certificate is an API that has to be
+  reconfigured to be deployed. The forwarded-header path is the one that will
+  actually run, so it is the one that gets tested.
+- *Rejected: accepting `X-Forwarded-Proto` from anywhere.* A client-supplied
+  header would let a plaintext request claim to be secure, which turns §7's HSTS
+  and secure-cookie decisions into ones the caller makes. Known networks are
+  configured explicitly.
+- **The API's port is not published.** Only the proxy's is. A published API port
+  is a plaintext route around the TLS this section exists to require — a control
+  that exists and does not apply — and it is exactly the sort of thing added
+  back for debugging convenience, so the reason lives in a comment beside the
+  configuration rather than in the absence of a line.
+
+**The schema is applied by a migration job that runs to completion before the
+API starts**, from the same image with a different entrypoint.
+
+- *Rejected: migrating on API startup.* §8 forbids sticky sessions and therefore
+  assumes more than one instance; two instances starting together race the same
+  migration, and EF's locking turns that into one instance blocked behind
+  another's transaction for as long as the migration takes. A rolling deploy
+  makes that a startup timeout rather than a queue.
+- *Rejected: a documented operator step.* That is what the project already had —
+  an undocumented one — and register row 19 is the result: both test harnesses
+  ran `dotnet ef database update` themselves, which made them the only things
+  that ever applied the schema, and nothing noticed for eleven phases.
+- The API does not depend on the migrator having *run*; it depends on it having
+  **succeeded**. A job that fails leaves the stack down rather than up and empty.
+
+**The client is built into the image**, not mounted or served separately.
+
+- *Rejected: a separate static-hosting service.* It would be a second origin,
+  and §9's same-origin decision exists to avoid a CORS allow-list on a service
+  that issues connect tickets. One origin, one artefact, one thing to deploy.
+- *Rejected: building the client outside the image and copying it in.* The image
+  is then only correct if whoever built it remembered a step, which is the class
+  of defect this whole section is about.
+
 ## 5. The CRDT
 
 Implement **FugueMax** for a sequence of Unicode code points, as defined in
@@ -1676,6 +1736,12 @@ implementations agree with each other, which they would even if both were wrong.
   retired replicas, resync-required responses.
 - Traces spanning receive → validate → persist → broadcast.
 - `/health/live` and `/health/ready`; readiness checks Postgres and Redis.
+- **A deployment smoke test asserts a request that reads a row**, never only
+  that a process answers. `/health/live` returning 200 means the process is
+  running, which is what it says and all it should say — and a stack that comes
+  up against an empty schema satisfies it completely (§13.28). The narrowest
+  thing that would break if the deployment were wrong is a query, so that is
+  what the smoke test does.
 
 ## 11. Build phases
 
@@ -1891,6 +1957,26 @@ client connected to another server received nothing. Sabotaging the publish
 fails four of 3b.7's five tests and would have failed none of 3b.2's. Marked
 done in isolation, that ships covered by green tests until Phase 7's load
 testing puts two instances behind one load balancer.
+
+### Verify a deployment from outside it
+
+**Phase 5b's rule, stated phase-wide rather than per task, because a per-task
+rule erodes at the fourth task when one check is awkward: nothing in 5b is
+verified by anything running outside the Compose stack.** Where a test needs to
+reach in, it reaches in over the network at the published port, as a client
+would.
+
+The reason is the phase's whole subject. Every check in 5b is a check *about a
+deployment*, and for every one of them the cheapest way to pass is to assert it
+from the test host — where the schema was applied by a harness, the client was
+built by a script, and the ports are whatever the developer opened. That is not
+a hypothetical shortcut; it is precisely how eleven phases of green accumulated
+over an artefact that could not start (§13.28).
+
+The rule generalises past this phase: **a property of the deployed system is
+only tested by something that treats the deployment as opaque.** A test with
+privileged access to the inside of the thing it is verifying is testing its own
+access.
 
 ### A guard runs on a schedule something else keeps
 
@@ -3414,7 +3500,15 @@ Do the walk with nothing in hand. The first step that cannot be taken is the
 finding, and then keep walking past it on paper, because the interesting gaps
 cluster after the first one — nobody has been down there either.
 
-**Run it at least once per phase from Phase 5 on, and record the step where it
+**The walk's value is entirely in where it stops, so the stopping point is the
+output.** A green walk with no recorded stopping point is either a finished
+product or a walk trimmed to what passes, and nothing in the result distinguishes
+them — which makes an unannotated green walk worth less than no walk, because it
+reads as evidence. Record the step reached and the step that could not be taken,
+every time, including when the answer is "further than last time and still not
+the end".
+
+**Run it at least once per phase from Phase 5b on, and record the step where it
 stopped.** A walk that gets further than the last one is progress that no test
 suite reports; a walk that stops in the same place twice is a row in the
 deferred register that is not moving.
