@@ -10,12 +10,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 out="${1:-deploy/tls}"
+
+# Extra subjectAltName entries, e.g. "IP:10.1.0.4". The walk needs one: the
+# stack is reached by the host's routable address, because a container cannot
+# route to the host's loopback, and a certificate that does not name the address
+# in the URL fails verification no matter how trusted its issuer is.
+extra="${2:-}"
 mkdir -p "$out"
+
+sans='subjectAltName=DNS:localhost,IP:127.0.0.1'
+[[ -n "$extra" ]] && sans="$sans,$extra"
 
 openssl req -x509 -newkey rsa:2048 -sha256 -days 30 -nodes \
     -keyout "$out/key.pem" -out "$out/cert.pem" \
     -subj '/CN=localhost' \
-    -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>/dev/null
+    -addext "$sans" 2>/dev/null
 
 chmod 600 "$out/key.pem"
 

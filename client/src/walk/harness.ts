@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -67,8 +67,23 @@ function tail(text: string, lines: number): string {
   return text.split('\n').slice(-lines).join('\n').trim();
 }
 
-/** An address on this host that a container can route to. */
+/**
+ * The address this stack is reached by.
+ *
+ * @remarks
+ * Supplied by `scripts/walk.sh` when it runs, and that is load-bearing: the
+ * script generates the TLS certificate naming this address and exports
+ * `NODE_EXTRA_CA_CERTS` so this process trusts it, both of which must happen
+ * before Node starts. Two independent computations of "the host's address" that
+ * disagreed would produce a certificate for one address and a request to
+ * another — which surfaces as an unhelpful `fetch failed`, and did.
+ */
 function hostAddress(): string {
+  const supplied = process.env['WALK_HOST'];
+  if (supplied !== undefined && supplied !== '') {
+    return supplied;
+  }
+
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.family === 'IPv4' && !address.internal) {
@@ -119,9 +134,17 @@ export async function startWalk(): Promise<Walk> {
     sans: [`IP:${host}`],
   });
 
-  // The proxy's certificate, made by the same script a developer would run.
-  execFileSync(join(REPO, 'scripts/dev-cert.sh'), { cwd: REPO, stdio: 'ignore' });
-  const proxyPin = spkiOf(join(REPO, 'deploy/tls/cert.pem'));
+  // Made by scripts/walk.sh before this process started, because Node reads
+  // NODE_EXTRA_CA_CERTS at startup and the certificate has to name `host`.
+  const certFile = join(REPO, 'deploy/tls/cert.pem');
+  if (!existsSync(certFile)) {
+    throw new Error(
+      `${certFile} does not exist. Run the walk through scripts/walk.sh, which makes `
+      + 'the certificate for this host and trusts it before Node starts.',
+    );
+  }
+
+  const proxyPin = spkiOf(certFile);
 
   const work = mkdtempSync(join(tmpdir(), 'editor-walk-'));
   const envFile = join(work, 'walk.env');
