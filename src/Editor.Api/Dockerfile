@@ -28,7 +28,16 @@ ENV NODE_ENV=production
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 COPY client/package.json client/package-lock.json ./
-RUN npm ci
+
+# --include=dev is required, and it is required BECAUSE of NODE_ENV above: npm
+# reads that variable too and omits devDependencies when it says production —
+# which removes typescript and the bundler, the very tools this stage exists to
+# run. The failure is `tsc: not found` and an exit code of 127, which names
+# neither the variable nor the packages.
+#
+# One variable, set for React's export conditions, silently changing what a
+# different tool installs. The two uses are unrelated and the name is shared.
+RUN npm ci --include=dev
 
 COPY client/ ./
 RUN npm run build \

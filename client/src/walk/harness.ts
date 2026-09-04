@@ -140,11 +140,13 @@ export async function startWalk(): Promise<Walk> {
     );
   }
 
-  // --progress quiet: a buildkit layer stream is tens of thousands of lines of
-  // percentages, and on a failure it buries the one line that says why (§13.23).
-  // The harness is not exempt from the rule it exists to enforce.
+  // --progress plain: the tty renderer redraws layer percentages tens of
+  // thousands of times and buries the one line that says why (§13.23), while
+  // `quiet` suppresses the build's own stdout — which is where the reason
+  // actually is. Plain prints each step's output once, linearly. The harness is
+  // not exempt from the rule it exists to enforce, in either direction.
   const up = compose(
-    ['--progress', 'quiet', ...files, 'up', '--build', '--detach', '--wait', '--wait-timeout', '420'],
+    ['--progress', 'plain', ...files, 'up', '--build', '--detach', '--wait', '--wait-timeout', '420'],
     env,
   );
 
@@ -152,7 +154,7 @@ export async function startWalk(): Promise<Walk> {
     const logs = compose([...files, 'logs', '--no-color', '--tail', '60'], env).output;
     throw new Error(
       'the stack did not come up.\n'
-      + `--- the last of what the build said ---\n${tail(up.output, 40)}\n`
+      + `--- the last of what the build said ---\n${tail(up.output, 60)}\n`
       + `--- what the services said ---\n${tail(logs, 60) || '(no service ever started)'}`,
     );
   }
