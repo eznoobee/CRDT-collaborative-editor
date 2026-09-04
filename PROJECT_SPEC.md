@@ -1627,10 +1627,10 @@ reviewed. At the end of each phase, stop and report.
 | 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
 | 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
 | 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
-| 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed |
+| 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed; **and the client exists as a client** — a browser loads the app, authenticates, opens a document and types, with the text visible (§13.22) |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
-| 6 | Security hardening | Every requirement in §7 has a passing test; **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
-| 7 | Scale + observability | Load test hits the §8 targets; dashboards exist; **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
+| 6 | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
+| 7 | Scale + observability | Load test hits the §8 targets; **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
 (a) built every project with warnings-as-errors, (b) run at least one real
@@ -1728,6 +1728,23 @@ preserves the backup's modification time; the restored source was therefore
 *older* than the artefacts compiled from the sabotaged version, so MSBuild
 skipped the recompile and every following run silently executed the previous
 sabotage. See §13.17: the direction that matters is not the one that showed up.
+
+**When a sabotage survives, the first hypothesis is that the test does not reach
+the code — not that the code is unreachable.** 4.8's end-to-end test stayed green
+with the reconnect catch-up removed entirely, which reads at first like a claim
+about the code: perhaps catch-up is redundant when broadcast covers the same
+ground. It was a claim about the setup. The author had nothing to catch up on,
+because nobody had written anything while it was away, so convergence held for a
+reason unrelated to the mechanism. Giving the other client an edit to make during
+the outage — reaching the author only by catch-up, since broadcast went to a group
+it had left — made the same sabotage fail.
+
+This is the Phase 3 shutdown-race test again (right subject, wrong path), and it
+is now twice. The order matters because the two hypotheses lead opposite ways:
+"the code is redundant" invites deleting the mechanism, and "the test does not
+reach it" invites fixing the test. Prefer the second until the setup has been
+shown to exercise the path — a surviving sabotage is evidence about the test
+first and about the code only after that.
 
 ### Name the vacuity risk before writing the test
 
@@ -2989,3 +3006,77 @@ tracks.** A key that moves for reasons unrelated to the property produces false
 alarms, which train the reader to clear them in bulk, and false silence, which
 is unobservable. Position is the most tempting such key and the least stable
 one.
+
+### 13.22 A done-when the phase can satisfy while its deliverable does not exist
+
+Phase 4's done-when was met in full and Phase 4's deliverable did not exist.
+Offline edit, reconnection, convergence on §9 normalised state, resumption
+across a reload, a store version rejected rather than guessed — all verified
+against a real server over a real socket. And `App.tsx` still rendered *"No
+editor yet — see PROJECT_SPEC.md §11, Phase 4"*. Every part of a React editor
+was written and tested; nothing composed them into something a person could
+open.
+
+Neither half was wrong on its own. The criterion tested the properties that are
+hard to get right, which is what a criterion should do. The deliverable column
+said "React client". What was missing is that satisfying the first does not
+produce the second, and nothing in the table says it must.
+
+**This is the project's recurring shape, applied to the contract instead of to a
+test.** §13.15: a mechanism whose absence still converges. §13.19: a sentinel
+matching the syntax rather than the property. §13.21: a ratchet keyed on
+position rather than on the property. Each time, the check was adjacent to the
+thing that mattered and was read as covering it. A done-when is a test of a
+phase, and it fails the same way.
+
+**The audit this triggered**, over the phases not yet built:
+
+- **Phase 5** — no gap. "1,000 generated traces match across both
+  implementations; runner fuzzes in CI" is the deliverable, stated as a
+  behaviour.
+- **Phase 6** — the same gap. "Every requirement in §7 has a passing test" is
+  satisfiable entirely against a test host, while the application as actually
+  started ships without the header, the cap or the TLS requirement the test
+  proved. The criterion now names the configuration under test.
+- **Phase 7** — the same gap, in its plainest form. "Dashboards exist" is
+  satisfied by a JSON file nobody has ever read. Existence is not observability;
+  the criterion now requires a named failure to be diagnosable from them.
+
+The general rule: **a done-when must be unsatisfiable while the deliverable is
+absent.** Write it so that the only way to make it true is to build the thing —
+and when a criterion tests a property *of* the deliverable rather than its
+existence, say so and add the clause that requires the deliverable itself. The
+question to ask of every criterion in the table is the §13.19 question in
+another costume: what makes this true without making the deliverable real?
+
+### 13.23 A harness that cannot explain its own failure
+
+The interop job failed once, on 4.7, with the whole of its evidence being:
+
+```
+API did not start:
+warn: Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager[35]
+      No XML encryptor configured.
+```
+
+No elapsed time, no exit status, no address, no indication whether the process
+had crashed, was still starting, or was listening and refusing. It did not
+reproduce on the next two heads, and nothing between 4.5 and 4.7 touched the
+server — so the honest conclusion is that nothing was learned.
+
+The harness had also chosen its port by `5000 + random(3000)` and hoped. A lost
+guess and a genuine startup bug produce the identical sentence, which means the
+one occurrence that matters is indistinguishable from the many that do not.
+
+Both are now fixed at the source rather than at the symptom: the port is bound
+as 0 and read back from Kestrel's own announcement, so there is no guess to
+lose; and the failure carries how long it waited, what the process is doing or
+exited with, the address it polled, and — stated explicitly when it happens —
+that the process logged nothing at all, which is itself a finding.
+
+The rule: **a harness that cannot explain its own failure costs more than the
+failure it reports.** An unexplained failure is filed as flakiness, and once a
+job has been filed as flaky, its next real failure is filed the same way. The
+diagnosability of a check is part of the check, not a convenience for whoever
+reads it — and a retry, a longer timeout or a wider deadline treats the symptom
+while leaving the next occurrence exactly as illegible as this one.
