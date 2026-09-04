@@ -123,14 +123,17 @@ services:
     depends_on:
       api:
         condition: service_started
-    healthcheck:
-      # Against the API through the proxy, so this is a check on the path a
-      # browser takes rather than on nginx being alive.
-      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://localhost:8443/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
+
+    # No healthcheck, deliberately. The obvious one — fetch the API through the
+    # proxy from inside the proxy — needs a TLS-capable client in an image whose
+    # busybox wget is not one, and every workaround weakens what it checks: a
+    # plaintext probe on a second listener proves the proxy is alive and nothing
+    # about the path a browser takes.
+    #
+    # More to the point, it would be verifying the deployment from inside it,
+    # which §12's rule for this phase forbids for exactly this reason. §13.27's
+    # walk makes that assertion from outside, over TLS, against the published
+    # port — which is both stronger and where the check belongs.
 
 volumes:
   postgres-data:

@@ -39,6 +39,29 @@ export interface Walk {
   close(): Promise<void>;
 }
 
+/** Polls until the URL answers, or throws saying how long it waited (§13.23). */
+async function reachable(url: string, deadlineMs: number): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  let last = 'never attempted';
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return;
+      }
+
+      last = `HTTP ${response.status}`;
+    } catch (error) {
+      last = error instanceof Error ? error.message : String(error);
+    }
+
+    await new Promise((done) => setTimeout(done, 500));
+  }
+
+  throw new Error(`${url} never answered in ${deadlineMs}ms; last attempt said: ${last}`);
+}
+
 /** The last `lines` lines, because a failure is at the end and a build log is not. */
 function tail(text: string, lines: number): string {
   return text.split('\n').slice(-lines).join('\n').trim();
@@ -151,7 +174,13 @@ export async function startWalk(): Promise<Walk> {
   );
 
   if (up.status !== 0) {
-    const logs = compose([...files, 'logs', '--no-color', '--tail', '200'], env).output;
+    // This project's own services only. Postgres alone emits forty lines of
+    // initdb chatter that has never once been the cause, and it interleaves
+    // with the lines that are (§13.23).
+    const logs = compose(
+      [...files, 'logs', '--no-color', '--tail', '40', 'migrator', 'api', 'proxy'],
+      env,
+    ).output;
 
     // Services first, because once the images build the cause is always in a
     // container and never in the layer stream — and the layer stream is a
@@ -166,6 +195,12 @@ export async function startWalk(): Promise<Walk> {
   }
 
   const baseUrl = `https://${host}:${port}`;
+
+  // The proxy has no container healthcheck (see docker-compose.yml), so `--wait`
+  // returns when it is running rather than when it is serving. Waited on here
+  // from outside, over TLS, which is the assertion that matters anyway.
+  await reachable(`${baseUrl}/health/live`, 60_000);
+
   oidc.redirectUris.add(`${baseUrl}/callback`);
   oidc.origins.add(baseUrl);
 
