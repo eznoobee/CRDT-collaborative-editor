@@ -34,6 +34,19 @@ public sealed class OidcOptions
     public string MetadataAddress { get; set; } = string.Empty;
 
     /// <summary>
+    /// The public client id the browser authenticates as (§7's PKCE flow).
+    /// </summary>
+    /// <remarks>
+    /// Optional, and deliberately not a secret: a browser cannot keep one, so
+    /// §7 requires Authorization Code with PKCE and no client secret. An API
+    /// deployed without a single-page application never needs this, which is
+    /// why its absence is not a startup failure — but a client that asks for
+    /// configuration and receives none must refuse to start a login rather than
+    /// invent an id, so this reaches the browser as an empty value it checks.
+    /// </remarks>
+    public string ClientId { get; set; } = string.Empty;
+
+    /// <summary>
     /// Leeway on `exp` and `nbf`. Zero by default, which is the honest setting:
     /// the framework's five-minute default silently accepts tokens that expired
     /// five minutes ago, and §7 asks for lifetime to be validated.

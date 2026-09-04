@@ -32,6 +32,19 @@ export const REJECTION = {
    * pressure will be to make it whatever the client already tolerates.
    */
   resyncRequired: 'resync_required',
+
+  /**
+   * §7's PKCE flow cannot produce a valid token any more.
+   *
+   * The one code in this table no server emits — the client raises it about
+   * itself when a refresh fails or a session ends elsewhere. It behaves like a
+   * lost connection rather than a refusal: state goes offline, the outbox is
+   * kept in full, submission stops, and the message asks for a sign-in. §9
+   * requires that shape rather than an exception, because an unhandled
+   * rejection in the refresh path discards unsent work at exactly the moment
+   * the user is being asked to log in again.
+   */
+  signInRequired: 'sign_in_required',
 } as const;
 
 /** What the controller does with a refusal. */
@@ -70,6 +83,7 @@ export function recoveryFor(code: string): Recovery {
 
     case REJECTION.tooManyReplicas:
     case REJECTION.unauthenticated:
+    case REJECTION.signInRequired:
       return 'reconnect';
 
     default:

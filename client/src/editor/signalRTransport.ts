@@ -6,7 +6,9 @@ import {
 } from '@microsoft/signalr';
 import { MessagePackHubProtocol } from '@microsoft/signalr-protocol-msgpack';
 
-import type { CatchUpOutcome, Session, SubmitOutcome, Transport } from './SyncController';
+import { ConnectionRefused, type CatchUpOutcome, type Session, type SubmitOutcome, type Transport } from './SyncController';
+import { REJECTION } from './rejections';
+import { SignInRequired, type TokenSource } from '../auth/tokenSource';
 
 /** What `negotiate` answers (§7). */
 interface Negotiated {
@@ -46,6 +48,16 @@ export interface SignalRTransportOptions {
   readonly baseUrl: string;
   readonly documentId: string;
   readonly fetch?: Fetcher;
+
+  /**
+   * Where the bearer token for `negotiate` comes from (§7).
+   *
+   * @remarks
+   * Read on every connect rather than captured once. A token has an expiry and
+   * a reconnect can happen long after the first one was issued, so a captured
+   * token turns a recoverable expiry into a permanent 401.
+   */
+  readonly tokens?: TokenSource;
 
   /** Builds the connection. Overridable for a non-browser harness. */
   readonly build?: (url: string) => HubConnection;
@@ -90,14 +102,34 @@ export class SignalRTransport implements Transport {
     await this.close();
     this.closing = false;
 
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+
+    if (this.options.tokens !== undefined) {
+      try {
+        headers['authorization'] = `Bearer ${await this.options.tokens.token()}`;
+      } catch (error) {
+        // §9: this is a state, not an exception. The controller keeps the
+        // outbox, goes offline, and shows that a sign-in is needed — rather
+        // than an unhandled rejection discarding unsent work at exactly the
+        // moment the user is being asked to log in again.
+        if (error instanceof SignInRequired) {
+          throw new ConnectionRefused(REJECTION.signInRequired, error);
+        }
+
+        throw error;
+      }
+    }
+
     const response = await this.http(
       `${this.options.baseUrl}/documents/${this.options.documentId}/negotiate`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ replicaId }),
-      },
+      { method: 'POST', headers, body: JSON.stringify({ replicaId }) },
     );
+
+    // 401 means the token was rejected rather than absent, which is the same
+    // recovery: get a new one. Anything else is a transport failure.
+    if (response.status === 401) {
+      throw new ConnectionRefused(REJECTION.signInRequired);
+    }
 
     if (!response.ok) {
       throw new Error(`negotiate failed: ${response.status}`);

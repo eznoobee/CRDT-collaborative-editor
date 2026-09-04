@@ -3,6 +3,7 @@ using Editor.Api.Documents;
 using Editor.Api.Hubs;
 using Editor.Api.Infrastructure;
 using Editor.Api.Logging;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,6 +47,9 @@ app.UseAuthorization();
 // be the hardcoded return §12 forbids, so it stays absent until then.
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 
+// What the browser reads before it can log in (§7). Anonymous by necessity.
+app.MapClientConfiguration();
+
 // Where the membership decision is made, with the OIDC token in a header.
 app.MapNegotiate();
 
@@ -63,6 +67,35 @@ app.MapHub<EditorHub>("/hub/editor", options =>
     options.TransportMaxBufferSize = backpressure.MaxOutboundBytes;
     options.ApplicationMaxBufferSize = backpressure.MaxOutboundBytes;
 });
+
+// The single-page application, served from this origin (§9, §13.26).
+//
+// Same origin, deliberately: the alternative is CORS, which means an
+// allow-list of browser origins on an API that already accepts a bearer token
+// and hands out connect tickets. Every one of those is a new way to get the
+// configuration wrong in a direction that is permissive, and none of it buys
+// anything the reverse proxy in front of a deployment cannot do by routing two
+// paths to one host. Nothing here relaxes for development either — §7's
+// no-fallback rule applies to origins as much as to issuers.
+//
+// Absent by default. A deployment with no built client serves the API alone
+// rather than 404-ing every page from a directory that is not there, and the
+// path is configuration rather than a convention so the e2e harness can point
+// at a build it just made.
+var spaRoot = builder.Configuration["Spa:RootPath"];
+if (!string.IsNullOrWhiteSpace(spaRoot) && Directory.Exists(spaRoot))
+{
+    var files = new PhysicalFileProvider(Path.GetFullPath(spaRoot));
+
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+
+    // Client-side routing: any path the endpoints above did not claim is the
+    // app's own. Registered last, so it cannot shadow /documents, /hub or
+    // /health — MapFallbackToFile has the lowest possible order precisely so
+    // that a new endpoint added later is still reached.
+    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = files });
+}
 
 await app.RunAsync();
 

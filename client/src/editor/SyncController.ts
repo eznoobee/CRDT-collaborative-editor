@@ -22,6 +22,27 @@ export interface Session {
 }
 
 /**
+ * A connection refused for a reason §9 has a recovery for.
+ *
+ * @remarks
+ * A dropped socket and a refusal are different events with different answers
+ * (§13.13), and until this existed every connect failure was the former: the
+ * controller went offline and retried, and a client whose session had expired
+ * retried forever against something that would never accept it, with nothing on
+ * screen to say why. A transport that knows the reason says so.
+ */
+export class ConnectionRefused extends Error {
+  readonly code: string;
+
+  constructor(code: string, cause?: unknown) {
+    super(`Connection refused: ${code}`);
+    this.name = 'ConnectionRefused';
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+/**
  * Everything the controller needs from a connection, and nothing else.
  *
  * @remarks
@@ -218,7 +239,14 @@ export class SyncController {
     let session: Session;
     try {
       session = await this.transport.connect(requested);
-    } catch {
+    } catch (error) {
+      // A refusal with a code is reported before the retry is scheduled, so
+      // the state and the reason change together and there is no window in
+      // which the client is offline for no stated cause (§13.13).
+      if (error instanceof ConnectionRefused) {
+        this.fail(error.code, 0);
+      }
+
       this.setState('offline');
       this.retry();
       return;

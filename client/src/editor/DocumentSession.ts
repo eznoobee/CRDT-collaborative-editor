@@ -1,5 +1,12 @@
-import { Replica, decodeOperations, encodeOperations, type Operation } from '../crdt';
-import type { ReplicaId } from '../crdt';
+import {
+  Replica,
+  decodeOperations,
+  decodeSnapshot,
+  encodeOperations,
+  encodeSnapshot,
+  type Operation,
+} from '../crdt';
+import { formatReplicaId, type ReplicaId } from '../crdt';
 import { serializeSnapshot } from '../crdt/snapshotJson';
 import { replacementBetween } from './diff';
 
@@ -33,6 +40,11 @@ export class DocumentSession {
   constructor(id: ReplicaId, sink: (operations: Uint8Array) => void) {
     this.replica = new Replica(id);
     this.sink = sink;
+  }
+
+  /** The replica id this session authors under (§7's assignment). */
+  get replicaId(): string {
+    return formatReplicaId(this.replica.id);
   }
 
   /** What this client believes the document says. */
@@ -135,6 +147,31 @@ export class DocumentSession {
     }
 
     return operations;
+  }
+
+  /**
+   * This document in §6's snapshot encoding, for the local store (§9).
+   *
+   * @remarks
+   * The same bytes the server would send, deliberately. A second local format
+   * would be a second codec to keep in step with §6, and §13.11 is what happens
+   * when two encoders drift — except that this one has no conformance runner
+   * comparing it to anything.
+   */
+  get snapshot(): Uint8Array {
+    return encodeSnapshot(this.replica.export(), this.replica.versionVectorEntries);
+  }
+
+  /** Rebuilds a session from a stored snapshot (§9's reload path). */
+  static restore(
+    id: ReplicaId,
+    snapshot: Uint8Array,
+    sink: (operations: Uint8Array) => void,
+  ): DocumentSession {
+    const decoded = decodeSnapshot(snapshot);
+    const session = new DocumentSession(id, sink);
+    session.replica = Replica.import(id, decoded.elements, decoded.versionVector);
+    return session;
   }
 
   /** Applies a batch that arrived from the server, in §6 binary. */
