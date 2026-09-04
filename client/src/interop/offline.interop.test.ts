@@ -50,8 +50,18 @@ describe('offline editing, reconnection and convergence', () => {
     await oidc?.close();
   });
 
-  /** A client wired exactly as the app wires one. */
-  function client(subject: string, documentId: string) {
+  /**
+   * A client wired exactly as the app wires one.
+   *
+   * @param replicaId - What the store held, if this is a reload.
+   * @param outbox - Batches the store held unsent, oldest first.
+   */
+  function client(
+    subject: string,
+    documentId: string,
+    replicaId: string | null = null,
+    outbox: readonly Uint8Array[] = [],
+  ) {
     const token = oidc.mint(subject);
     const transport = new SignalRTransport({
       baseUrl: api.baseUrl,
@@ -75,8 +85,8 @@ describe('offline editing, reconnection and convergence', () => {
         return new DocumentSession(parseReplicaId(replicaId), (batch) => sync.enqueue(batch));
       },
       transport,
-      null,
-      [],
+      replicaId,
+      outbox,
       { schedule: () => {} },
     );
 
@@ -166,6 +176,68 @@ describe('offline editing, reconnection and convergence', () => {
       );
     } finally {
       await author.sync.stop();
+      await watcher.sync.stop();
+    }
+  }, 90_000);
+
+  it('resumes the stored replica and drains a stored outbox after a reload', async () => {
+    // §11's other Phase 4 done-when. A reconnect keeps the controller and its
+    // queue in memory, so it proves nothing about the case that actually loses
+    // work: the tab was closed with unsent batches in IndexedDB, and everything
+    // the client knows about itself now comes from the store.
+    //
+    // The vacuity risk: a reload test whose new client is handed the old
+    // session in memory is a reconnect test wearing a hat. Nothing of the first
+    // client survives here except the two values §9 says the store holds — the
+    // replica id and the unsent bytes — and the assertion is on what the
+    // *watcher* receives, so the work is proved to have reached the server
+    // rather than merely to have been re-rendered locally.
+    const documentId = seed(oidc.issuer, [
+      { subject: 'reload-author', role: 'editor' },
+      { subject: 'reload-watcher', role: 'editor' },
+    ]);
+
+    const watcher = client('reload-watcher', documentId);
+    const first = client('reload-author', documentId);
+
+    try {
+      await watcher.sync.start();
+      await first.sync.start();
+
+      const id = first.assigned[0]!;
+      first.sync.session!.edit('saved ');
+      await waitFor(() => first.sync.pending.length === 0);
+
+      await first.transport.simulateNetworkLoss();
+      await waitFor(() => first.sync.state === 'offline');
+
+      // Authored with no connection, so this is what the store would hold.
+      first.sync.session!.edit('saved and unsent');
+      const stored = [...first.sync.pending];
+      expect(stored.length).toBeGreaterThan(0);
+
+      // THE RELOAD. The first client is gone — its claim released, its session
+      // and its queue discarded — and a new one starts from the store alone.
+      await first.sync.stop();
+
+      const reloaded = client('reload-author', documentId, id, stored);
+      try {
+        await reloaded.sync.start();
+        await waitFor(() => reloaded.sync.pending.length === 0);
+
+        // §7: continued, not re-authored. A fresh id here would mean the stored
+        // batches are refused by tier-1 and discarded, which is the silent
+        // data loss this whole path exists to prevent.
+        expect(reloaded.assigned).toEqual([id]);
+        expect(reloaded.sync.problem).toBeNull();
+
+        // And the work reached the server, which only the watcher can attest.
+        await waitFor(() => watcher.sync.session!.text.includes('and unsent'));
+      } finally {
+        await reloaded.sync.stop();
+      }
+    } finally {
+      await first.sync.stop();
       await watcher.sync.stop();
     }
   }, 90_000);
