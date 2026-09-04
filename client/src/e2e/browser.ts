@@ -51,12 +51,15 @@ function executablePath(): string | undefined {
   return spawnSync('test', ['-e', shipped]).status === 0 ? shipped : undefined;
 }
 
-export async function startBrowser(oidc: Oidc): Promise<Browsing> {
+export async function startBrowser(
+  oidc: Oidc,
+  extraPins: readonly string[] = [],
+): Promise<Browsing> {
   const found = executablePath();
   const browser = await chromium.launch({
     // The pin. One key, this run's, and nothing else about certificate
     // validation changes.
-    args: [`--ignore-certificate-errors-spki-list=${oidc.spki}`],
+    args: [`--ignore-certificate-errors-spki-list=${[oidc.spki, ...extraPins].join(',')}`],
     ...(found === undefined ? {} : { executablePath: found }),
   });
 

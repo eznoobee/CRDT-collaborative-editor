@@ -5,8 +5,17 @@
 **/dist-types/
 .git/
 .github/
-client/
 tests/
+
+# client/ is NOT excluded, and the blank line above is not an accident.
+#
+# It was excluded for eleven phases, which is the mechanical reason the
+# published image contained no application (§13.27, register row 18): the
+# Dockerfile could not have copied the client even if it had tried, because the
+# build context did not contain it. The heavy parts are already excluded by the
+# node_modules and dist patterns above, and dist being excluded is deliberate —
+# the client is built inside the image, so a stale build on the host must not
+# leak into it.
 **/.env
 **/.env.*
 !**/.env.example

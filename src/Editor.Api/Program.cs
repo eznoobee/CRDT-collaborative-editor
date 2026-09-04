@@ -19,6 +19,10 @@ builder.Services.AddSecretRedaction();
 // than starting up and accepting whatever arrives (§7, §13.12).
 // appsettings.json deliberately carries no Oidc defaults for the same reason:
 // a default issuer is a fallback, and a fallback is what §7 forbids.
+// §4: TLS terminates at a reverse proxy, so the external scheme arrives in a
+// header — trusted from the configured networks and nowhere else.
+builder.Services.AddProxyForwarding(builder.Configuration);
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddEditorAuthentication(builder.Configuration);
 
@@ -31,6 +35,9 @@ builder.Services.AddEditorRedis(builder.Configuration);
 builder.Services.AddEditorPersistence(builder.Configuration);
 
 var app = builder.Build();
+
+// First in the pipeline, before anything reads the scheme or the client address.
+app.UseForwardedHeaders();
 
 // Before authentication: the hub's credential is a ticket, not a token, and
 // this refuses an unusable one while the client can still see the refusal.

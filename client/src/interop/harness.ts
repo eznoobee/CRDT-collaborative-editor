@@ -108,8 +108,31 @@ function keys(): Signing {
   };
 }
 
+/** How the issuer is reachable. Defaults to loopback, as every suite but the walk wants. */
+export interface OidcOptions {
+  /** Address to bind. `0.0.0.0` when containers must reach it. */
+  readonly bind?: string;
+
+  /** Extra `subjectAltName` entries, e.g. `IP:10.1.0.4`. */
+  readonly sans?: readonly string[];
+
+  /**
+   * The host clients use to reach it, if not `127.0.0.1`.
+   *
+   * @remarks
+   * An OIDC issuer is an absolute URL that both the browser and the API compare
+   * exactly, so when they are on different sides of a container boundary there
+   * has to be one name that works from both. Getting this wrong does not fail
+   * at startup; it fails at token validation, as an issuer mismatch.
+   */
+  readonly reachableAs?: string;
+}
+
 /** A certificate for 127.0.0.1, so the metadata really is served over TLS. */
-function certificate(directory: string): { certFile: string; keyFile: string } {
+function certificate(
+  directory: string,
+  sans: readonly string[] = [],
+): { certFile: string; keyFile: string } {
   const certFile = join(directory, 'oidc-cert.pem');
   const keyFile = join(directory, 'oidc-key.pem');
 
@@ -119,7 +142,7 @@ function certificate(directory: string): { certFile: string; keyFile: string } {
       'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1', '-nodes',
       '-keyout', keyFile, '-out', certFile,
       '-subj', '/CN=127.0.0.1',
-      '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost',
+      '-addext', ['subjectAltName=IP:127.0.0.1,DNS:localhost', ...sans].join(','),
     ],
     { encoding: 'utf8' },
   );
@@ -183,9 +206,9 @@ function challengeFor(verifier: string): string {
 }
 
 /** Starts the issuer: discovery, JWKS, and a signer for this run only. */
-export async function startOidc(): Promise<Oidc> {
+export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
   const directory = mkdtempSync(join(tmpdir(), 'editor-interop-'));
-  const { certFile, keyFile } = certificate(directory);
+  const { certFile, keyFile } = certificate(directory, options.sans ?? []);
   const signing = keys();
 
   // The system roots plus this run's certificate. Replacing the system store
@@ -442,9 +465,14 @@ export async function startOidc(): Promise<Oidc> {
     });
   }
 
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const bind = options.bind ?? '127.0.0.1';
+  await new Promise<void>((done) => server.listen(0, bind, done));
   const { port } = server.address() as AddressInfo;
-  issuer = `https://127.0.0.1:${port}`;
+
+  // The issuer URL a *client* uses, which is not always the bind address: the
+  // walk runs the API in a container that cannot reach the host's loopback, and
+  // an OIDC issuer is an absolute URL both sides must agree on exactly.
+  issuer = `https://${options.reachableAs ?? '127.0.0.1'}:${port}`;
 
   return {
     issuer,

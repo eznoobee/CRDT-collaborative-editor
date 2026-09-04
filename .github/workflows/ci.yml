@@ -272,53 +272,40 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  compose:
-    name: Compose stack smoke test
+  walk:
+    name: The walk — cold start to sign-in
     runs-on: ubuntu-latest
+
+    # Replaces the old Compose smoke test, which asserted /health/live and
+    # therefore passed for eleven phases over a stack that could not serve a
+    # single request touching Postgres (§13.28). This brings the same stack up
+    # and follows what a user does, asserting a request that reads a row.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate a local-only environment
-        # docker-compose.yml deliberately has no default password and no
-        # default issuer (PROJECT_SPEC.md §7), so CI supplies both. The issuer
-        # is unreachable on purpose: this job proves the stack comes up and
-        # answers /health/live, not that tokens validate — key retrieval is
-        # lazy, so an unreachable metadata address does not block startup.
-        run: |
-          {
-            echo "POSTGRES_DB=editor"
-            echo "POSTGRES_USER=editor"
-            echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"
-            echo "API_PORT=8080"
-            echo "OIDC_ISSUER=https://issuer.ci.invalid/"
-            echo "OIDC_AUDIENCE=editor-api"
-            echo "OIDC_METADATA_ADDRESS=https://issuer.ci.invalid/.well-known/openid-configuration"
-            echo "REDIS_CONFIGURATION=redis:6379"
-          } > .env
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
 
-      - name: Start the stack
-        run: docker compose up --build --detach --wait --wait-timeout 300
+      - run: npm ci
+        working-directory: client
 
-      - name: Liveness endpoint responds
-        run: |
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://localhost:8080/health/live; then
-              echo
-              echo "Liveness OK on attempt ${attempt}."
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Liveness endpoint never responded."
-          exit 1
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
 
-      - name: Dump logs on failure
+      # No .env is written here, and no schema applied, and no client built.
+      # The walk's harness generates what a deployment's operator supplies — an
+      # issuer, a certificate, a password — and nothing else. Anything more
+      # would make this a test of a stack this project does not ship (§12).
+      - name: Walk
+        run: ./scripts/walk.sh
+
+      - name: The stack's logs, on failure
         if: failure()
-        run: docker compose logs --no-color
-
-      - name: Tear down
-        if: always()
-        run: docker compose down --volumes
+        run: docker compose logs --no-color --tail 200 || true
 
   secrets:
     name: Secret scan

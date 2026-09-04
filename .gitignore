@@ -38,3 +38,4 @@ tests/browser/node_modules/
 # inside the client because esbuild resolves a bare import from the importing
 # file's directory, so an entry point outside it cannot see client/node_modules.
 client/.bundle-metrics-*/
+deploy/tls/

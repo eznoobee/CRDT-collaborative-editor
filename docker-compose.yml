@@ -29,6 +29,28 @@ services:
       retries: 12
       start_period: 5s
 
+  # Applies the schema and exits. Nothing else does — not the API at startup
+  # (§4: several instances race the same migration and §8 forbids sticky
+  # sessions, so there are always several), and not an operator, because an
+  # operator step is what this project already had and register row 19 is the
+  # result: both harnesses ran `dotnet ef database update` themselves, which
+  # made them the only things that ever applied the schema.
+  #
+  # The same image as the API, with a different entrypoint, so the migrator and
+  # the thing it migrates for are provably the same build.
+  migrator:
+    build:
+      context: .
+      dockerfile: src/Editor.Api/Dockerfile
+    command:
+      - "./migrate"
+      - "--connection"
+      - "Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
@@ -47,13 +69,54 @@ services:
       # connects to nothing and issues tickets nobody can redeem.
       Redis__Configuration: ${REDIS_CONFIGURATION:?set REDIS_CONFIGURATION in .env}
       Postgres__ConnectionString: Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    ports:
-      - "${API_PORT:-8080}:8080"
+      # The public client id the browser authenticates as (§7's PKCE flow). No
+      # default, for the same reason the issuer has none: a stack meant to serve
+      # the application must fail rather than serve one that cannot log in.
+      Oidc__ClientId: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      # Where the reverse proxy is, so X-Forwarded-Proto is honoured from it and
+      # from nothing else (§4). A client-supplied header would let a plaintext
+      # request claim to be secure.
+      ForwardedHeaders__KnownProxies: ${PROXY_ADDRESS:-172.16.0.0/12}
+
+    # DELIBERATELY NOT PUBLISHED, and this comment is the point rather than the
+    # missing line. §4 terminates TLS at the proxy; a published API port is a
+    # plaintext route straight past it — a control that exists and does not
+    # apply. It is the kind of thing added back for an afternoon's debugging and
+    # never removed, so: reach the API through the proxy, or `docker compose
+    # exec` into the network. Do not republish this.
+    expose:
+      - "8080"
+
     depends_on:
+      # Not "has run" — has SUCCEEDED. A failed migration leaves the stack down
+      # rather than up and serving against an empty schema (§13.28).
+      migrator:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # Where TLS terminates (§4). The only service with a published port.
+  proxy:
+    image: nginx:1.29-alpine
+    ports:
+      - "${HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/cert.pem:ro
+      - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/key.pem:ro
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      # Against the API through the proxy, so this is a check on the path a
+      # browser takes rather than on nginx being alive.
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://localhost:8443/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
 volumes:
   postgres-data:

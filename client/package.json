@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:interop": "vitest run --config vitest.interop.config.ts",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:walk": "vitest run --config vitest.walk.config.ts"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.11",
