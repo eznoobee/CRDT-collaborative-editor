@@ -3206,3 +3206,64 @@ Same family as §13.23: a failure that cannot explain itself costs more than the
 failure. There it was a harness, here a product error path, and the cost is
 identical — time spent in the wrong place, and a real cause filed as something
 else.
+
+### 13.26 The end-to-end suite was testing a build no user receives
+
+The browser suite for 4.10 failed with the page showing *"No matching state
+found in storage"* — `oidc-client-ts` refusing to complete a redirect whose
+single-use state it had already consumed. The obvious reading is a bug in the
+sign-in code, and there was one. It was not why the test failed.
+
+The application under test was **React's development build**. Vitest sets
+`NODE_ENV=test` in its own process; the harness spawned `npm run build` from a
+test and inherited it; Vite resolved React through its `development` export
+condition. The artefact served was 575 KB instead of 377 KB, and — the part that
+mattered — it ran Strict Mode's deliberate double-invocation of effects, so the
+sign-in effect ran twice and the second call found the state spent.
+
+Two distinct failures, and it is worth separating them:
+
+1. **The harness built something other than what ships.** §13.17 in another
+   costume: there, a sabotage run reported on a stale build; here, an end-to-end
+   run reported on a build produced under the wrong environment. Both are the
+   same mistake — *believing a result is about the artefact you meant*. Note
+   that this one could not be seen from the source at all: the code was correct
+   and the bundle was wrong.
+2. **Completing an OIDC redirect inside a React effect.** It consumes a
+   single-use authorization code and a single-use PKCE verifier, and React runs
+   effects more than once — on purpose in development, and for real on any
+   remount. The development build made it fail every time; a production build
+   would have hidden it until the first remount, in front of a user. The
+   bootstrap now runs once, outside React.
+
+The second was found only because of the first, which is the uncomfortable part:
+the wrong build is what made a latent fault deterministic. A correct harness
+would have shipped this bug.
+
+**The fix is in two halves and only one of them is the point.** Setting
+`NODE_ENV=production` for the spawned build addresses today's cause. Asserting
+the artefact — the built bundle must not contain React's development build —
+addresses whatever tomorrow's is: a changed default, a new wrapper script, a
+plugin that reads the environment itself. The general rule: **when a harness
+builds the thing it tests, it must check what it built, not just how it asked
+for it.** A build command is an intention; the bundle is the fact.
+
+What defeats the check (§13.19, asked of this guard in the same commit): a
+future React whose development build drops the console string it keys on, or a
+bundler that strips console text. It is a marker standing in for a property that
+has no marker of its own, and it is recorded here as such rather than trusted as
+a proof.
+
+**What it did not cost, checked rather than assumed.** The first instinct was
+that §13.13a's client-bundle numbers — the ones the MessagePack decision turned
+on — had been measured the same way. They had not: that harness builds with
+esbuild from its own entry points, imports no React at all, and sets `minify`
+explicitly, so those figures stand. What *was* affected is the application
+bundle size `vite build` prints in CI, which has been reporting a development
+build all along.
+
+The distinction is worth the paragraph because the reflex after finding a
+measurement bug is to distrust every measurement, and the useful response is to
+go and look at each one. Neither harness recorded *which* build it measured,
+which is the actual gap: a number without its build mode is a number that cannot
+be checked later.

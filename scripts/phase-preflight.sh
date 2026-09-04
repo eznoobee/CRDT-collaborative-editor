@@ -133,6 +133,7 @@ run_gate "tests" ./scripts/run-tests.sh
 run_gate "client" ./scripts/client-gates.sh
 run_gate "conformance" ./scripts/conformance.sh
 run_gate "interop" ./scripts/interop.sh
+run_gate "e2e" ./scripts/e2e.sh
 run_gate "mutation" ./scripts/mutation.sh
 
 if [[ ${#failures[@]} -gt 0 ]]; then
