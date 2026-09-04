@@ -39,6 +39,11 @@ export interface Walk {
   close(): Promise<void>;
 }
 
+/** The last `lines` lines, because a failure is at the end and a build log is not. */
+function tail(text: string, lines: number): string {
+  return text.split('\n').slice(-lines).join('\n').trim();
+}
+
 /** An address on this host that a container can route to. */
 function hostAddress(): string {
   for (const addresses of Object.values(networkInterfaces())) {
@@ -135,10 +140,21 @@ export async function startWalk(): Promise<Walk> {
     );
   }
 
-  const up = compose([...files, 'up', '--build', '--detach', '--wait', '--wait-timeout', '420'], env);
+  // --progress quiet: a buildkit layer stream is tens of thousands of lines of
+  // percentages, and on a failure it buries the one line that says why (§13.23).
+  // The harness is not exempt from the rule it exists to enforce.
+  const up = compose(
+    ['--progress', 'quiet', ...files, 'up', '--build', '--detach', '--wait', '--wait-timeout', '420'],
+    env,
+  );
+
   if (up.status !== 0) {
     const logs = compose([...files, 'logs', '--no-color', '--tail', '60'], env).output;
-    throw new Error(`the stack did not come up:\n${up.output}\n--- logs ---\n${logs}`);
+    throw new Error(
+      'the stack did not come up.\n'
+      + `--- the last of what the build said ---\n${tail(up.output, 40)}\n`
+      + `--- what the services said ---\n${tail(logs, 60) || '(no service ever started)'}`,
+    );
   }
 
   const baseUrl = `https://${host}:${port}`;
