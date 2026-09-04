@@ -1,5 +1,6 @@
 import { Replica, decodeOperations, encodeOperations, type Operation } from '../crdt';
 import type { ReplicaId } from '../crdt';
+import { serializeSnapshot } from '../crdt/snapshotJson';
 import { replacementBetween } from './diff';
 
 /**
@@ -37,6 +38,23 @@ export class DocumentSession {
   /** What this client believes the document says. */
   get text(): string {
     return this.replica.text;
+  }
+
+  /**
+   * §9's normalised form of this document.
+   *
+   * @remarks
+   * What convergence is asserted on. Equal text is a much weaker claim: two
+   * replicas can render the same characters while disagreeing about the tree
+   * underneath, and that disagreement is what diverges on the next concurrent
+   * edit.
+   */
+  get normalised(): string {
+    return serializeSnapshot(
+      this.replica.export(),
+      this.replica.versionVectorEntries,
+      this.replica.text,
+    );
   }
 
   /**

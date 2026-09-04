@@ -89,7 +89,8 @@ export interface SyncOptions {
  * </p>
  */
 export class SyncController {
-  private readonly session: DocumentSession;
+  private readonly build: (replicaId: string) => DocumentSession;
+  private sessionState: DocumentSession | null;
   private readonly transport: Transport;
   private readonly backoff: Backoff;
   private readonly schedule: (run: () => void, delayMs: number) => void;
@@ -104,14 +105,22 @@ export class SyncController {
   private readOnlyState = false;
   private retried = new Set<string>();
 
+  /**
+   * @param build - Makes the session once the server has assigned a replica id.
+   * Deferred rather than taken ready-made, because §7 assigns that id at
+   * `negotiate` and a session built before it would author operations under an
+   * id the server never issued — which tier-1 refuses, one batch at a time,
+   * with no obvious cause.
+   */
   constructor(
-    session: DocumentSession,
+    build: (replicaId: string) => DocumentSession,
     transport: Transport,
     replicaId: string | null = null,
     outbox: readonly Uint8Array[] = [],
     options: SyncOptions = {},
   ) {
-    this.session = session;
+    this.build = build;
+    this.sessionState = null;
     this.transport = transport;
     this.replicaId = replicaId;
     this.outbox = [...outbox];
@@ -119,7 +128,11 @@ export class SyncController {
     this.schedule = options.schedule ?? ((run, delay) => setTimeout(run, delay));
 
     transport.onBroadcast((operations) => {
-      this.session.receive(operations);
+      // A broadcast can land before this client has a session — the server
+      // starts sending the moment the connection joins the group. Dropping it
+      // is safe: catch-up runs on the same connection and asks for everything
+      // this replica does not have.
+      this.sessionState?.receive(operations);
       this.changed();
     });
 
@@ -139,6 +152,11 @@ export class SyncController {
 
   get state(): SyncState {
     return this.current;
+  }
+
+  /** The session, once a connection has assigned this client a replica id. */
+  get session(): DocumentSession | null {
+    return this.sessionState;
   }
 
   /**
@@ -219,6 +237,14 @@ export class SyncController {
     this.replicaId = session.replicaId;
     this.backoff.reset();
 
+    // Built on the first connection, and rebuilt if the server assigned a
+    // different id than the one resumed — the old session authored under an id
+    // this connection may not use.
+    this.sessionState ??= this.build(session.replicaId);
+    if (refused) {
+      this.sessionState = this.build(session.replicaId);
+    }
+
     // Cleared on a connection that succeeded. The server re-reads the role at
     // negotiate, so a demotion that has been reversed should not leave the
     // client read-only until it reloads — and one that has not will refuse the
@@ -247,8 +273,8 @@ export class SyncController {
    */
   private async reconcile(discard: boolean): Promise<void> {
     const known: Record<string, number> = {};
-    if (!discard) {
-      for (const [replica, next] of this.session.versionVector) {
+    if (!discard && this.sessionState !== null) {
+      for (const [replica, next] of this.sessionState.versionVector) {
         known[replica] = Number(next);
       }
     }
@@ -258,14 +284,18 @@ export class SyncController {
       return;
     }
 
+    if (this.sessionState === null) {
+      return;
+    }
+
     if (caught.snapshot !== null) {
       const decoded = decodeSnapshot(caught.snapshot);
-      this.session.adopt(
+      this.sessionState.adopt(
         Replica.import(parseReplicaId(this.replicaId!), decoded.elements, decoded.versionVector),
       );
     }
 
-    this.session.receive(caught.operations);
+    this.sessionState.receive(caught.operations);
     this.changed();
   }
 

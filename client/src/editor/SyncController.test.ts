@@ -24,6 +24,9 @@ import { Replica, encodeOperations, encodeSnapshot, parseReplicaId } from '../cr
 const ID = '00000000-0000-0000-0000-00000000000a';
 const PEER = parseReplicaId('00000000-0000-0000-0000-00000000000b');
 
+/** What the server mints when it refuses a resumption (§7). */
+const FRESH = '00000000-0000-0000-0000-00000000000c';
+
 class FakeTransport implements Transport {
   broadcast: ((operations: Uint8Array) => void) | null = null;
   closed: (() => void) | null = null;
@@ -84,11 +87,24 @@ class FakeTransport implements Transport {
 function controller(transport: FakeTransport, options: {
   replicaId?: string | null;
   outbox?: Uint8Array[];
+
+  /**
+   * Text the rebuilt session starts from, as a reload restores it from the
+   * store. The session cannot be handed in ready-made: §7 assigns the replica
+   * id at negotiate, so it is built around the id the *server* answered with.
+   */
+  restored?: string;
 } = {}) {
   const pending: (() => void)[] = [];
-  const session = new DocumentSession(parseReplicaId(ID), () => {});
   const sync = new SyncController(
-    session,
+    (replicaId) => {
+      const built = new DocumentSession(parseReplicaId(replicaId), () => {});
+      if (options.restored !== undefined) {
+        built.edit(options.restored);
+      }
+
+      return built;
+    },
     transport,
     options.replicaId ?? null,
     options.outbox ?? [],
@@ -99,7 +115,6 @@ function controller(transport: FakeTransport, options: {
   );
 
   return {
-    session,
     sync,
     /** Runs whatever retry was scheduled. */
     async tick(): Promise<void> {
@@ -120,9 +135,8 @@ describe('connecting', () => {
     // The assertion that separates a correct client from one that would look
     // identical until an out-of-order broadcast arrived.
     const transport = new FakeTransport();
-    const { session, sync } = controller(transport);
+    const { sync } = controller(transport, { restored: 'ab' });
 
-    session.edit('ab');
     await sync.start();
 
     expect(transport.vectors).toHaveLength(1);
@@ -143,10 +157,10 @@ describe('connecting', () => {
       operations: encodeOperations(operations),
     };
 
-    const { session, sync } = controller(transport);
+    const { sync } = controller(transport);
     await sync.start();
 
-    expect(session.text).toBe('hi');
+    expect(sync.session?.text).toBe('hi');
     expect(sync.state).toBe('live');
   });
 
@@ -161,14 +175,13 @@ describe('connecting', () => {
       operations: encodeOperations([]),
     };
 
-    const { session, sync } = controller(transport);
-    session.edit('local');
+    const { sync } = controller(transport, { restored: 'local' });
 
     await sync.start();
 
     // The local text is gone, which is what a snapshot means: the server's
     // whole answer, taken when local state was not worth reconciling.
-    expect(session.text).toBe('server');
+    expect(sync.session?.text).toBe('server');
   });
 });
 
@@ -188,7 +201,7 @@ describe('resumption', () => {
     // connection may not use, and tier-1 refuses every one of them. Keeping
     // them would mean retrying forever against a rejection that never changes.
     const transport = new FakeTransport();
-    transport.connectResults = [{ replicaId: 'a-different-id', resumed: false }];
+    transport.connectResults = [{ replicaId: FRESH, resumed: false }];
 
     const { sync } = controller(transport, {
       replicaId: ID,
@@ -229,10 +242,10 @@ describe('the outbox', () => {
     const transport = new FakeTransport();
     transport.submitResults = [{ code: 'unknown_origin' }];
 
-    const { session, sync } = controller(transport);
+    const { sync } = controller(transport);
     await sync.start();
 
-    session.edit('a');
+    sync.session?.edit('a');
     sync.enqueue(encodeOperations([]));
     await Promise.resolve();
 
@@ -337,13 +350,13 @@ describe('losing the connection', () => {
 
   it('applies a broadcast that arrives while connected', async () => {
     const transport = new FakeTransport();
-    const { session, sync } = controller(transport);
+    const { sync } = controller(transport);
     await sync.start();
 
     const remote = new Replica(PEER);
     const operations = [...'yo'].map((value, index) => remote.insert(index, value));
     transport.broadcast?.(encodeOperations(operations));
 
-    expect(session.text).toBe('yo');
+    expect(sync.session?.text).toBe('yo');
   });
 });

@@ -67,13 +67,18 @@ class RefusingTransport implements Transport {
 
 function harness(transport: RefusingTransport) {
   const pending: (() => void)[] = [];
-  const session = new DocumentSession(parseReplicaId(ID), () => {});
-  const sync = new SyncController(session, transport, null, [], {
-    random: () => 0.5,
-    schedule: (run) => pending.push(run),
-  });
+  const sync = new SyncController(
+    (replicaId) => new DocumentSession(parseReplicaId(replicaId), () => {}),
+    transport,
+    null,
+    [],
+    {
+      random: () => 0.5,
+      schedule: (run) => pending.push(run),
+    },
+  );
 
-  return { session, sync, scheduled: () => pending.length };
+  return { sync, scheduled: () => pending.length };
 }
 
 /** Lets every queued microtask and the drain loop finish. */
@@ -151,7 +156,7 @@ describe('acting on a refusal', () => {
     const transport = new RefusingTransport();
     transport.codes = [REJECTION.forbidden];
 
-    const { session, sync } = harness(transport);
+    const { sync } = harness(transport);
     await sync.start();
 
     sync.enqueue(new Uint8Array([1]));
@@ -165,7 +170,7 @@ describe('acting on a refusal', () => {
 
     const remote = new Replica(PEER);
     transport.broadcast?.(encodeOperations([remote.insert(0, 'x')]));
-    expect(session.text).toBe('x');
+    expect(sync.session?.text).toBe('x');
 
     // The work is kept, because the role may be restored.
     expect(sync.pending).toHaveLength(1);
@@ -186,7 +191,7 @@ describe('acting on a refusal', () => {
       operations: encodeOperations([]),
     };
 
-    const { session, sync } = harness(transport);
+    const { sync } = harness(transport);
     await sync.start();
 
     sync.enqueue(new Uint8Array([1]));
@@ -200,7 +205,7 @@ describe('acting on a refusal', () => {
     // And it took a snapshot rather than a delta, because local state is what
     // was invalid.
     expect(transport.forced.at(-1)).toBe(true);
-    expect(session.text).toBe('fresh');
+    expect(sync.session?.text).toBe('fresh');
   });
 
   it('reconnects on too_many_replicas without losing the outbox', async () => {
