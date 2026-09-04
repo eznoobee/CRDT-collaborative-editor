@@ -6,7 +6,12 @@
 # class of defect §4's deployment shape exists to close: for eleven phases the
 # published image contained no application at all and nothing said so, because
 # nothing asked the image what was in it (§13.27, register row 18).
-FROM node:22-alpine AS client
+# Debian rather than Alpine, deliberately. package-lock.json is resolved on
+# glibc, and the toolchain pulls platform-specific native binaries (the bundler's
+# among them); on musl those optional packages are absent and the build fails
+# with "command not found", which says nothing about the cause. This stage is
+# discarded — only dist/ reaches the final image — so its size buys nothing.
+FROM node:22 AS client
 WORKDIR /client
 
 # NODE_ENV is set explicitly and is not a formality. React resolves through its

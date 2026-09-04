@@ -303,9 +303,9 @@ jobs:
       - name: Walk
         run: ./scripts/walk.sh
 
-      - name: The stack's logs, on failure
-        if: failure()
-        run: docker compose logs --no-color --tail 200 || true
+      # No separate log step: `docker compose logs` here has no env file and
+      # cannot even interpolate the compose file, and the walk's harness already
+      # includes the stack's logs in the error it throws (§13.23).
 
   secrets:
     name: Secret scan
