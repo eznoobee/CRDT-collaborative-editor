@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startWalk, type Walk } from './harness';
+import { pick } from '../e2e/browser';
 
 /**
  * §7, asserted against the application as Compose starts it (register row 13).
@@ -180,6 +181,101 @@ describe('§7 against the deployed stack', () => {
     expect(answer.ticket).not.toContain('.');
     expect(answer.replicaId).toMatch(/^[0-9a-fA-F-]{36}$/);
   }, 60_000);
+
+  it('carries §7\'s headers on every response, through the proxy', async () => {
+    // Asserted where the browser sees them: after TLS termination and the
+    // proxy, not at the API. A header set on the API and dropped by the proxy
+    // is a header nobody receives.
+    const token = walk.oidc.mint('deployment-headers');
+
+    const api = await call('/me', token);
+    const page = await fetch(`${walk.baseUrl}/`);
+
+    for (const response of [api, page]) {
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(response.headers.get('content-security-policy')).toBeTruthy();
+
+      // Enforced, never report-only: the two look identical in a header dump
+      // and one of them enforces nothing.
+      expect(response.headers.get('content-security-policy-report-only')).toBeNull();
+    }
+  }, 60_000);
+
+  it('names the configured issuer in connect-src, not a wildcard', async () => {
+    // The directive the browser needs for the token exchange, and the one a
+    // policy assembled from the wrong configuration silently omits.
+    const config = (await (await fetch(`${walk.baseUrl}/config`)).json()) as { issuer: string };
+    const origin = new URL(config.issuer).origin;
+
+    const policy = (await fetch(`${walk.baseUrl}/`)).headers.get('content-security-policy') ?? '';
+
+    expect(policy).toContain(`connect-src 'self' ${origin}`);
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).not.toContain('*');
+    expect(policy).not.toContain('unsafe-inline');
+  }, 60_000);
+
+  it('sends HSTS with the value this stack configured, over TLS', async () => {
+    // §7's named divergence: sixty seconds here, one year in production. What
+    // is under test is that the header is present, enforced and carries the
+    // configured value — a short value proves all three, and a long one served
+    // from a development host would pin a browser profile for a year.
+    //
+    // It also observes something nothing else does. HSTS is emitted only on an
+    // HTTPS request, and whether this request looks like HTTPS to the API
+    // depends on ForwardedHeaders matching the proxy — the one §7-relevant
+    // Compose setting with a default rather than a required value, whose
+    // misconfiguration was previously invisible.
+    const response = await fetch(`${walk.baseUrl}/`);
+    const hsts = response.headers.get('strict-transport-security');
+
+    expect(hsts).toBe('max-age=60; includeSubDomains');
+  }, 60_000);
+
+  it('runs the application under its own policy without a single violation', async () => {
+    // §7's done-when for CSP, and the reason it is phrased as work rather than
+    // as a header check: zero violations on an empty page is not weak
+    // evidence, it is evidence of nothing — a policy forbidding everything the
+    // application needs scores perfectly until the application tries.
+    //
+    // So this signs in, opens a document, waits for the socket, and types.
+    walk.oidc.accounts.add('csp-walker');
+    const { page } = await walk.browsing.open();
+
+    // Collected from the DOM event rather than the console, because a console
+    // message is a string a browser may reword and a violation event is the
+    // browser telling you which directive it enforced.
+    await page.addInitScript(() => {
+      (window as unknown as { __csp: string[] }).__csp = [];
+      window.addEventListener('securitypolicyviolation', (event) => {
+        (window as unknown as { __csp: string[] }).__csp.push(
+          `${event.violatedDirective} blocked ${event.blockedURI}`,
+        );
+      });
+    });
+
+    await page.goto(walk.baseUrl);
+    await pick(page, 'csp-walker');
+
+    await page.waitForSelector('[data-testid="create"]', { timeout: 60_000 });
+    await page.fill('[data-testid="new-title"]', 'Under policy');
+    await page.click('[data-testid="create"]');
+
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
+      undefined,
+      { timeout: 60_000 },
+    );
+
+    await page.click('textarea');
+    await page.keyboard.type('typed under a content security policy');
+
+    // The application did the work. Now ask what the browser refused.
+    const violations = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
+
+    expect(await page.inputValue('textarea')).toBe('typed under a content security policy');
+    expect(violations).toEqual([]);
+  }, 300_000);
 
   it('refuses to negotiate on a document the caller is not a member of', async () => {
     const owner = walk.oidc.mint('deployment-negotiate-owner');

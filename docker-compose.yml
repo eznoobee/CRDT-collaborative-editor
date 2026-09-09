@@ -92,6 +92,16 @@ services:
       # request claim to be secure.
       ForwardedHeaders__KnownProxies: ${PROXY_ADDRESS:-172.16.0.0/12}
 
+      # §7's named test/production divergence. One year is the production
+      # value and the default in code; sixty seconds is what this stack ships,
+      # because a long max-age served once from a development host pins that
+      # browser profile to HTTPS for a year and nothing in the application can
+      # undo it. The difference is written into §7 and carries its own row in
+      # the §7 requirement map — this comment is a pointer, not the record,
+      # because a comment in a compose file is the artefact that stops being
+      # read.
+      SecurityHeaders__HstsMaxAge: ${HSTS_MAX_AGE:-00:01:00}
+
     # DELIBERATELY NOT PUBLISHED, and this comment is the point rather than the
     # missing line. §4 terminates TLS at the proxy; a published API port is a
     # plaintext route straight past it — a control that exists and does not

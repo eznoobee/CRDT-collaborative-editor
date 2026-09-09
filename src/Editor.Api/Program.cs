@@ -25,6 +25,7 @@ builder.Services.AddProxyForwarding(builder.Configuration);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddEditorAuthentication(builder.Configuration);
+builder.Services.AddSecurityHeaders(builder.Configuration);
 
 // The connect tickets §7 requires live in Redis, because §8 forbids sticky
 // sessions and the instance that issues a ticket is usually not the one that
@@ -54,6 +55,12 @@ if (args.Contains("--migrate"))
 
 // First in the pipeline, before anything reads the scheme or the client address.
 app.UseForwardedHeaders();
+
+// Immediately after, and before anything that can produce a response. §7's
+// headers belong on every one of them — the API's JSON, the SPA's index.html,
+// the static assets and the error pages — because a control applied only to
+// the endpoints someone remembered is a control that does not apply (5b.4).
+app.UseSecurityHeaders();
 
 // Before authentication: the hub's credential is a ticket, not a token, and
 // this refuses an unusable one while the client can still see the refusal.
