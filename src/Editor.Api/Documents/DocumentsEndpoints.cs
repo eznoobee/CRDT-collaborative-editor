@@ -57,6 +57,7 @@ public static class DocumentsEndpoints
         var documents = endpoints.MapGroup("/documents").RequireAuthorization();
 
         documents.MapPost("/", CreateAsync);
+        documents.MapGet("/", ListAsync);
         documents.MapGet("/{documentId:guid}", GetAsync);
 
         return endpoints;
@@ -120,6 +121,33 @@ public static class DocumentsEndpoints
         return TypedResults.Created(
             $"/documents/{document.Id}",
             new DocumentSummary(document.Id, document.Title, Role.Owner, document.CreatedAt, document.UpdatedAt));
+    }
+
+    private static async Task<Results<Ok<IReadOnlyList<DocumentSummary>>, UnauthorizedHttpResult>> ListAsync(
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentMemberships memberships,
+        CancellationToken cancellationToken)
+    {
+        var userId = await users.ResolveAsync(principal, cancellationToken).ConfigureAwait(false);
+        if (userId is null)
+        {
+            return TypedResults.Unauthorized();
+        }
+
+        var reachable = await memberships.ListForUserAsync(userId.Value, cancellationToken)
+            .ConfigureAwait(false);
+
+        IReadOnlyList<DocumentSummary> summaries =
+        [
+            .. reachable.Select(entry => new DocumentSummary(
+                entry.DocumentId, entry.Title, entry.Role, entry.CreatedAt, entry.UpdatedAt)),
+        ];
+
+        // An empty list, not a 404. "Nothing yet" is a true and useful answer
+        // about the caller's own documents, and it is the state every new user
+        // is in.
+        return TypedResults.Ok(summaries);
     }
 
     private static async Task<Results<Ok<DocumentSummary>, NotFound, UnauthorizedHttpResult>> GetAsync(

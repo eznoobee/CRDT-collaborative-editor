@@ -93,6 +93,13 @@ public static class PersistenceExtensions
         services.AddSingleton<IDocumentRoles>(
             provider => provider.GetRequiredService<CachedDocumentRoles>());
 
+        // Uncached, and the interface says why: a listing is an enumeration
+        // rather than an authorization decision, and a stale one would be wrong
+        // in the direction that shows a revoked user what they can no longer
+        // reach.
+        services.AddScoped<IDocumentMemberships>(
+            provider => provider.GetRequiredService<DocumentRoleReader>());
+
         services.AddScoped<IDocumentRoleWriter>(provider => new InvalidatingDocumentRoleWriter(
             provider.GetRequiredService<DocumentRoleReader>(),
             provider.GetRequiredService<CachedDocumentRoles>()));

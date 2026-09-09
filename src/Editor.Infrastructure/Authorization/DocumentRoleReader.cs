@@ -9,7 +9,7 @@ namespace Editor.Infrastructure.Authorization;
 /// This is the source of truth behind the cache, not something the hot path
 /// calls: §8 forbids a database round trip per operation.
 /// </remarks>
-public sealed class DocumentRoleReader : IDocumentRoles, IDocumentRoleWriter
+public sealed class DocumentRoleReader : IDocumentRoles, IDocumentRoleWriter, IDocumentMemberships
 {
     private readonly EditorDbContext _context;
     private readonly TimeProvider _time;
@@ -52,6 +52,62 @@ public sealed class DocumentRoleReader : IDocumentRoles, IDocumentRoleWriter
         // row was never mirrored into document_members would otherwise lock its
         // owner out, and the recovery for that is someone editing the database.
         return found.OwnerId == userId ? Role.Owner : found.MemberRole;
+    }
+
+    public async Task<IReadOnlyList<DocumentMembership>> ListForUserAsync(
+        Guid userId, CancellationToken cancellationToken)
+    {
+        // Owner column OR membership row, matching GetRoleAsync exactly. A
+        // listing built from document_members alone would omit any document
+        // whose owner row was never mirrored there — which GetRoleAsync
+        // tolerates on purpose, so the two would disagree about the same
+        // document and only the listing would be wrong.
+        return await _context.Documents
+            .AsNoTracking()
+            .Where(document => document.DeletedAt == null)
+            .Select(document => new
+            {
+                document.Id,
+                document.Title,
+                document.CreatedAt,
+                document.UpdatedAt,
+                document.OwnerId,
+                MemberRole = _context.DocumentMembers
+                    .Where(member => member.DocumentId == document.Id && member.UserId == userId)
+                    .Select(member => (Role?)member.Role)
+                    .FirstOrDefault(),
+            })
+            .Where(row => row.OwnerId == userId || row.MemberRole != null)
+            .OrderByDescending(row => row.UpdatedAt)
+            .Select(row => new DocumentMembership(
+                row.Id,
+                row.Title,
+                row.OwnerId == userId ? Role.Owner : row.MemberRole!.Value,
+                row.CreatedAt,
+                row.UpdatedAt))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<DocumentMemberEntry>> ListMembersAsync(
+        Guid documentId, CancellationToken cancellationToken)
+    {
+        // The owner appears here because 6.1 writes their membership row, not
+        // because this query synthesises one. A document created before that
+        // path existed shows no owner, and that is the truth about its rows
+        // rather than something to paper over in a projection.
+        return await _context.DocumentMembers
+            .AsNoTracking()
+            .Where(member => member.DocumentId == documentId)
+            .Join(
+                _context.Users.AsNoTracking(),
+                member => member.UserId,
+                user => user.Id,
+                (member, user) => new DocumentMemberEntry(
+                    member.UserId, user.DisplayName, member.Role, member.GrantedAt))
+            .OrderBy(entry => entry.GrantedAt)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task SetRoleAsync(

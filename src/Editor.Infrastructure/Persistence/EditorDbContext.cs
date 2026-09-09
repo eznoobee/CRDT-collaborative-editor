@@ -63,6 +63,11 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
             entity.Property(e => e.Role).HasColumnName("role").HasConversion<int>();
             entity.Property(e => e.GrantedAt).HasColumnName("granted_at");
             entity.Property(e => e.GrantedBy).HasColumnName("granted_by");
+
+            // §9's "list what I can reach" reads this table by user. Without
+            // the index that is a sequential scan of every membership in the
+            // system on a page the client loads first.
+            entity.HasIndex(e => e.UserId);
         });
 
         modelBuilder.Entity<DocumentReplica>(entity =>
