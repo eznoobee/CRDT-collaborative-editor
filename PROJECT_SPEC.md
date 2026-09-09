@@ -1581,11 +1581,23 @@ A small REST surface, same origin as the client, bearer token in a header:
 | `PUT /documents/{id}/members/{userId}` | Grants or changes a role | Owner |
 | `DELETE /documents/{id}/members/{userId}` | Revokes a role | Owner |
 
-**Every one of them goes through `IDocumentRoles` and `IDocumentRoleWriter`**,
-never through a query of its own against `document_members`. A second path to
-the same table is a second place for §7's five-second bound to be right or
-wrong, and §13.31 is about how invisible the wrong one is: the requirement is
-still met, by the TTL, and every test passes.
+**Every membership decision goes through `IDocumentRoles` and
+`IDocumentRoleWriter`**, never through a query of its own against
+`document_members`. A second path to the same table is a second place for §7's
+five-second bound to be right or wrong, and §13.31 is about how invisible the
+wrong one is: the requirement is still met, by the TTL, and every test passes.
+
+**The two listings are the exception, and it is a real one rather than a
+loophole.** A cache keyed on `(document, user)` answers one question at a time
+and cannot produce "every document I can reach", so the listings are their own
+interface (`IDocumentMemberships`) — implemented on the same class, so that
+table still has exactly one place that queries it and the owner-column rule is
+written once, and **deliberately uncached**. A listing is an enumeration rather
+than a decision: nothing is permitted on the strength of appearing in one,
+because opening a document still calls `negotiate` and every operation is
+re-checked after that. And the staleness would run the wrong way — a user
+revoked five seconds ago should not still be shown what they can no longer
+reach — so there is no TTL here to be inside of.
 
 **Status codes follow §7 exactly**, which for this surface means the 404/403
 distinction is load-bearing rather than cosmetic:
