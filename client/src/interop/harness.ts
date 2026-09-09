@@ -64,6 +64,24 @@ export interface Oidc {
   /** Mints an access token directly, bypassing the code flow. */
   mint(subject: string, expiresInSeconds?: number): string;
 
+  /**
+   * A token with a claim deliberately wrong, for asserting a check refuses it.
+   *
+   * @remarks
+   * §7 requires issuer, audience and lifetime to be validated. Absence of the
+   * configuration is loud — `docker-compose.yml` uses `${VAR:?}` for every one
+   * of them, so a missing value fails interpolation before anything starts.
+   * A *wrong* value is silent, and wrongness is what this mints tokens to
+   * catch: a deployment whose audience is misconfigured accepts tokens meant
+   * for something else, and nothing about it looks broken.
+   */
+  mintWith(claims: {
+    readonly subject: string;
+    readonly issuer?: string;
+    readonly audience?: string;
+    readonly expiresInSeconds?: number;
+  }): string;
+
   /** Redirect URIs the issuer will accept, exactly. Mutable per test. */
   readonly redirectUris: Set<string>;
 
@@ -275,11 +293,15 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
     return `${header}.${payload}.${signer.sign(signing.privateKey, 'base64url')}`;
   }
 
-  function accessToken(subject: string, lifetime: number): string {
+  function accessToken(
+    subject: string,
+    lifetime: number,
+    overrides: { issuer?: string; audience?: string } = {},
+  ): string {
     const now = Math.floor(Date.now() / 1000);
     return sign({
-      iss: issuer,
-      aud: 'editor-api',
+      iss: overrides.issuer ?? issuer,
+      aud: overrides.audience ?? 'editor-api',
       sub: subject,
       // §7 requires an expiry and validates it with no clock skew, so a token
       // minted here is genuinely short-lived.
@@ -643,6 +665,12 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
     },
 
     mint: (subject: string, expiresInSeconds = 300) => accessToken(subject, expiresInSeconds),
+
+    mintWith: (claims) =>
+      accessToken(claims.subject, claims.expiresInSeconds ?? 300, {
+        ...(claims.issuer === undefined ? {} : { issuer: claims.issuer }),
+        ...(claims.audience === undefined ? {} : { audience: claims.audience }),
+      }),
     close: () => new Promise<void>((done) => server.close(() => done())),
   };
 }
