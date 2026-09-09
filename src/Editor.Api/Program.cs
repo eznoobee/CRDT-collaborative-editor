@@ -76,6 +76,10 @@ app.MapClientConfiguration();
 // Where the membership decision is made, with the OIDC token in a header.
 app.MapNegotiate();
 
+// Documents and membership (§9). Until Phase 6 nothing in this product created
+// either, and both harnesses seeded through psql (§13.27, register rows 15-16).
+app.MapDocuments();
+
 // The hub authenticates with the connect ticket in the query string, not the
 // bearer token (§7), so it is not behind RequireAuthorization: the credential
 // it accepts is redeemed in OnConnectedAsync, and a connection that arrives
