@@ -14,7 +14,17 @@ export default defineConfig({
     // only pass under conditions the developer has not set up is a suite that
     // gets ignored. `npm run test:interop` runs it, and CI runs it as its own
     // step where the infrastructure exists.
-    exclude: ['**/node_modules/**', '**/dist/**', 'src/interop/**', 'src/e2e/**', 'src/walk/**'],
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'src/interop/**',
+      'src/e2e/**',
+      'src/walk/**',
+      // §9's corpus needs the C# runner to have materialised the generated
+      // traces first, so it is not self-contained and does not belong in the
+      // default run. `npm run test:conformance`, via scripts/conformance.sh.
+      'src/crdt/conformance.test.ts',
+    ],
     // PROJECT_SPEC.md §11: an empty suite passing proves nothing, and vitest
     // exits non-zero with no test files unless told otherwise. That default is
     // deliberately left alone.
