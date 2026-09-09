@@ -222,34 +222,10 @@ jobs:
           npm --prefix ../../client ci
           node bundle-metrics.mjs
 
-  mutation:
-    name: Crdt.Core mutation score
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-
-      - run: dotnet tool restore
-
-      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage, and
-      # §13.7 makes it a ratchet: the floor in mutation-floor.json is what
-      # actually fails the build, in either direction. The reduced case count
-      # keeps a per-mutant suite run to seconds; the full 10,000-case gate runs
-      # in the dotnet job above.
-      - name: Stryker
-        env:
-          CRDT_PROPERTY_CASES: "150"
-        run: ./scripts/mutation.sh
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mutation-report
-          path: StrykerOutput/**/reports/*.html
-          if-no-files-found: ignore
+  # The mutation gate lives in mutation.yml, not here. It is the longest job in
+  # the repository and this workflow cancels in-progress runs, so it was the job
+  # that never finished — cancelled by a following push twice, leaving the
+  # ratchet enforced by whether anyone happened to push slowly.
 
   client:
     name: Client lint, typecheck and test

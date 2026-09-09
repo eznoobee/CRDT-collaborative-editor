@@ -2406,6 +2406,62 @@ built and no slot for whether the build agreed. A checklist item that exists onl
 in someone's intention is a checklist item that gets skipped exactly when things
 are busy.
 
+**Green means `conclusion == "success"`, for every job the workflows define.**
+Three clauses, each from a way the first version could be passed by a run that
+proved nothing:
+
+1. **The expected set is derived from `.github/workflows/`, never from the
+   report.** The original checked that every job it was *given* concluded
+   success, which is a check a status file passes by omitting a job. A status
+   file cannot be asked whether it is complete — the workflows are what say how
+   many jobs there should be and what they are called. A job missing from the
+   report is not a job that passed, and a job the report names that the workflow
+   does not define is drift.
+2. **The run's own conclusion is read, and cancelled is not green.** The
+   original read the run's `status`, and a cancelled run's status is
+   `completed`. Run 79 concluded `cancelled` with eight jobs green and the
+   mutation job cancelled at 7m32s; a status file listing those eight jobs
+   passed a check that only looked at the jobs in the file. Skipped and neutral
+   are refused for the same reason: all three are ways for a job to produce no
+   result while looking finished.
+3. **A superseded run is refused.** A green run on a commit that is no longer
+   head was already refused by the sha check. A green run that a *newer* run on
+   the same commit has replaced was not — and a re-run exists precisely because
+   someone doubted the first answer, so the newest one is the answer. The status
+   file must carry every run GitHub lists for the commit, across every workflow;
+   trimming that list is what the check is looking for.
+
+All three are the same mistake as the CI that was not running for seven tasks:
+**checking the values that are present instead of the values that are
+required.** Absence is what a hand-assembled report cannot be trusted to show,
+so absence is what the script derives for itself.
+
+### The mutation gate is not cancelled by a following push
+
+**`mutation.yml` is a separate workflow with `cancel-in-progress: false`, keyed
+on the commit rather than the ref.** CI keeps cancelling in-progress runs, which
+is right for a workflow whose value is fast feedback on the head: an older
+commit's test result stops being interesting the moment a newer commit exists.
+
+The ratchet is not that, and the reason is worth stating rather than assuming.
+It is the longest job in the repository at seven to eight minutes, so it is
+always the one still running when the next push lands — cancelled in runs 79 and
+80, twice in a row. And unlike every other job, being cancelled leaves **no
+result at all** rather than a stale one, because the ratchet's whole output is a
+comparison against a stored floor. A gate that only completes when nobody
+happens to push for eight minutes is enforced by luck, and the register would
+have gone on reading as though it were enforced by CI.
+
+*Rejected: accepting that it is graded only on a phase's final push.* That is
+the honest version of what was already happening, and it is worse than it
+sounds: the ratchet's value is telling you **which commit** dropped the score,
+and a gate that runs once per phase can only say that some commit in the phase
+did. *Rejected: turning off `cancel-in-progress` for all of CI.* It would fix
+this at the cost of making every burst of pushes queue behind a full run,
+slowing the loop that catches ordinary mistakes to protect the one gate that
+needs protecting. The cost of the split is concurrent runners during a burst,
+which is the right thing to spend.
+
 ## 13. Decision log
 
 Amendments to the original specification, with reasons. These exist so a future
@@ -4354,3 +4410,45 @@ clock's. Raising a limit so a red test goes green is how a control is quietly
 disabled; doing it in the two tests that are about a different cap, in writing,
 with the limit's own tests untouched, is scoping. The difference is whether the
 change is stated and whether anything still exercises the limit.
+
+### 13.38 A duration means nothing until you name which boundary it measures
+
+While reading run 79 I wrote: *"The walk job passed — but in 84 seconds, when
+the walk alone previously took ~70s for one bring-up. Two bring-ups in 84s is
+implausible. Checking whether the suite ran at all."*
+
+The suspicion was right to raise and the check was right to run. The arithmetic
+was comparing two different things:
+
+| Number | What it actually measures | Run 79 |
+|---|---|---|
+| 2m 6s | the **job**, including checkout, `npm ci` and a 32-second Chromium install | 11:28:51 → 11:30:57 |
+| 84s | the **step** that runs `./scripts/walk.sh` | 11:29:31 → 11:30:55 |
+| 81.94s | the **vitest run**, both files | reported by vitest |
+| 69.5s | **one file**, `walk.e2e.test.ts` | reported by vitest |
+
+Four boundaries, spanning 2:06 down to 1:09 — a 45% spread over the same piece
+of work. The 84 was read correctly off the step timings and the ~70 was a
+remembered vitest *file* duration, so "84 against 70" compared a step to a file
+and concluded that a second bring-up had happened in fourteen seconds. It had
+actually happened in 11.3, which the log says plainly, and which is genuinely
+fast because the images were already built.
+
+**The general form: a duration is a property of a boundary, and CI reports at
+least four boundaries that all get called "how long it took".** The remembered
+figure is the dangerous half — it arrives with no boundary attached at all, and
+whichever boundary makes it surprising is the one the mind supplies. A
+comparison between a number you just read and a number you remember is not a
+measurement.
+
+The rule: **quote the boundary with the number, every time** — "the Walk step
+took 84s", never "the walk took 84s" — and when a duration is surprising, read
+the finer-grained number underneath it before reasoning from the gap. Here the
+finer-grained number was in the same log and settled the question in one line.
+
+Worth keeping for a second reason: this is the shape §13.28 warns about
+arriving as *good* news rather than bad. A number that looks too fast reads as
+"something did not run"; a number that looks reasonable reads as nothing at all
+and gets no check. The suspicion fired here because the figure was implausible.
+Had the walk step taken 110 seconds, nothing would have prompted a look, and
+the log line proving the suite ran would never have been read.
