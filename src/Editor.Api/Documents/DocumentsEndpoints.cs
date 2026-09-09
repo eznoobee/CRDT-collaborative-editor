@@ -11,6 +11,11 @@ namespace Editor.Api.Documents;
 /// <param name="Title">A human-readable name. Never interpreted, never rendered as markup.</param>
 public sealed record CreateDocumentRequest(string? Title);
 
+/// <summary>Who the caller is (§9).</summary>
+/// <param name="UserId">The id a grant names.</param>
+/// <param name="DisplayName">The name the issuer gave them.</param>
+public sealed record Identity(Guid UserId, string DisplayName);
+
 /// <summary>What an owner sends to grant or change a role (§9).</summary>
 /// <param name="Role">The role to grant.</param>
 public sealed record GrantRoleRequest(Role Role);
@@ -57,6 +62,16 @@ public static class DocumentsEndpoints
     public static IEndpointRouteBuilder MapDocuments(this IEndpointRouteBuilder endpoints)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
+
+        // Who the caller is, in the terms a grant is written in.
+        //
+        // Without it §9's "grant to a user who has signed in" is not operable:
+        // a grant names a user id, an owner has no way to learn anyone else's,
+        // and the person being invited has no way to read their own to pass on.
+        // That is register row 15's shape exactly — a step whose input nothing
+        // in the product produces — and it was found by trying to use the
+        // grant path rather than by reading it.
+        endpoints.MapGet("/me", WhoAsync).RequireAuthorization();
 
         var documents = endpoints.MapGroup("/documents").RequireAuthorization();
 
@@ -191,6 +206,28 @@ public static class DocumentsEndpoints
         // A role for a document this query cannot see means the document was
         // deleted between the two reads. Same answer as never having had access.
         return found is null ? TypedResults.NotFound() : TypedResults.Ok(found);
+    }
+
+    private static async Task<Results<Ok<Identity>, UnauthorizedHttpResult>> WhoAsync(
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        EditorDbContext context,
+        CancellationToken cancellationToken)
+    {
+        var userId = await users.ResolveAsync(principal, cancellationToken).ConfigureAwait(false);
+        if (userId is null)
+        {
+            return TypedResults.Unauthorized();
+        }
+
+        var name = await context.Users
+            .AsNoTracking()
+            .Where(user => user.Id == userId.Value)
+            .Select(user => user.DisplayName)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return TypedResults.Ok(new Identity(userId.Value, name ?? string.Empty));
     }
 
     private static async Task<IResult> ListMembersAsync(

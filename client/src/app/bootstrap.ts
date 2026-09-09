@@ -1,6 +1,7 @@
 import { PkceTokenSource } from '../auth/pkce';
 import { SignInRequired } from '../auth/tokenSource';
 import { CALLBACK_PATH, SIGNED_OUT_PATH, documentIdIn, loadConfiguration } from './config';
+import { DocumentApi, type Identity } from './api';
 import { openDocument, type OpenDocument } from './openDocument';
 import { signOut } from './signOut';
 
@@ -9,10 +10,18 @@ export type Bootstrap =
   | { kind: 'signing-in' }
   | { kind: 'no-document' }
   | { kind: 'signed-out' }
+  | {
+      kind: 'home';
+      api: DocumentApi;
+      me: Identity;
+      signOut: () => Promise<void>;
+    }
   | { kind: 'failed'; message: string }
   | {
       kind: 'open';
       document: OpenDocument;
+      api: DocumentApi;
+      me: Identity;
 
       /**
        * §7's three things, in order: local state, then the token, then the
@@ -66,8 +75,10 @@ export async function bootstrap(location: Location = window.location): Promise<B
       return { kind: 'signed-out' };
     }
 
+    // The home page is a signed-in page now, so a path that is neither a
+    // document nor the root is the only unrecognised one left.
     const documentId = documentIdIn(path);
-    if (documentId === null) {
+    if (documentId === null && path !== '/') {
       return { kind: 'no-document' };
     }
 
@@ -83,11 +94,26 @@ export async function bootstrap(location: Location = window.location): Promise<B
       return { kind: 'signing-in' };
     }
 
+    const api = new DocumentApi(origin, auth);
+    const me = await api.me();
+    const leave = () => signOut({
+      // Nothing local to erase: no document is open on the home page.
+      forgetLocal: () => Promise.resolve(),
+      forgetTokens: () => auth.forget(),
+      endSession: () => auth.endSession(SIGNED_OUT_PATH),
+    });
+
+    if (documentId === null) {
+      return { kind: 'home', api, me, signOut: leave };
+    }
+
     const document = await openDocument({ origin, documentId, tokens: auth });
 
     return {
       kind: 'open',
       document,
+      api,
+      me,
       signOut: () => signOut({
         forgetLocal: () => document.forget(),
         forgetTokens: () => auth.forget(),

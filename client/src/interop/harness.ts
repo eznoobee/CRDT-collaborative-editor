@@ -795,52 +795,78 @@ export async function startApi(
   };
 }
 
-/** A document and its memberships, written the way an admin path would. */
-export function seed(
-  issuer: string,
-  members: readonly { subject: string; role: 'viewer' | 'editor' | 'owner' }[],
-): string {
+/**
+ * A document and its memberships, created through the product's own API.
+ *
+ * @remarks
+ * <p>
+ * This used to be a block of `INSERT` statements piped to `psql`, and that was
+ * register rows 15 and 16: nothing in the product created a document, so every
+ * harness reached past it into the database, and the absence was invisible from
+ * inside a suite that had been green for eleven phases (§13.27).
+ * </p><p>
+ * **The rule that keeps it closed is checkable by grep rather than by
+ * judgement**, and `scripts/client-gates.sh` runs that grep: a raw insert
+ * against the documents table, anywhere in a harness, fails the build.
+ * Judgement at the end of a long phase is what produced those rows in the
+ * first place.
+ * </p><p>
+ * The rule is written out in PROJECT_SPEC.md §12 rather than here, and
+ * deliberately: spelled out in full in this file it would *be* the string the
+ * grep looks for, so the comment explaining the guard would defeat it. §13.19
+ * in miniature, and it turned up while checking that the grep actually
+ * returned nothing.
+ * </p><p>
+ * Tokens are minted directly rather than obtained through the code flow,
+ * because this harness stands in for *clients* and the flow itself is what the
+ * browser tests exercise. What is not stood in for is the API: every document
+ * and every membership below is created by the same endpoints a user reaches.
+ * </p>
+ */
+export async function provision(
+  baseUrl: string,
+  oidc: Oidc,
+  spec: {
+    readonly owner: string;
+    readonly title?: string;
+    readonly members?: readonly { subject: string; role: 'viewer' | 'editor' | 'owner' }[];
+  },
+): Promise<string> {
   const roles = { viewer: 0, editor: 1, owner: 2 };
-  const documentId = randomUUID();
-  const owner = randomUUID();
 
-  const statements = [
-    `INSERT INTO users (id, oidc_issuer, oidc_subject, display_name, created_at)
-       VALUES ('${owner}', '${issuer}', 'interop-owner-${owner}', 'owner', now());`,
-    `INSERT INTO documents (id, owner_id, title, created_at, updated_at)
-       VALUES ('${documentId}', '${owner}', 'interop', now(), now());`,
-  ];
+  const call = async (subject: string, method: string, path: string, body?: unknown) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${oidc.mint(subject)}`,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
 
-  for (const member of members) {
-    const id = randomUUID();
-    statements.push(
-      `INSERT INTO users (id, oidc_issuer, oidc_subject, display_name, created_at)
-         VALUES ('${id}', '${issuer}', '${member.subject}', '${member.subject}', now());`,
-      `INSERT INTO document_members (document_id, user_id, role, granted_at, granted_by)
-         VALUES ('${documentId}', '${id}', ${roles[member.role]}, now(), '${owner}');`,
-    );
+    if (!response.ok) {
+      throw new Error(
+        `${method} ${path} as ${subject} answered ${response.status}: ${await response.text()}`,
+      );
+    }
+
+    return response.status === 204 ? null : ((await response.json()) as unknown);
+  };
+
+  const created = (await call(spec.owner, 'POST', '/documents', {
+    title: spec.title ?? 'harness',
+  })) as { id: string };
+
+  for (const member of spec.members ?? []) {
+    // The member reads their own id first, which is how §9's grant is meant to
+    // work: there is no directory, so the invitee supplies it. It also
+    // provisions their user row, which is what makes them grantable at all.
+    const who = (await call(member.subject, 'GET', '/me')) as { userId: string };
+
+    await call(spec.owner, 'PUT', `/documents/${created.id}/members/${who.userId}`, {
+      role: roles[member.role],
+    });
   }
 
-  const postgres = process.env.EDITOR_TEST_POSTGRES ?? '';
-  const value = (key: string) =>
-    postgres.split(';').find((part) => part.toLowerCase().startsWith(`${key}=`))?.split('=')[1] ?? '';
-
-  const psql = spawnSync(
-    'psql',
-    [
-      '-h', value('host') || 'localhost',
-      '-p', value('port') || '5432',
-      '-U', value('username') || 'editor',
-      '-d', value('database') || 'editor',
-      '-v', 'ON_ERROR_STOP=1',
-      '-c', statements.join('\n'),
-    ],
-    { encoding: 'utf8', env: { ...process.env, PGPASSWORD: value('password') } },
-  );
-
-  if (psql.status !== 0) {
-    throw new Error(`seed failed: ${psql.stderr}`);
-  }
-
-  return documentId;
+  return created.id;
 }

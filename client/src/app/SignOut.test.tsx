@@ -6,7 +6,7 @@ import { SignOutUnavailable } from '../auth/tokenSource';
 describe('SignOut', () => {
   it('signs out immediately when nothing is unsent', async () => {
     let signedOut = 0;
-    render(<SignOut unsent={0} signOut={async () => { signedOut += 1; }} />);
+    render(<SignOut unsent={0} signOut={() => { signedOut += 1; return Promise.resolve(); }} />);
 
     await click(screen.getByTestId('sign-out'));
 
@@ -19,7 +19,7 @@ describe('SignOut', () => {
     // The assertion is that the first click signs nothing out — a confirmation
     // that appeared *and* signed out would look identical on screen.
     let signedOut = 0;
-    render(<SignOut unsent={3} signOut={async () => { signedOut += 1; }} />);
+    render(<SignOut unsent={3} signOut={() => { signedOut += 1; return Promise.resolve(); }} />);
 
     await click(screen.getByTestId('sign-out'));
 
@@ -31,7 +31,7 @@ describe('SignOut', () => {
   });
 
   it('counts one unsent change in the singular', async () => {
-    render(<SignOut unsent={1} signOut={async () => {}} />);
+    render(<SignOut unsent={1} signOut={() => Promise.resolve()} />);
 
     await click(screen.getByTestId('sign-out'));
 
@@ -40,7 +40,7 @@ describe('SignOut', () => {
 
   it('keeps editing when the confirmation is declined', async () => {
     let signedOut = 0;
-    render(<SignOut unsent={2} signOut={async () => { signedOut += 1; }} />);
+    render(<SignOut unsent={2} signOut={() => { signedOut += 1; return Promise.resolve(); }} />);
 
     await click(screen.getByTestId('sign-out'));
     await click(screen.getByTestId('sign-out-cancel'));
@@ -77,5 +77,6 @@ describe('SignOut', () => {
 async function click(element: HTMLElement): Promise<void> {
   await act(async () => {
     fireEvent.click(element);
+    await Promise.resolve();
   });
 }

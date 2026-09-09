@@ -5,7 +5,7 @@ import { SyncController } from '../editor/SyncController';
 import { SignalRTransport } from '../editor/signalRTransport';
 import { offlineWindow, RETIRE_AFTER_MS } from '../editor/offlineWindow';
 import { parseReplicaId } from '../crdt';
-import { startApi, startOidc, seed, type Api, type Oidc } from './harness';
+import { startApi, startOidc, provision, type Api, type Oidc } from './harness';
 
 /**
  * §11's Phase 4 done-when: offline edit, reconnect, converge (§9).
@@ -94,10 +94,10 @@ describe('offline editing, reconnection and convergence', () => {
   }
 
   it('keeps work made offline and converges after a real reconnection', async () => {
-    const documentId = seed(oidc.issuer, [
-      { subject: 'offline-author', role: 'editor' },
-      { subject: 'offline-watcher', role: 'editor' },
-    ]);
+    const documentId = await provision(api.baseUrl, oidc, {
+      owner: 'offline-author',
+      members: [{ subject: 'offline-watcher', role: 'editor' }],
+    });
 
     const author = client('offline-author', documentId);
     const watcher = client('offline-watcher', documentId);
@@ -192,10 +192,10 @@ describe('offline editing, reconnection and convergence', () => {
     // replica id and the unsent bytes — and the assertion is on what the
     // *watcher* receives, so the work is proved to have reached the server
     // rather than merely to have been re-rendered locally.
-    const documentId = seed(oidc.issuer, [
-      { subject: 'reload-author', role: 'editor' },
-      { subject: 'reload-watcher', role: 'editor' },
-    ]);
+    const documentId = await provision(api.baseUrl, oidc, {
+      owner: 'reload-author',
+      members: [{ subject: 'reload-watcher', role: 'editor' }],
+    });
 
     const watcher = client('reload-watcher', documentId);
     const first = client('reload-author', documentId);

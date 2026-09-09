@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { startApi, startOidc, seed, type Api, type Oidc } from './harness';
+import { startApi, startOidc, provision, type Api, type Oidc } from './harness';
 import { InteropClient } from './client';
 
 /**
@@ -45,16 +45,21 @@ describe('two TypeScript clients against the running server', () => {
     await oidc?.close();
   });
 
-  function document(subjects: readonly string[]): string {
-    return seed(
-      oidc.issuer,
-      subjects.map((subject) => ({ subject, role: 'editor' as const })),
-    );
+  function document(subjects: readonly string[]): Promise<string> {
+    const [owner, ...rest] = subjects;
+    if (owner === undefined) {
+      throw new Error('a document needs an owner');
+    }
+
+    return provision(api.baseUrl, oidc, {
+      owner,
+      members: rest.map((subject) => ({ subject, role: 'editor' as const })),
+    });
   }
 
   it('relays one client’s operations to the other, decoded by the core that did not write them', async () => {
     const [left, right] = ['interop-left', 'interop-right'];
-    const documentId = document([left, right]);
+    const documentId = await document([left, right]);
 
     const a = await InteropClient.join(api.baseUrl, oidc.mint(left), documentId);
     const b = await InteropClient.join(api.baseUrl, oidc.mint(right), documentId);
@@ -86,7 +91,7 @@ describe('two TypeScript clients against the running server', () => {
 
   it('converges two clients editing concurrently', async () => {
     const [left, right] = ['interop-concurrent-a', 'interop-concurrent-b'];
-    const documentId = document([left, right]);
+    const documentId = await document([left, right]);
 
     const a = await InteropClient.join(api.baseUrl, oidc.mint(left), documentId);
     const b = await InteropClient.join(api.baseUrl, oidc.mint(right), documentId);
@@ -125,7 +130,7 @@ describe('two TypeScript clients against the running server', () => {
     // the project exercises that direction end to end: §9's conformance runner
     // compares two files, and this is the format crossing a wire.
     const [writer, joiner] = ['interop-snapshot-writer', 'interop-snapshot-joiner'];
-    const documentId = document([writer, joiner]);
+    const documentId = await document([writer, joiner]);
 
     const a = await InteropClient.join(api.baseUrl, oidc.mint(writer), documentId);
 
@@ -165,7 +170,7 @@ describe('two TypeScript clients against the running server', () => {
     // what "already applied" means (§5). A disagreement here is silent — the
     // client is told it is current and simply never receives the rest.
     const [writer, reader] = ['interop-delta-writer', 'interop-delta-reader'];
-    const documentId = document([writer, reader]);
+    const documentId = await document([writer, reader]);
 
     const a = await InteropClient.join(api.baseUrl, oidc.mint(writer), documentId);
     const b = await InteropClient.join(api.baseUrl, oidc.mint(reader), documentId);
@@ -209,7 +214,7 @@ describe('two TypeScript clients against the running server', () => {
     // member of the document, so a rejection could otherwise be §7's 404 for
     // non-membership and the test would pass while proving nothing about the
     // signature. 401 is the token being refused.
-    const documentId = document(['interop-forged']);
+    const documentId = await document(['interop-forged']);
     const claims = oidc.mint('interop-forged').split('.').slice(0, 2).join('.');
 
     await expect(

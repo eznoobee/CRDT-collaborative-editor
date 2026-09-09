@@ -9,9 +9,9 @@ describe('signOut', () => {
     const done: string[] = [];
 
     await signOut({
-      forgetLocal: async () => { done.push('local'); },
-      forgetTokens: async () => { done.push('tokens'); },
-      endSession: async () => { done.push('session'); },
+      forgetLocal: () => { done.push('local'); return Promise.resolve(); },
+      forgetTokens: () => { done.push('tokens'); return Promise.resolve(); },
+      endSession: () => { done.push('session'); return Promise.resolve(); },
     });
 
     expect(done).toEqual(['local', 'tokens', 'session']);
@@ -25,8 +25,8 @@ describe('signOut', () => {
 
     await expect(signOut({
       forgetLocal: () => Promise.reject(new Error('the store is locked')),
-      forgetTokens: async () => { reached.push('tokens'); },
-      endSession: async () => { reached.push('session'); },
+      forgetTokens: () => { reached.push('tokens'); return Promise.resolve(); },
+      endSession: () => { reached.push('session'); return Promise.resolve(); },
     })).rejects.toThrow('the store is locked');
 
     expect(reached).toEqual([]);
@@ -36,9 +36,9 @@ describe('signOut', () => {
     const reached: string[] = [];
 
     await expect(signOut({
-      forgetLocal: async () => { reached.push('local'); },
+      forgetLocal: () => { reached.push('local'); return Promise.resolve(); },
       forgetTokens: () => Promise.reject(new Error('user store failed')),
-      endSession: async () => { reached.push('session'); },
+      endSession: () => { reached.push('session'); return Promise.resolve(); },
     })).rejects.toThrow('user store failed');
 
     expect(reached).toEqual(['local']);

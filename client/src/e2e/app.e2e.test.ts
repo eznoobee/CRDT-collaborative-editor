@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Page } from 'playwright';
 
-import { seed } from '../interop/harness';
+import { provision } from '../interop/harness';
 import { pick } from './browser';
 import { startSystem, type System } from './harness';
 
@@ -90,10 +90,10 @@ describe('the application, in a browser', () => {
   }
 
   it('signs in, opens a document, and carries typing to another user', async () => {
-    const documentId = seed(system.oidc.issuer, [
-      { subject: 'e2e-writer', role: 'editor' },
-      { subject: 'e2e-reader', role: 'editor' },
-    ]);
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-writer',
+      members: [{ subject: 'e2e-reader', role: 'editor' }],
+    });
 
     const writer = await open('e2e-writer', documentId);
     const reader = await open('e2e-reader', documentId);
@@ -119,7 +119,9 @@ describe('the application, in a browser', () => {
     // whether anything looks like the credential — after a *complete* login,
     // which is when oidc-client-ts has consumed and removed the state entry
     // holding the PKCE verifier.
-    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-sweep', role: 'editor' }]);
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-sweep',
+    });
     const page = await open('e2e-sweep', documentId);
 
     const issued = system.oidc.tokenRequests.filter((request) => request.outcome === 'issued');
@@ -163,7 +165,9 @@ describe('the application, in a browser', () => {
     // sign-in shows whether the provider's session went with it. Register row
     // 21 is exactly this — closing the tab drops the token and the next load
     // silently re-authenticates as the same person.
-    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-signout', role: 'editor' }]);
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-signout',
+    });
     const page = await open('e2e-signout', documentId);
 
     // Relative, because this issuer is shared with every other test in the
@@ -189,7 +193,7 @@ describe('the application, in a browser', () => {
       const opening = indexedDB.open('editor');
       const database = await new Promise<IDBDatabase>((resolve, reject) => {
         opening.onsuccess = () => resolve(opening.result);
-        opening.onerror = () => reject(opening.error);
+        opening.onerror = () => reject(opening.error ?? new Error('indexedDB.open failed'));
       });
 
       if (!database.objectStoreNames.contains('documents')) {
@@ -199,7 +203,7 @@ describe('the application, in a browser', () => {
       const read = database.transaction('documents', 'readonly').objectStore('documents').get(id);
       return new Promise<unknown>((resolve, reject) => {
         read.onsuccess = () => resolve(read.result ?? null);
-        read.onerror = () => reject(read.error);
+        read.onerror = () => reject(read.error ?? new Error('the read failed'));
       });
     }, documentId);
 
@@ -217,7 +221,9 @@ describe('the application, in a browser', () => {
     // The assertion that a store keyed by document id alone would fail: the
     // second user reaches the same URL, and must see a refusal rather than the
     // replica the first user left behind.
-    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-first', role: 'editor' }]);
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-first',
+    });
     system.oidc.accounts.add('e2e-second');
 
     const page = await open('e2e-first', documentId);
@@ -269,7 +275,9 @@ describe('the application, in a browser', () => {
     // §7 put a single-use 60-second ticket in the query string precisely so a
     // JWT would not be there. 4.9 changed how tokens are obtained, so the
     // guarantee is re-asserted rather than inherited.
-    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-url', role: 'editor' }]);
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-url',
+    });
 
     system.oidc.accounts.add('e2e-url');
     const { page } = await system.browsing.open();

@@ -14,6 +14,8 @@ export interface OpenOptions {
 }
 
 export interface OpenDocument {
+  readonly documentId: string;
+
   readonly sync: SyncController;
 
   /** What the store held when this opened, if anything. */
@@ -118,6 +120,7 @@ export async function openDocument(options: OpenOptions): Promise<OpenDocument> 
   await sync.start();
 
   return {
+    documentId: options.documentId,
     sync,
     restored,
     close: () => sync.stop(),

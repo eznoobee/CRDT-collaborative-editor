@@ -1,6 +1,9 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
+import { Home } from './app/Home';
+import { Share } from './app/Share';
 import { SignOut } from './app/SignOut';
+import type { DocumentApi, Identity } from './app/api';
 import { Editor } from './editor/Editor';
 import { describeWindow, offlineWindow } from './editor/offlineWindow';
 import type { Bootstrap } from './app/bootstrap';
@@ -46,6 +49,14 @@ export function App(props: AppProps = {}): React.JSX.Element {
         </Shell>
       );
 
+    case 'home':
+      return (
+        <Shell>
+          <Home api={result.api} me={result.me} signOut={result.signOut} />
+          <SignOut unsent={0} signOut={result.signOut} />
+        </Shell>
+      );
+
     case 'signed-out':
       return (
         <Shell>
@@ -63,7 +74,12 @@ export function App(props: AppProps = {}): React.JSX.Element {
     case 'open':
       return (
         <Shell>
-          <Document open={result.document} signOut={result.signOut} />
+          <Document
+            open={result.document}
+            api={result.api}
+            me={result.me}
+            signOut={result.signOut}
+          />
         </Shell>
       );
   }
@@ -79,7 +95,12 @@ function Shell(props: { children: React.ReactNode }): React.JSX.Element {
 }
 
 /** The editor and everything the user has to be told (§9, §13.13). */
-function Document(props: { open: OpenDocument; signOut: () => Promise<void> }): React.JSX.Element {
+function Document(props: {
+  open: OpenDocument;
+  api: DocumentApi;
+  me: Identity;
+  signOut: () => Promise<void>;
+}): React.JSX.Element {
   const { sync } = props.open;
 
   useSyncExternalStore(
@@ -113,6 +134,10 @@ function Document(props: { open: OpenDocument; signOut: () => Promise<void> }): 
       {session === null
         ? <p>Connecting…</p>
         : <Editor session={session} readOnly={sync.readOnly} />}
+      <Share api={props.api} documentId={props.open.documentId} meId={props.me.userId} />
+      <p>
+        <a href="/" data-testid="home-link">All documents</a>
+      </p>
       <SignOut unsent={sync.pending.length} signOut={props.signOut} />
     </>
   );

@@ -2231,6 +2231,31 @@ The refusal fixtures are the mirror of this and are not a substitute: they prove
 a decoder rejects what the format forbids. Both directions are needed, and only
 the acceptance direction is circular without hand-written input.
 
+### No harness reaches past the product to create its fixtures
+
+Register rows 15 and 16 were one habit: every harness seeded documents and
+memberships with `INSERT` statements piped to `psql`, because nothing in the
+product could make either. Eleven phases of a green suite never noticed, and the
+walk stopped at sign-in for the same reason (§13.27).
+
+The rule, and it is checkable by grep rather than by judgement: **if
+`harness.ts` still contains an `INSERT INTO documents`, this phase is not done,
+whatever the endpoint tests say.** `scripts/client-gates.sh` runs that grep over
+every harness and fails the build on a raw insert into `documents`,
+`document_members` or `users`. A criterion checkable by grep beats one requiring
+judgement, because judgement at the end of a long phase is what produced those
+rows in the first place: one `INSERT` "just for this test" is easy to add and
+impossible to see later.
+
+Two things this immediately taught. The gate is written where the offending
+string cannot appear — the sentence above lives here rather than in the harness,
+because spelled out there in full it would *be* the string the grep looks for,
+and the comment explaining the guard would defeat it (§13.19, in miniature).
+And enforcing it turned up a second missing path: a grant names a user id, so an
+invitee needs to be able to read their own, and nothing in the product produced
+one until `GET /me` existed. A harness that keeps reaching into the database
+never discovers that, which is the whole argument for the rule.
+
 ### No phase is reported complete without a CI preflight
 
 **`scripts/phase-preflight.sh` runs before any phase report, and a phase with any
