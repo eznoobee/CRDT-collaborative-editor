@@ -1772,6 +1772,23 @@ this honest: it fails if the generator produces something different from what
 the manifest describes, which is the case where "reproducible from a seed" would
 otherwise be an assumption rather than a check.
 
+**The generator is shared with the core's own property tests** (`Crdt.Simulation`,
+referenced by both `Crdt.Core.Tests` and `Conformance`), rather than duplicated.
+Duplicating it would mean the corpus and the property suite drifting into
+exploring different spaces while both claiming the same coverage, and §13.30 is
+about how invisible that is.
+
+**The failure mode that buys, written down because it is not obvious from the
+digest:** the digest changes when the *produced corpus* changes, and the produced
+corpus changes both when the generator changes and when the core changes. The two
+are indistinguishable in the manifest. A reviewer seeing the digest move cannot
+tell whether the fuzzer was retuned or whether the CRDT now behaves differently —
+those are wildly different reviews — and nothing in the manifest, the seed, or the
+generator version separates them. Only reading the diff does. This is accepted
+rather than fixed, because the alternative is a second generator that drifts; but
+it means a digest change is never self-explanatory, and a commit that moves it
+states in its message which of the two happened.
+
 **A failing generated trace is promoted to a committed file.** Once a specific
 trace has found a defect it stops being a sample and becomes a regression test,
 and it is written out in full with a `rationale` naming what it caught — the
@@ -3704,3 +3721,58 @@ There is a related tell worth noticing. All three shortcuts are *documented
 features* with names that sound procedural: "ignore HTTPS errors", "reject
 unauthorized". Nothing about them announces that a security property is being
 removed, which is precisely why they get reached for while tired.
+
+### 13.30 The generator's parameter space is the outer bound, and nothing inside the suite can see it
+
+Three times now, a property suite has been green over a defect that no number of
+cases could have reached, because the shape carrying the defect was outside what
+the generator could emit at all:
+
+| When | What could not be generated | How it showed |
+|---|---|---|
+| Phase 2 (§13.10) | Documents larger than a few dozen elements — the magnitudes were literals | A stack overflow at a length users reach in an afternoon, survived by 10,000 cases per invariant and an 87% mutation score |
+| Phase 3b (§13.6) | More than one round of concurrency | Backward contiguity holding in 6581 of 6581 cases — 100.00% |
+| Phase 5 | A run of length 1, so no *single-character* concurrent insert | Two named corpus dimensions reporting identical counts, 1638 and 1638 |
+
+The general form: **the generator's parameter space is the outer bound of what
+any property test can find, and nothing inside the suite can see that bound.**
+Every case the suite runs is drawn from inside it. Adding cases, adding
+invariants, raising the mutation score, and running for longer all sample the
+same region more densely. A gap in the parameter space is therefore invisible in
+exactly the way §13.27 describes — not a failing check, but no check at all —
+and, worse, each of the three read as *reassurance*: a fast green suite, a
+100.00% hold rate, two plausible counts.
+
+**All three were found by measuring outputs.** Not by reviewing the generator,
+which was available to read the whole time and looked reasonable each time; not
+by adding cases; not by a sabotage. By the stack overflow that only appeared once
+scale was reported, by a hold rate printed as a percentage, and by two numbers
+printed next to each other that turned out to be equal. Measuring the produced
+distribution rather than the generator's knobs is the only technique that has
+ever caught this class, and it works because the parameter space is
+implicit — spread across a dozen literals, branch weights and interacting
+draws — while the distribution is a fact about what actually came out.
+
+The Phase 5 instance shows why reading the knobs does not substitute. The
+generator drew run lengths from `rng.Next(scale.MinRunLength, scale.MaxRunLength)`
+with `MinRunLength = 2`, which is legible, defensible, and states the whole
+defect: no run of length 1, therefore never a concurrent insert of a single
+character, therefore **§5's tie-break was never exercised in isolation in the
+entire project**. Nobody reading that line had noticed, over four phases, because
+it does not look like an exclusion. Two equal counts did.
+
+**Standing practice for any generator from here:**
+
+1. **Report the distribution of what was produced**, over dimensions named in the
+   specification's terms rather than the generator's — the difference §9 already
+   requires of the corpus, for this reason.
+2. **A dimension at zero fails the build.** Zero is the case that looks like
+   nothing rather than like a failure.
+3. **Read the reported numbers for relationships, not just for zeroes.** Two
+   dimensions that should vary independently and do not — equal counts, one a
+   constant multiple of the other, one always the sum of two others — mean the
+   measurement is of one thing wearing two names, or of the generator rather than
+   the algorithm. Equality between things with no reason to be equal is the
+   cheapest available signal and the easiest to scroll past.
+4. **When a distribution is measured for the first time, expect it to be wrong.**
+   All three of these were found the first time anyone looked.
