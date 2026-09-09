@@ -89,6 +89,10 @@ export async function startSystem(): Promise<System> {
   // Registered exactly, as §7 requires: one URI, matched literally. The issuer
   // refuses anything else outright rather than redirecting to it.
   oidc.redirectUris.add(`${api.baseUrl}/callback`);
+
+  // Registered exactly, like the callback: §7 treats a post-logout URI the
+  // provider echoes without checking as an open redirect.
+  oidc.redirectUris.add(`${api.baseUrl}/signed-out`);
   oidc.origins.add(api.baseUrl);
 
   const browsing = await startBrowser(oidc);

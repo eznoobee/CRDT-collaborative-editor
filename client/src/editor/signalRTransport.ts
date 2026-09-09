@@ -125,10 +125,25 @@ export class SignalRTransport implements Transport {
       { method: 'POST', headers, body: JSON.stringify({ replicaId }) },
     );
 
-    // 401 means the token was rejected rather than absent, which is the same
-    // recovery: get a new one. Anything else is a transport failure.
+    // §7 makes the membership decision here, so negotiate's statuses are §9's
+    // codes and not transport noise. Left as a generic failure, a 404 reached
+    // the user as a client that had simply gone offline — no message, no
+    // reason, and a retry loop against a document they will never be allowed to
+    // open. §13.13: a rejection the rejected party cannot observe is not a
+    // rejection. Found by the account-switch test in 6.5, which is the first
+    // thing in this project ever to open a document as the wrong person.
     if (response.status === 401) {
+      // The token was rejected rather than absent, which is the same recovery:
+      // get a new one.
       throw new ConnectionRefused(REJECTION.signInRequired);
+    }
+
+    if (response.status === 403) {
+      throw new ConnectionRefused(REJECTION.forbidden);
+    }
+
+    if (response.status === 404) {
+      throw new ConnectionRefused(REJECTION.notFound);
     }
 
     if (!response.ok) {

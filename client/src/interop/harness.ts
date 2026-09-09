@@ -36,6 +36,22 @@ interface Signing {
 /** The client id the harness issuer has registered. */
 export const CLIENT_ID = 'editor-spa';
 
+/** The cookie the harness issuer keeps its session in. */
+const SESSION_COOKIE = 'harness_session';
+
+/**
+ * The chooser's button for one account, as a Playwright selector.
+ *
+ * @remarks
+ * Exported so the browser tests name the account the way a person would —
+ * by clicking it — rather than by setting a variable the application cannot
+ * see. A test that chose an identity out of band would prove nothing about
+ * whether the session it established can be ended.
+ */
+export function accountButton(subject: string): string {
+  return `[data-account="${subject}"]`;
+}
+
 /** The OIDC issuer this run trusts, and the tokens it mints. */
 export interface Oidc {
   readonly issuer: string;
@@ -58,15 +74,29 @@ export interface Oidc {
   accessTokenLifetime: number;
 
   /**
-   * Who `/authorize` signs in when the request carries no `login_hint`.
+   * The accounts the chooser offers. Mutable per test.
    *
    * @remarks
-   * This is how a test chooses a user, and it is deliberately here rather than
-   * in the application: an app that read its subject from a query parameter
-   * would be shipping a test affordance, and the browser test would then be
-   * exercising a path no user takes. A real issuer asks; this one is told.
+   * <p>
+   * This replaces a single mutable `subject` that `/authorize` signed in
+   * whenever nothing else said otherwise, and the replacement is the point.
+   * With a default subject the issuer has no session to end: sign out, load
+   * again, and the next `/authorize` mints for the same person because that is
+   * what the default says to do — so a test of "the issuer's session ended"
+   * would pass against a client that never called the end-session endpoint.
+   * </p><p>
+   * So identity here works the way it does at a real provider. A browser with
+   * no session is shown a chooser and has to pick; picking establishes a
+   * session cookie; a browser that has one is signed in silently, which is the
+   * behaviour that makes signing out matter at all. Two browsers therefore have
+   * two identities at the same time, which is what testing an account switch
+   * needs.
+   * </p>
    */
-  subject: string;
+  readonly accounts: Set<string>;
+
+  /** How many sessions this issuer currently holds. */
+  readonly sessionCount: number;
 
   /** Every token request this issuer has answered or refused. */
   readonly tokenRequests: TokenRequest[];
@@ -231,7 +261,11 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
   const redirectUris = new Set<string>();
   const origins = new Set<string>();
   const tokenRequests: TokenRequest[] = [];
-  const state = { accessTokenLifetime: 300, subject: 'anonymous' };
+  const accounts = new Set<string>();
+
+  // Cookie value -> subject. A real session, so that ending it is observable.
+  const sessions = new Map<string, string>();
+  const state = { accessTokenLifetime: 300 };
 
   function sign(claims: Record<string, unknown>): string {
     const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: signing.kid }));
@@ -289,6 +323,7 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
           jwks_uri: `${issuer}/jwks.json`,
           authorization_endpoint: `${issuer}/authorize`,
           token_endpoint: `${issuer}/token`,
+          end_session_endpoint: `${issuer}/logout`,
           response_types_supported: ['code'],
           grant_types_supported: ['authorization_code', 'refresh_token'],
           subject_types_supported: ['public'],
@@ -305,7 +340,12 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
       }
 
       if (url.pathname === '/authorize') {
-        authorize(url, response);
+        authorize(url, request, response);
+        return;
+      }
+
+      if (url.pathname === '/logout') {
+        endSession(url, request, response);
         return;
       }
 
@@ -318,18 +358,100 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
     },
   );
 
+  /** The subject this browser's session names, or null. */
+  function sessionOf(request: IncomingMessage): string | null {
+    const header = request.headers.cookie ?? '';
+    for (const part of header.split(';')) {
+      const [name, ...rest] = part.trim().split('=');
+      if (name === SESSION_COOKIE) {
+        return sessions.get(rest.join('=')) ?? null;
+      }
+    }
+
+    return null;
+  }
+
   /**
-   * The authorization endpoint, auto-approving whoever `login_hint` names.
+   * The account chooser: this issuer's login form.
    *
    * @remarks
-   * There is no consent screen and no password, because neither is this
-   * project's. What is *not* skipped is every check that makes the code flow a
-   * flow: the redirect URI is matched exactly against a registered list, S256
-   * is the only challenge method accepted, and a request without a challenge is
-   * refused outright. A harness that waved those through would let a client
-   * that never computed a challenge pass its PKCE test.
+   * A real page with real links, because the alternative — a default subject
+   * the issuer signs in whenever nothing says otherwise — is what made "the
+   * issuer's session ended" untestable. Each link re-runs the same
+   * authorization request with a `login_hint`, so every parameter the client
+   * sent, the PKCE challenge included, survives the choice.
    */
-  function authorize(url: URL, response: ServerResponse): void {
+  function chooser(url: URL, response: ServerResponse): void {
+    const options = [...accounts]
+      .map((who) => {
+        const pick = new URL(url.toString());
+        pick.searchParams.set('login_hint', who);
+        return `<li><a data-account="${who}" href="${pick.pathname}${pick.search}">${who}</a></li>`;
+      })
+      .join('');
+
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(`<!doctype html><title>Sign in</title><h1>Choose an account</h1><ul>${options}</ul>`);
+  }
+
+  /**
+   * The end-session endpoint (§7).
+   *
+   * @remarks
+   * Drops the session and sends the browser back. Signing out of the
+   * application without reaching here leaves this cookie in place, and the next
+   * authorization request is answered silently for the same person — which is
+   * the defect register row 21 describes, and the reason this endpoint exists
+   * in the harness at all.
+   */
+  function endSession(url: URL, request: IncomingMessage, response: ServerResponse): void {
+    const header = request.headers.cookie ?? '';
+    for (const part of header.split(';')) {
+      const [name, ...rest] = part.trim().split('=');
+      if (name === SESSION_COOKIE) {
+        sessions.delete(rest.join('='));
+      }
+    }
+
+    const back = url.searchParams.get('post_logout_redirect_uri');
+    const requestedState = url.searchParams.get('state');
+    const clear = `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
+
+    if (back === null || !redirectUris.has(back)) {
+      response.writeHead(200, { 'content-type': 'text/plain', 'set-cookie': clear });
+      response.end('signed out');
+      return;
+    }
+
+    const target = new URL(back);
+    if (requestedState !== null) {
+      target.searchParams.set('state', requestedState);
+    }
+
+    response.writeHead(302, { location: target.toString(), 'set-cookie': clear }).end();
+  }
+
+  /**
+   * The authorization endpoint: silent with a session, a chooser without one.
+   *
+   * @remarks
+   * <p>
+   * There is no password, because passwords are not this project's. What is
+   * *not* skipped is every check that makes the code flow a flow: the redirect
+   * URI is matched exactly against a registered list, S256 is the only
+   * challenge method accepted, and a request without a challenge is refused
+   * outright. A harness that waved those through would let a client that never
+   * computed a challenge pass its PKCE test.
+   * </p><p>
+   * Nor is the session skipped, and that is what changed in Phase 6. A browser
+   * carrying this issuer's cookie is signed in without being asked — the
+   * behaviour that makes signing out mean something — and a browser without one
+   * is shown a chooser it has to click. Ending the session is therefore
+   * observable: the next load stops at the chooser instead of arriving back at
+   * the application as the same person.
+   * </p>
+   */
+  function authorize(url: URL, request: IncomingMessage, response: ServerResponse): void {
     const redirectUri = url.searchParams.get('redirect_uri') ?? '';
     const requestedState = url.searchParams.get('state');
     const challenge = url.searchParams.get('code_challenge');
@@ -363,10 +485,22 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
       return;
     }
 
+    // A hint picks the account and establishes the session, which is what the
+    // chooser's links do. Otherwise the session cookie decides, and a browser
+    // with neither is asked.
+    const hinted = url.searchParams.get('login_hint');
+    const existing = sessionOf(request);
+    const subject = hinted ?? existing;
+
+    if (subject === null) {
+      chooser(url, response);
+      return;
+    }
+
     const code = randomUUID();
     codes.set(code, {
       challenge,
-      subject: url.searchParams.get('login_hint') ?? state.subject,
+      subject,
       redirectUri,
       nonce: url.searchParams.get('nonce'),
       expiresAt: Date.now() + 60_000,
@@ -379,7 +513,19 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
       back.searchParams.set('state', requestedState);
     }
 
-    response.writeHead(302, { location: back.toString() }).end();
+    const headers: Record<string, string> = { location: back.toString() };
+    if (hinted !== null) {
+      const session = randomUUID();
+      sessions.set(session, hinted);
+
+      // SameSite=None because the issuer and the application are different
+      // origins and the callback is a cross-site navigation, which is exactly
+      // the shape a real provider's session cookie has.
+      headers['set-cookie'] =
+        `${SESSION_COOKIE}=${session}; Path=/; HttpOnly; Secure; SameSite=None`;
+    }
+
+    response.writeHead(302, headers).end();
   }
 
   /** The token endpoint, which is where PKCE is actually enforced. */
@@ -490,11 +636,10 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
       state.accessTokenLifetime = seconds;
     },
 
-    get subject(): string {
-      return state.subject;
-    },
-    set subject(who: string) {
-      state.subject = who;
+    accounts,
+
+    get sessionCount(): number {
+      return sessions.size;
     },
 
     mint: (subject: string, expiresInSeconds = 300) => accessToken(subject, expiresInSeconds),

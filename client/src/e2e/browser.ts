@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
-import type { Oidc } from '../interop/harness';
+import { accountButton, type Oidc } from '../interop/harness';
 
 /**
  * A real browser, for the parts of §9 that only a browser can answer.
@@ -82,4 +82,26 @@ export async function startBrowser(
       await browser.close();
     },
   };
+}
+
+/**
+ * Clicks an account at the harness issuer's chooser, if the chooser is showing.
+ *
+ * @remarks
+ * A browser that already holds a session skips the chooser entirely — that is
+ * the behaviour signing out has to undo — so this is a "if it is there, use it"
+ * step rather than a wait. A test that *requires* the chooser to appear asserts
+ * that separately, because "no chooser" and "chooser clicked" are the two
+ * outcomes sign-out is about telling apart.
+ */
+export async function pick(page: Page, subject: string): Promise<boolean> {
+  const button = await page.waitForSelector(accountButton(subject), { timeout: 15_000 })
+    .catch(() => null);
+
+  if (button === null) {
+    return false;
+  }
+
+  await button.click();
+  return true;
 }

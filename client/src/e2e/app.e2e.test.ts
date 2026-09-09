@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Page } from 'playwright';
 
 import { seed } from '../interop/harness';
+import { pick } from './browser';
 import { startSystem, type System } from './harness';
 
 /**
@@ -42,10 +43,12 @@ describe('the application, in a browser', () => {
 
   /** Signs in as `subject` and opens `documentId`, returning the ready page. */
   async function open(subject: string, documentId: string): Promise<Page> {
-    // Sequential by construction: the issuer has one subject at a time, which
-    // is how a test picks a user without the application carrying a query
-    // parameter no real user ever sets.
-    system.oidc.subject = subject;
+    // The identity is chosen by clicking it at the issuer, not by setting a
+    // variable. Phase 6 replaced the harness issuer's single mutable subject
+    // with real sessions for exactly this reason: an identity established out
+    // of band cannot be signed out of, so a test of sign-out would have had
+    // nothing to end.
+    system.oidc.accounts.add(subject);
 
     const { page } = await system.browsing.open();
 
@@ -60,6 +63,9 @@ describe('the application, in a browser', () => {
     await page.goto(`${system.api.baseUrl}/d/${documentId}`);
 
     try {
+      // The chooser is the issuer's login form. A browser with a session
+      // already skips it, which is why this waits for either.
+      await pick(page, subject);
       await page.waitForSelector('textarea', { timeout: 60_000 });
       await page.waitForFunction(
         () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
@@ -151,13 +157,121 @@ describe('the application, in a browser', () => {
     expect(everywhere).not.toContain(verifier);
   }, 180_000);
 
+  it('signs out of the provider too, so the next load asks who you are', async () => {
+    // §7's sign-out is three things, and this is the one that is invisible from
+    // inside the client: the token is gone either way, and only the *next*
+    // sign-in shows whether the provider's session went with it. Register row
+    // 21 is exactly this — closing the tab drops the token and the next load
+    // silently re-authenticates as the same person.
+    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-signout', role: 'editor' }]);
+    const page = await open('e2e-signout', documentId);
+
+    // Relative, because this issuer is shared with every other test in the
+    // file and each of them signed somebody in. An absolute count here would
+    // be a test of the execution order.
+    const before = system.oidc.sessionCount;
+    expect(before).toBeGreaterThan(0);
+
+    await signOutFrom(page);
+
+    // The provider's own session, ended. Asserted at the issuer rather than in
+    // the browser, because a client that never called the end-session endpoint
+    // looks identical from the page.
+    expect(system.oidc.sessionCount).toBe(before - 1);
+
+    // And this browser's local copy of the document went with it. IndexedDB
+    // outlives the tab and every token in memory, so leaving it would hand the
+    // next person at this machine the previous one's text. The record is what
+    // is asserted, not the database: the store deletes the document's entry and
+    // leaves the (now empty) database, which is the right behaviour and would
+    // make "no database named editor" a test of the wrong thing.
+    const stored = await page.evaluate(async (id: string) => {
+      const opening = indexedDB.open('editor');
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        opening.onsuccess = () => resolve(opening.result);
+        opening.onerror = () => reject(opening.error);
+      });
+
+      if (!database.objectStoreNames.contains('documents')) {
+        return null;
+      }
+
+      const read = database.transaction('documents', 'readonly').objectStore('documents').get(id);
+      return new Promise<unknown>((resolve, reject) => {
+        read.onsuccess = () => resolve(read.result ?? null);
+        read.onerror = () => reject(read.error);
+      });
+    }, documentId);
+
+    expect(stored).toBeNull();
+
+    // The load after a sign-out, in the same browser: the chooser, not the
+    // editor. This is the assertion register row 21 names.
+    await page.goto(`${system.api.baseUrl}/d/${documentId}`);
+    const asked = await pick(page, 'e2e-signout');
+
+    expect(asked).toBe(true);
+  }, 180_000);
+
+  it('switches accounts without carrying the first account\'s document across', async () => {
+    // The assertion that a store keyed by document id alone would fail: the
+    // second user reaches the same URL, and must see a refusal rather than the
+    // replica the first user left behind.
+    const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-first', role: 'editor' }]);
+    system.oidc.accounts.add('e2e-second');
+
+    const page = await open('e2e-first', documentId);
+    await page.click('textarea');
+    await page.keyboard.type('written by the first account');
+
+    await signOutFrom(page);
+
+    await page.goto(`${system.api.baseUrl}/d/${documentId}`);
+    expect(await pick(page, 'e2e-second')).toBe(true);
+
+    // §7: a document this caller has no role on is a 404, which §9 turns into
+    // this message. The first account's text must not be on screen.
+    await page.waitForFunction(
+      () => window.document.body.innerText.includes('This document is gone'),
+      undefined,
+      { timeout: 60_000 },
+    );
+
+    expect(await page.evaluate(() => window.document.body.innerText))
+      .not.toContain('written by the first account');
+  }, 180_000);
+
+  /**
+   * Clicks sign out, confirming the discard when there is unsent work.
+   *
+   * @remarks
+   * §7 makes the confirmation appear only when the outbox is non-empty, and
+   * whether it is depends on whether the last keystroke had been acknowledged
+   * — a race this test has no reason to win either way. Handling both is not
+   * papering over it: the confirmation itself is asserted directly in
+   * SignOut.test.tsx, where the count is not a race.
+   */
+  async function signOutFrom(page: Page): Promise<void> {
+    await page.click('[data-testid="sign-out"]');
+
+    const confirm = await page
+      .waitForSelector('[data-testid="sign-out-confirm"]', { timeout: 2_000 })
+      .catch(() => null);
+
+    if (confirm !== null) {
+      await confirm.click();
+    }
+
+    await page.waitForSelector('[data-testid="signed-out"]', { timeout: 60_000 });
+  }
+
   it('never puts the bearer token in the hub URL', async () => {
     // §7 put a single-use 60-second ticket in the query string precisely so a
     // JWT would not be there. 4.9 changed how tokens are obtained, so the
     // guarantee is re-asserted rather than inherited.
     const documentId = seed(system.oidc.issuer, [{ subject: 'e2e-url', role: 'editor' }]);
 
-    system.oidc.subject = 'e2e-url';
+    system.oidc.accounts.add('e2e-url');
     const { page } = await system.browsing.open();
 
     const urls: string[] = [];
@@ -165,6 +279,7 @@ describe('the application, in a browser', () => {
     page.on('websocket', (socket) => urls.push(socket.url()));
 
     await page.goto(`${system.api.baseUrl}/d/${documentId}`);
+    await pick(page, 'e2e-url');
     await page.waitForFunction(
       () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
       undefined,

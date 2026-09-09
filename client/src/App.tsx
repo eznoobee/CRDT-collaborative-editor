@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
+import { SignOut } from './app/SignOut';
 import { Editor } from './editor/Editor';
 import { describeWindow, offlineWindow } from './editor/offlineWindow';
 import type { Bootstrap } from './app/bootstrap';
@@ -45,6 +46,13 @@ export function App(props: AppProps = {}): React.JSX.Element {
         </Shell>
       );
 
+    case 'signed-out':
+      return (
+        <Shell>
+          <p data-testid="signed-out">You are signed out.</p>
+        </Shell>
+      );
+
     case 'failed':
       return (
         <Shell>
@@ -53,7 +61,11 @@ export function App(props: AppProps = {}): React.JSX.Element {
       );
 
     case 'open':
-      return <Shell><Document open={result.document} /></Shell>;
+      return (
+        <Shell>
+          <Document open={result.document} signOut={result.signOut} />
+        </Shell>
+      );
   }
 }
 
@@ -67,7 +79,7 @@ function Shell(props: { children: React.ReactNode }): React.JSX.Element {
 }
 
 /** The editor and everything the user has to be told (§9, §13.13). */
-function Document(props: { open: OpenDocument }): React.JSX.Element {
+function Document(props: { open: OpenDocument; signOut: () => Promise<void> }): React.JSX.Element {
   const { sync } = props.open;
 
   useSyncExternalStore(
@@ -101,9 +113,11 @@ function Document(props: { open: OpenDocument }): React.JSX.Element {
       {session === null
         ? <p>Connecting…</p>
         : <Editor session={session} readOnly={sync.readOnly} />}
+      <SignOut unsent={sync.pending.length} signOut={props.signOut} />
     </>
   );
 }
+
 
 /**
  * Epoch milliseconds, refreshed each minute while `active`.

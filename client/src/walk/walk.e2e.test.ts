@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startWalk, type Walk } from './harness';
+import { pick } from '../e2e/browser';
 
 /**
  * §13.27's walk, as a test. Phase 5b's done-when.
@@ -122,11 +123,12 @@ describe('the walk: cold start to the first step that cannot be taken', () => {
   }, 60_000);
 
   it('step 6 — a person signs in, in a browser, and gets back', async () => {
-    walk.oidc.subject = 'walker';
+    walk.oidc.accounts.add('walker');
     const { page } = await walk.browsing.open();
 
     const document = '00000000-0000-0000-0000-000000000001';
     await page.goto(`${walk.baseUrl}/d/${document}`);
+    await pick(page, 'walker');
 
     // The redirect to the issuer, the code, the exchange, and the return — all
     // of it through the proxy, against a stack nothing seeded.
@@ -150,10 +152,11 @@ describe('the walk: cold start to the first step that cannot be taken', () => {
     //
     // When Phase 6 lands, this test is replaced by the next step rather than
     // deleted, and the walk gets further. That is the progress no suite reports.
-    walk.oidc.subject = 'walker';
+    walk.oidc.accounts.add('walker');
     const { page } = await walk.browsing.open();
 
     await page.goto(walk.baseUrl);
+    await pick(page, 'walker');
     await page.waitForFunction(
       () => window.document.body.innerText.includes('Open a document'),
       undefined,

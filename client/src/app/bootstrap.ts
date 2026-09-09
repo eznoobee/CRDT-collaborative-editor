@@ -1,14 +1,25 @@
 import { PkceTokenSource } from '../auth/pkce';
 import { SignInRequired } from '../auth/tokenSource';
-import { CALLBACK_PATH, documentIdIn, loadConfiguration } from './config';
+import { CALLBACK_PATH, SIGNED_OUT_PATH, documentIdIn, loadConfiguration } from './config';
 import { openDocument, type OpenDocument } from './openDocument';
+import { signOut } from './signOut';
 
 export type Bootstrap =
   /** The browser is on its way to the issuer; this document is about to go. */
   | { kind: 'signing-in' }
   | { kind: 'no-document' }
+  | { kind: 'signed-out' }
   | { kind: 'failed'; message: string }
-  | { kind: 'open'; document: OpenDocument };
+  | {
+      kind: 'open';
+      document: OpenDocument;
+
+      /**
+       * §7's three things, in order: local state, then the token, then the
+       * provider's session.
+       */
+      signOut: () => Promise<void>;
+    };
 
 /**
  * Everything that has to happen before the application can render (§7, §9).
@@ -37,6 +48,7 @@ export async function bootstrap(location: Location = window.location): Promise<B
       authority: config.issuer,
       clientId: config.clientId,
       redirectUri: `${origin}${CALLBACK_PATH}`,
+      postLogoutUri: `${origin}${SIGNED_OUT_PATH}`,
     });
 
     // A path, not a query-string sniff: §7 registers exactly one redirect URI,
@@ -45,6 +57,13 @@ export async function bootstrap(location: Location = window.location): Promise<B
     let path = location.pathname;
     if (path === CALLBACK_PATH) {
       path = await auth.completeSignIn();
+    }
+
+    // Where the issuer sends the browser after ending its session. Nothing is
+    // opened and no sign-in is started: arriving here signed in again would be
+    // a sign-out that immediately undid itself.
+    if (path === SIGNED_OUT_PATH) {
+      return { kind: 'signed-out' };
     }
 
     const documentId = documentIdIn(path);
@@ -64,7 +83,17 @@ export async function bootstrap(location: Location = window.location): Promise<B
       return { kind: 'signing-in' };
     }
 
-    return { kind: 'open', document: await openDocument({ origin, documentId, tokens: auth }) };
+    const document = await openDocument({ origin, documentId, tokens: auth });
+
+    return {
+      kind: 'open',
+      document,
+      signOut: () => signOut({
+        forgetLocal: () => document.forget(),
+        forgetTokens: () => auth.forget(),
+        endSession: () => auth.endSession(SIGNED_OUT_PATH),
+      }),
+    };
   } catch (error) {
     return { kind: 'failed', message: error instanceof Error ? error.message : String(error) };
   }

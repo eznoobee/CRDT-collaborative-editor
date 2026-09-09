@@ -42,6 +42,9 @@ export const DOCUMENT_PATH = /^\/d\/([0-9a-fA-F-]{36})\/?$/;
 /** Where the issuer sends the browser back to. Registered exactly (§7). */
 export const CALLBACK_PATH = '/callback';
 
+/** Where the issuer sends the browser after a sign-out. Registered exactly (§7). */
+export const SIGNED_OUT_PATH = '/signed-out';
+
 /** The document this URL names, or null. */
 export function documentIdIn(pathname: string): string | null {
   return DOCUMENT_PATH.exec(pathname)?.[1] ?? null;

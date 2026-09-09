@@ -20,6 +20,17 @@ export interface OpenDocument {
   readonly restored: PersistedDocument | null;
 
   close(): Promise<void>;
+
+  /**
+   * Stops syncing and erases this document's local state (§7's sign-out).
+   *
+   * @remarks
+   * The replica and the outbox are in IndexedDB, which outlives the tab and
+   * every token in memory. A sign-out that dropped the token and left them
+   * there would leave the next person at this machine holding the previous
+   * one's text, which is the thing the token being in memory only was for.
+   */
+  forget(): Promise<void>;
 }
 
 /**
@@ -110,5 +121,11 @@ export async function openDocument(options: OpenOptions): Promise<OpenDocument> 
     sync,
     restored,
     close: () => sync.stop(),
+    forget: async () => {
+      // Stopped first. A save queued by a subscriber that ran after the clear
+      // would write the state straight back, and the failure would be silent.
+      await sync.stop();
+      await store.clear(options.documentId);
+    },
   };
 }

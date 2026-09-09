@@ -18,6 +18,46 @@ export interface TokenSource {
 }
 
 /**
+ * Ending a session, as §7 defines it: three things, not one.
+ *
+ * @remarks
+ * Separate from {@link TokenSource} because everything that merely needs a
+ * bearer token should not depend on the ability to end a session — the
+ * transport asks for tokens and has no business signing anyone out.
+ */
+export interface SessionSource extends TokenSource {
+  /** Drops the tokens held in memory. */
+  forget(): Promise<void>;
+
+  /**
+   * Ends the session at the identity provider and navigates there.
+   *
+   * @throws SignOutUnavailable - The provider advertises no end-session
+   * endpoint, so this application cannot end its session and must say so
+   * rather than report a sign-out it did not perform.
+   */
+  endSession(returnTo: string): Promise<void>;
+}
+
+/**
+ * The provider cannot be asked to end its session.
+ *
+ * @remarks
+ * §7 makes this a thing the user is told, not a thing that is swallowed. A
+ * local-only sign-out looks identical to a real one from inside this
+ * application — the token is gone either way — and the difference only shows up
+ * on the next load, as the same person signed in without being asked. On a
+ * shared machine that is the defect, so it is surfaced at the moment it
+ * happens.
+ */
+export class SignOutUnavailable extends Error {
+  constructor() {
+    super('This identity provider does not support ending its session.');
+    this.name = 'SignOutUnavailable';
+  }
+}
+
+/**
  * The user has to log in again, and no amount of retrying changes that.
  *
  * @remarks

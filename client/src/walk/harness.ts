@@ -225,6 +225,10 @@ export async function startWalk(): Promise<Walk> {
   await reachable(`${baseUrl}/health/live`, 60_000);
 
   oidc.redirectUris.add(`${baseUrl}/callback`);
+
+  // Registered exactly, like the callback: §7 treats a post-logout URI the
+  // provider echoes without checking as an open redirect.
+  oidc.redirectUris.add(`${baseUrl}/signed-out`);
   oidc.origins.add(baseUrl);
 
   // Both certificates are PINNED, never ignored: the issuer's and the proxy's.

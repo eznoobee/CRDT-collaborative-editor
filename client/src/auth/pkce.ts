@@ -1,6 +1,6 @@
 import { UserManager, InMemoryWebStorage, WebStorageStateStore, type User } from 'oidc-client-ts';
 
-import { SignInRequired, type TokenSource } from './tokenSource';
+import { SignInRequired, SignOutUnavailable, type SessionSource } from './tokenSource';
 
 export interface PkceOptions {
   /** The OIDC issuer, read from the server's /config (§7). */
@@ -11,6 +11,16 @@ export interface PkceOptions {
 
   /** Exact-match, and the same value the issuer has registered. */
   readonly redirectUri: string;
+
+  /**
+   * Where the issuer sends the browser after ending its session.
+   *
+   * @remarks
+   * Registered exactly, like the redirect URI and for the same reason: a
+   * post-logout URI the provider will echo without checking is an open
+   * redirect that a sign-out link can be pointed anywhere with.
+   */
+  readonly postLogoutUri: string;
 }
 
 /**
@@ -43,7 +53,7 @@ export interface PkceOptions {
  * discarded on a retry — and none of them are what this project is about.
  * </p>
  */
-export class PkceTokenSource implements TokenSource {
+export class PkceTokenSource implements SessionSource {
   private readonly users: UserManager;
   private inFlight: Promise<User | null> | null = null;
 
@@ -52,6 +62,7 @@ export class PkceTokenSource implements TokenSource {
       authority: options.authority,
       client_id: options.clientId,
       redirect_uri: options.redirectUri,
+      post_logout_redirect_uri: options.postLogoutUri,
       response_type: 'code',
 
       // offline_access is what asks for a refresh token; without it every
@@ -137,5 +148,24 @@ export class PkceTokenSource implements TokenSource {
   /** Drops the tokens held in memory. */
   async forget(): Promise<void> {
     await this.users.removeUser();
+  }
+
+  /**
+   * Ends the provider's session, which is the half a local sign-out misses.
+   *
+   * @remarks
+   * Checked before it is attempted, and refused loudly when the provider has no
+   * end-session endpoint. `oidc-client-ts` would otherwise throw its own error
+   * from inside the redirect, at which point this application has already
+   * dropped its token and looks signed out — the exact state §7 calls the
+   * defect, reached by way of an error nobody planned for.
+   */
+  async endSession(returnTo: string): Promise<void> {
+    const endpoint = await this.users.metadataService.getEndSessionEndpoint();
+    if (endpoint === undefined) {
+      throw new SignOutUnavailable();
+    }
+
+    await this.users.signoutRedirect({ state: returnTo });
   }
 }
