@@ -271,6 +271,44 @@ describe('the application, in a browser', () => {
     await page.waitForSelector('[data-testid="signed-out"]', { timeout: 60_000 });
   }
 
+  it('tells a revoked reader why their session stopped', async () => {
+    // 6.4 closes a revoked member's socket server-side, which the client sees
+    // as an ordinary drop: state goes offline and nothing says why. What has to
+    // be true is that the *reconnect* explains it — negotiate answers 404, and
+    // §9's table turns that into a message. Without the mapping added in 6.5
+    // this client would have retried forever in silence, which is §13.13.
+    //
+    // Nothing is typed here on purpose. A revoked reader is the case §7's
+    // per-operation check cannot reach.
+    const documentId = await provision(system.api.baseUrl, system.oidc, {
+      owner: 'e2e-revoker',
+      members: [{ subject: 'e2e-revoked', role: 'editor' }],
+    });
+
+    const page = await open('e2e-revoked', documentId);
+
+    const owner = system.oidc.mint('e2e-revoker');
+    const me = await fetch(`${system.api.baseUrl}/me`, {
+      headers: { authorization: `Bearer ${system.oidc.mint('e2e-revoked')}` },
+    }).then((response) => response.json() as Promise<{ userId: string }>);
+
+    const revoked = await fetch(
+      `${system.api.baseUrl}/documents/${documentId}/members/${me.userId}`,
+      { method: 'DELETE', headers: { authorization: `Bearer ${owner}` } },
+    );
+
+    expect(revoked.status).toBe(204);
+
+    await page.waitForFunction(
+      () => window.document.body.innerText.includes('This document is gone'),
+      undefined,
+      { timeout: 60_000 },
+    );
+
+    expect(await page.evaluate(() => window.document.body.innerText))
+      .toContain('This document is gone');
+  }, 180_000);
+
   it('never puts the bearer token in the hub URL', async () => {
     // §7 put a single-use 60-second ticket in the query string precisely so a
     // JWT would not be there. 4.9 changed how tokens are obtained, so the

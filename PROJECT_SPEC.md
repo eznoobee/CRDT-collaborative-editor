@@ -2001,6 +2001,7 @@ written, not done).
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
 | 21 | Signing out, and switching accounts | **6** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
 | 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list speaks only to operation submission and connections, so a `POST /documents` loop is an unbounded write path that nothing in the spec forbids. The spec is what is incomplete; 6b writes the rule and the limit together | §7 |
+| 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
