@@ -3989,3 +3989,155 @@ not rediscovered one instance at a time:
 
 Each row is a place where the phrasing "assert the requirement" is not enough,
 and the assertion has to name which mechanism it is holding responsible.
+
+### 13.32 An authorization check attached to an action only covers principals who take that action
+
+§7's role check runs on every submission. It had been read — for six phases of
+authorization work, by me — as *the* authorization check, and it is not. It is
+the authorization check **for writing**.
+
+A client that only reads submits nothing. Nothing re-checks it, nothing expires,
+and it keeps receiving every broadcast on the document for as long as its socket
+stays open. A user revoked at 10:00 was still reading the text at 17:00, and
+every test in the suite said revocation worked — because every revocation test
+revoked a *writer*, then asserted the write was refused.
+
+**That last clause is the whole finding.** A writer is what you reach for when
+testing a write-authorization check: the test is written from the check
+outwards, so the principal it invents is one the check already covers. The
+coverage looks total from inside because the only principals in the tests are
+the ones the mechanism handles.
+
+**The general form: an authorization check attached to an action only covers
+principals who take that action. Passive access has no natural checkpoint, so it
+needs a mechanism the principal does not trigger.** Anything a principal
+*receives* rather than *requests* — a broadcast, a subscription, a stream, a
+long-poll, a pushed notification, a session that stays open — is outside every
+check hung off a request, and the gap is invisible in exactly the way §13.27
+describes, because no test fails.
+
+The mechanism here is a sweep over the connections each instance holds
+(`MembershipSweep`), and two things about it are worth keeping:
+
+- **Its bound is composed and enforced rather than asserted.** Worst case from
+  revocation to close is the role cache's staleness plus the sweep's interval,
+  so the constructor refuses to start on a configuration where those two numbers
+  exceed §7's five seconds. Two numbers in different files cannot drift into
+  violating the requirement, and nobody has to remember the arithmetic.
+- **The two-direction test is what makes it trustworthy.** A revoked member's
+  connection must close; a member *demoted to viewer* must keep theirs, stay
+  connected, and be refused on the next write. Without the second assertion,
+  "closes revoked connections" silently becomes "closes on any membership
+  change" — a security hole traded for an unmeasured usability one, with the
+  suite equally green either way.
+
+**The question to ask of any authorization rule from here:** who is subject to
+this, and what do they have to *do* to be subject to it? If the answer is "make
+a request", then everyone who makes no request is uncovered, and that set is
+usually the readers.
+
+### 13.33 A timing budget tests whichever mechanism meets it
+
+§13.31 says a requirement satisfiable by either of two mechanisms is tested by
+neither. Phase 6 wrote tests specifically to catch that — a grant asserted
+inside a budget the cache TTL could not meet, so only the eager invalidation
+could produce a pass — and then one of those tests passed via a third mechanism
+nobody had counted.
+
+The sabotage tells it: substituting the undecorated writer failed two of six
+revocation tests and left "revoking removes the document from what the member
+can reach" green. That test probed the *listing* before revoking, and §9 makes
+the listing deliberately uncached. So the role cache was never populated for
+that pair, the read after revocation went straight to Postgres, and the
+assertion was met by the source of truth while the mechanism it named sat
+unused. **A test written to catch mechanism-substitution was passing via a
+substitute mechanism.**
+
+The rule, and it is narrower and more useful than §13.31's:
+
+> **A test asserting a timing budget tests whichever mechanism meets it, and the
+> assertion cannot say which one ran.** A budget is a statement about the clock,
+> not about the code path: every implementation fast enough passes it, including
+> the one that does no caching at all.
+
+So, mechanically: **any test of a cache-invalidation path must first prove the
+cache was populated.** A read that the invalidation is supposed to affect has to
+happen *before* the write, and the test has to assert that read got the stale
+answer. Without it the test exercises the uncached path with extra steps, and
+looks exactly like the test that matters.
+
+The same shape applies wherever a fast path sits in front of a slow correct one:
+a memo table, a CDN, a prepared-statement cache, a connection pool. The
+assertion "it was fast enough" is evidence about the wall clock. Naming the
+mechanism means arranging for the slow path to be *wrong* first, and then
+watching it be corrected.
+
+### 13.34 A mechanical guard has mechanical failure modes
+
+Phase 6 replaced `psql` seeding with the product's own endpoints and added a
+gate to keep it that way, on the argument that a criterion checkable by grep
+beats one requiring judgement — judgement at the end of a long phase is what
+produced register rows 15 and 16 in the first place.
+
+The gate was written. Then, checking that the grep returned nothing, it returned
+one line: the comment in the harness stating the rule, which contains the string
+the rule forbids. **The guard was defeated by its own documentation**, and would
+have been red on a clean repository from the moment it was written.
+
+It is a small failure and the point it makes is not. "Checkable by grep" is a
+claim about *how* a check runs, not about *whether it is correct*. A mechanical
+guard trades one class of failure for another: it cannot be forgotten, cannot be
+skipped when tired, cannot be argued with — and it also cannot tell code from
+prose, an example from an instance, or a test fixture from a violation. §13.19
+is the same lesson from the other side: there a textual guard covered the
+instances of its pattern and was read as covering the property; here a textual
+guard covered an instance that was not a violation at all.
+
+Both directions are now on the record, and the practice is the same one:
+
+1. **Run the guard and read what it matched**, on the commit that adds it.
+   Not "does it pass" — *what did it look at*. This one passed nothing and
+   matched its own comment; the fix was to move the rule's text into
+   PROJECT_SPEC.md §12 and leave the harness pointing at it.
+2. **Sabotage the guard itself**, which caught nothing here only because step 1
+   already had. Adding a violating line failed the gate, named the file and the
+   line, and exited 1.
+
+And the honest note: **this criterion was the user's, and I argued for
+implementing it as written.** It was the right criterion and the literal
+implementation of it was wrong, which is the ordinary way a good rule meets a
+real repository.
+
+### 13.35 The checks that never fail for an interesting reason are the ones dropped from the fast loop
+
+Formatting was red in CI on two consecutive pushes in Phase 6, and I found it at
+the phase preflight rather than while working. The cause is not mysterious and
+is worth naming as a category rather than an incident.
+
+Through the phase I ran the gates that could tell me something: the test suites,
+the client gates, conformance, interop, end-to-end. I did not run
+`dotnet format`. Nothing decided that — it fell out of the loop, because it is
+the gate whose failures are never interesting. An import in the wrong order
+teaches nothing, changes nothing about the design, and is fixed without thought.
+
+**That is exactly why it gets dropped, and exactly why it then fails.** The
+selection pressure on a per-task loop is toward checks that pay for their
+runtime in information. A check that has never once told me something worth
+knowing loses that competition every time, permanently, until it is the only
+thing standing between a push and a red build.
+
+Two consequences, both about where such a check belongs:
+
+- **Boring is not unimportant.** A formatting gate is cheap to satisfy and
+  cheap to violate, and its whole value is that nobody has to think about it —
+  which requires it to run without anybody choosing to run it.
+- **So it belongs in the loop that cannot skip it**, not in the one exercising
+  judgement. `phase-preflight.sh` already runs it and did its job; the failure
+  was that the phase's *working* rhythm had no place for it. The remedy is the
+  same shape as §12's rule about guards running on a schedule something else
+  keeps: a check nobody has a reason to run needs a runner with no discretion.
+
+The generalisation for any suite: **rank checks by how often they have taught
+you something, and the ones at the bottom of that list are the ones to automate
+hardest.** They are not candidates for removal — they are the ones a human loop
+will silently stop performing.
