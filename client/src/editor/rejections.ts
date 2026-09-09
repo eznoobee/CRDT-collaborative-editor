@@ -24,6 +24,15 @@ export const REJECTION = {
   tooManyReplicas: 'too_many_replicas',
 
   /**
+   * §7's abuse limits: this user or this connection is over budget.
+   *
+   * The one refusal that says *when* to come back. Every other code is a
+   * property of the batch or the session; this one is a property of the clock,
+   * and the server is the only party that knows the window it just closed.
+   */
+  rateLimited: 'rate_limited',
+
+  /**
    * §5's GC watermark: the referenced id is at or below it and is gone.
    *
    * Specified before anything emits it. The server side arrives with GC in
@@ -51,6 +60,8 @@ export const REJECTION = {
 export type Recovery =
   /** Reconcile with the server, then submit the same batch once more. */
   | 'catch-up-and-retry'
+  /** Wait out the window the server named, then submit the same batch again. */
+  | 'wait-and-retry'
   /** Throw local state away, take a snapshot, and report the lost work. */
   | 'resync'
   /** Keep receiving, refuse to author, keep the outbox. */
@@ -64,6 +75,14 @@ export type Recovery =
  * §9's table, as code.
  *
  * @remarks
+ * `rate_limited` is the one recovery with no budget on it, deliberately.
+ * `catch-up-and-retry` is capped at one attempt because a second occurrence
+ * means a bug here, but a throttle repeating means the window has not rolled
+ * over yet — which is the server working, not this client misbehaving. What
+ * bounds it instead is the delay: the controller floors and ceilings the
+ * server's number, so a zero cannot spin and an absurd one cannot park the
+ * outbox forever.
+ *
  * `sequence_gap` and `replica_mismatch` are `stop` rather than `resync`
  * deliberately: both mean this client's idea of its own identity or its own
  * sequence disagrees with the server's, which is a bug here rather than a state
@@ -74,6 +93,9 @@ export function recoveryFor(code: string): Recovery {
   switch (code) {
     case REJECTION.unknownOrigin:
       return 'catch-up-and-retry';
+
+    case REJECTION.rateLimited:
+      return 'wait-and-retry';
 
     case REJECTION.resyncRequired:
       return 'resync';

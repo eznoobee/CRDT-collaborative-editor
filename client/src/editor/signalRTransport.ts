@@ -23,6 +23,9 @@ interface Negotiated {
 interface SubmitResult {
   Code: string | null;
   Accepted: number;
+
+  /** Milliseconds until a throttled batch may go back up (§7). */
+  RetryAfterMs: number;
 }
 
 /** What the hub answers a catch-up with. */
@@ -192,7 +195,7 @@ export class SignalRTransport implements Transport {
       Operations: operations,
     });
 
-    return { code: result.Code };
+    return { code: result.Code, retryAfterMs: result.RetryAfterMs };
   }
 
   async catchUp(

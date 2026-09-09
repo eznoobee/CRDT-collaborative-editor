@@ -311,6 +311,16 @@ public sealed class IngestValidationTests
         await using var session = await SessionAsync("full", limits: new Dictionary<string, string?>
         {
             ["Ingest:MaxDocumentBytes"] = "8192",
+
+            // Out of the way, and stated rather than tuned into silence. This
+            // test fills a document as fast as the loop goes — ten thousand
+            // code points in a couple of seconds — which is past any abuse
+            // budget by design, because the cap under test is the document's
+            // and not the clock's. §7's limit is exercised in RateLimitTests;
+            // leaving it in force here would make this test's answer
+            // rate_limited and prove nothing about MaxDocumentBytes.
+            ["RateLimits:CodePointsPerUser"] = "1000000",
+            ["RateLimits:CodePointsPerConnection"] = "1000000",
         });
 
         var filled = 0;
@@ -421,6 +431,12 @@ public sealed class IngestValidationTests
         await using var session = await SessionAsync("cold-cap", limits: new Dictionary<string, string?>
         {
             ["Ingest:MaxDocumentBytes"] = "4096",
+
+            // As above: the burst that fills a document is not a burst §7's
+            // limit should tolerate, and this test is about the byte cap
+            // surviving a cold instance.
+            ["RateLimits:CodePointsPerUser"] = "1000000",
+            ["RateLimits:CodePointsPerConnection"] = "1000000",
         });
 
         var filled = 0;

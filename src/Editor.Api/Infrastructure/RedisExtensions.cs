@@ -60,6 +60,19 @@ public static class RedisExtensions
             provider.GetRequiredService<IConnectionMultiplexer>(),
             provider.GetRequiredService<IOptions<ReplicaClaimOptions>>().Value));
 
+        // §7's submission limits. Redis-backed because "across instances" is
+        // the requirement rather than a note about the implementation: a
+        // per-process limiter is escaped by reconnecting, and §8 forbids
+        // sticky sessions, so landing elsewhere is the normal case.
+        services.AddOptions<RateLimitOptions>()
+            .BindConfiguration(RateLimitOptions.Section)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        services.AddSingleton<IOperationRateLimiter>(provider => new RedisOperationRateLimiter(
+            provider.GetRequiredService<IConnectionMultiplexer>(),
+            provider.GetRequiredService<IOptions<RateLimitOptions>>().Value));
+
         services.AddHostedService<ReplicaClaimRenewal>();
 
         // §7's revocation bound applied to a connection that only reads. The

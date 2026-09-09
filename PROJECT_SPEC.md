@@ -1636,7 +1636,25 @@ is a stress target, not a steady state.
   | `malformed` | A bug in this client. Stop submitting, surface it, keep local state for diagnosis; retrying cannot help. |
   | `too_many_replicas` | §7's cap. Retry with backoff, having released any claim held; surface it if it persists. |
   | `unknown_origin` | The server does not have an operation this batch references. Catch up by version vector, then resubmit once. Repeated occurrence is a bug, not a race. |
+  | `rate_limited` | §7's abuse budget is spent. Wait the delay the refusal carries, then resubmit **the same bytes** — no catch-up, because nothing about the document changed. Unbounded retries, unlike `unknown_origin`: a repeat means the window has not rolled over, which is the server working. |
   | `resync_required` | §5's GC watermark: the referenced id is at or below it and is gone. Discard local state, take a snapshot, and report the unsent operations as lost — this is the one case where §5's "do not drop" rule has an exception, so it is the one the user has to be told about. |
+
+  **`rate_limited` is the one refusal that carries a number, and the number is
+  the server's.** A client left to invent the delay either hammers the limit it
+  just hit or backs off for longer than the window lasts, and only the server
+  knows which. It is also the one recovery with no attempt budget: `unknown_origin`
+  is capped at one retry because a second occurrence is a bug here, while a
+  throttle repeating is the limiter doing its job. What bounds it instead is a
+  floor and a ceiling on the delay itself, both the client's own — a zero would
+  turn the recovery into a spin against the limiter, and an implausible number
+  would park unsent work on a live connection with nothing on screen changing.
+
+  **The retry is byte-identical, and that is a requirement rather than an
+  optimisation.** A refused batch has already spent its sequence numbers on the
+  client; a client that rebuilt the batch instead would leave a hole and be
+  refused with `sequence_gap`, which is a stop. The server holds up its half:
+  the expected sequence advances only on a successful append, never on a
+  refusal.
 
   `resync_required` is specified here before anything emits it. §5 defines the
   condition and the server side arrives with GC; defining the client contract
@@ -2094,7 +2112,7 @@ written, not done).
 | 7 | `/health/ready` probing Postgres and Redis | **7** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
 | 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
 | 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
-| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b** | §7 requires them; nothing implements them | §7 |
+| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
 | 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b** | Same | §7 |
 | 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
 | 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
@@ -2235,6 +2253,16 @@ because nobody had written anything while it was away, so convergence held for a
 reason unrelated to the mechanism. Giving the other client an edit to make during
 the outage — reaching the author only by catch-up, since broadcast went to a group
 it had left — made the same sabotage fail.
+
+**Sabotage from a committed tree.** A sabotage is applied and then reverted, and
+in 6b.4 the revert was `git checkout` on a file whose rate-limit wiring had not
+been committed yet — which destroyed it, silently, in the middle of a run whose
+whole purpose was to make a test go red. Reconstruction was possible only because
+the diff happened to be in the session transcript. The practice writes to the
+working tree by design, so the working tree is exactly what must not hold the
+only copy of anything: commit first, or copy the file aside and restore from the
+copy. This is the second time a sabotage run has been wrong about *what was on
+disk* rather than about the code (§13.17's stale-build case is the first).
 
 This is the Phase 3 shutdown-race test again (right subject, wrong path), and it
 is now twice. The order matters because the two hypotheses lead opposite ways:
@@ -4286,3 +4314,43 @@ bypasses, and a clean bill for gitleaks and the production-build marker is a
 result I would not present as strong: those two are third-party or narrow by
 construction, so "nothing found" partly reports that I had less to look at. If
 this audit runs again it should start with them.
+
+### 13.37 A limit's number is set by the largest legitimate use, not by the abuse it is named for
+
+6b.4 implemented §7's submission rate limits and gave them a default of a
+thousand code points per ten seconds. The reasoning written beside the number
+was about typing: a fast typist sustains around ten code points a second, so a
+hundred a second leaves an order of magnitude of headroom. Every word of that is
+true and the number was still wrong, because **typing is not the largest thing a
+person does to a text editor.** Pasting is. Three pages of prose is three
+thousand code points arriving as twelve batches back to back, and the limit
+refused it.
+
+The general form: **a control's default is set by the upper end of legitimate
+use, and the upper end is rarely the activity the control is named after.** A
+rate limit on submission gets reasoned about in terms of typing because "rate"
+and "typing" belong to the same mental picture; the number that matters belongs
+to pasting, which is the same requirement's other end and does not come to mind
+while writing the limiter. The same shape is waiting in the other limits this
+system has: a connection cap reasoned about in terms of tabs and met by a
+reconnect storm, a payload cap reasoned about in terms of keystrokes and met by
+an undo of a paste.
+
+**What found it was two unrelated tests going red**, not review and not
+judgement. `IngestValidationTests` fills a document to its byte cap by
+submitting ten thousand code points as fast as the loop goes, and it came back
+`rate_limited` instead of `document_full`. That is the mechanism rather than a
+lucky accident: a suite that exercises the application at the top of its
+legitimate range will tell you a new limit is set too low, and a suite that only
+exercises the middle will not. The rate limit's own tests all passed throughout
+— they were written against small configured budgets and could not have noticed.
+**No test written for a limit ever notices that the limit is in the wrong
+place.**
+
+**And the fix has a second half.** Those two tests now configure the budget out
+of the way explicitly, with a comment saying why: they push past any sane abuse
+budget deliberately, because the cap under test is the document's and not the
+clock's. Raising a limit so a red test goes green is how a control is quietly
+disabled; doing it in the two tests that are about a different cap, in writing,
+with the limit's own tests untouched, is scoping. The difference is whether the
+change is stated and whether anything still exercises the limit.

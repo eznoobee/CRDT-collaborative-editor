@@ -6,6 +6,16 @@ import type { DocumentSession } from './DocumentSession';
 /** What the server answered a submission with (§7). */
 export interface SubmitOutcome {
   readonly code: string | null;
+
+  /**
+   * For a throttle, how long the server says to wait (§7).
+   *
+   * Optional because every other refusal leaves it meaningless, and absent is
+   * treated the same as zero: the server did not name a delay, so the client
+   * uses its own floor rather than resubmitting immediately into the limit it
+   * just hit.
+   */
+  readonly retryAfterMs?: number;
 }
 
 /** What the server answered a catch-up with (§8). */
@@ -366,7 +376,7 @@ export class SyncController {
           // The recovery says whether this loop keeps going. Calling drain
           // again from inside it would hit the re-entrancy guard and silently
           // do nothing, which is how "retries once" becomes "never retries".
-          if (await this.recover(outcome.code, batch) === 'halt') {
+          if (await this.recover(outcome.code, batch, outcome.retryAfterMs ?? 0) === 'halt') {
             return;
           }
 
@@ -395,7 +405,11 @@ export class SyncController {
    * losing a user's unsent work silently is the failure this whole path exists
    * to avoid.
    */
-  private async recover(code: string, batch: Uint8Array): Promise<'continue' | 'halt'> {
+  private async recover(
+    code: string,
+    batch: Uint8Array,
+    retryAfterMs: number,
+  ): Promise<'continue' | 'halt'> {
     switch (recoveryFor(code)) {
       case 'catch-up-and-retry': {
         // The server does not have something this batch references. Once, and
@@ -410,6 +424,27 @@ export class SyncController {
 
         this.retried.add(seen);
         await this.reconcile(false);
+        return 'continue';
+      }
+
+      case 'wait-and-retry': {
+        // §7's throttle. The batch stays at the head of the outbox and goes
+        // back up unchanged once the window rolls over — no catch-up, because
+        // nothing about the document changed; the server refused to *read*
+        // this batch, not to accept what it references.
+        //
+        // The delay is the server's, clamped at both ends. A zero — an old
+        // server, a lost field, a bug — would turn this into a spin that hits
+        // the limiter as fast as the socket allows, and a wild number would
+        // park unsent work indefinitely with the connection still live. Both
+        // bounds are this client's, not the protocol's.
+        const wait = Math.min(Math.max(retryAfterMs, THROTTLE_FLOOR_MS), THROTTLE_CEILING_MS);
+
+        // Reported while waiting, because a paused outbox with a live
+        // connection is exactly the state §13.13 says must not look like
+        // everything is fine.
+        this.fail(code, 0);
+        await new Promise<void>((resolve) => { this.schedule(resolve, wait); });
         return 'continue';
       }
 
@@ -476,6 +511,15 @@ export class SyncController {
     }
   }
 }
+
+/**
+ * The floor under a throttle delay: never resubmit sooner than this, whatever
+ * the server said or failed to say.
+ */
+const THROTTLE_FLOOR_MS = 250;
+
+/** The ceiling over a throttle delay; past this the number is not credible. */
+const THROTTLE_CEILING_MS = 60_000;
 
 /**
  * Identifies a batch for the retry budget.

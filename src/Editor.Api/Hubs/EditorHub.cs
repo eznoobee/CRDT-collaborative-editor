@@ -30,6 +30,7 @@ public sealed partial class EditorHub : Hub
     private readonly IConnectTicketStore _tickets;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
+    private readonly IOperationRateLimiter _rateLimits;
     private readonly DocumentIngestState _state;
     private readonly OperationLogBatcher _log;
     private readonly ILogger<EditorHub> _logger;
@@ -43,6 +44,7 @@ public sealed partial class EditorHub : Hub
         IConnectTicketStore tickets,
         IDocumentRoles roles,
         IngestValidator validator,
+        IOperationRateLimiter rateLimits,
         DocumentIngestState state,
         OperationLogBatcher log,
         ILogger<EditorHub> logger)
@@ -55,6 +57,7 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(tickets);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(validator);
+        ArgumentNullException.ThrowIfNull(rateLimits);
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(logger);
@@ -67,6 +70,7 @@ public sealed partial class EditorHub : Hub
         _tickets = tickets;
         _roles = roles;
         _validator = validator;
+        _rateLimits = rateLimits;
         _state = state;
         _log = log;
         _logger = logger;
@@ -208,6 +212,22 @@ public sealed partial class EditorHub : Hub
             return SubmitResult.Ok(0);
         }
 
+        // §7's abuse limits, charged in code points rather than messages.
+        // After validation because that is where the batch's expanded
+        // operation count exists — runs are expanded on ingest (3.6), so one
+        // 256-code-point run costs what 256 single inserts cost, which is the
+        // bypass §7 names. Before the append, so an over-budget caller does
+        // not write.
+        var budget = await _rateLimits
+            .ChargeAsync(binding.UserId, Context.ConnectionId, operations.Count, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+
+        if (!budget.Allowed)
+        {
+            Log.RateLimited(_logger, binding.DocumentId, operations.Count);
+            return SubmitResult.Throttled(IngestRejection.RateLimited, budget.RetryAfter);
+        }
+
         var appended = await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
 
         // Only after the append. Advancing the expected sequence for a batch
@@ -331,6 +351,12 @@ public sealed partial class EditorHub : Hub
             Level = LogLevel.Warning,
             Message = "Dropped connection {ConnectionId} on document {DocumentId} for backpressure.")]
         public static partial void BackpressureDrop(ILogger logger, Guid documentId, string connectionId);
+
+        [LoggerMessage(
+            EventId = 3403,
+            Level = LogLevel.Warning,
+            Message = "Refused {CodePoints} code points on document {DocumentId}: over §7's rate limit.")]
+        public static partial void RateLimited(ILogger logger, Guid documentId, int codePoints);
 
         [LoggerMessage(
             EventId = 3401,

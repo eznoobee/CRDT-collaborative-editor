@@ -39,4 +39,15 @@ public static class IngestRejection
 
     /// <summary>The document already has as many replicas as it may have.</summary>
     public const string TooManyReplicas = "too_many_replicas";
+
+    /// <summary>
+    /// §7's abuse limits. The caller is over budget and should wait.
+    /// </summary>
+    /// <remarks>
+    /// A structured refusal rather than a silent drop, which §7 requires by
+    /// name: a client whose operations vanish renders a document that is wrong
+    /// without knowing, and retries forever because nothing told it not to
+    /// (§13.13).
+    /// </remarks>
+    public const string RateLimited = "rate_limited";
 }
