@@ -1269,6 +1269,16 @@ Treat every one of these as a hard requirement with a corresponding test.
   and stays connected receiving broadcasts, which is what §9's table already
   says that code means.
 
+  **The per-operation check does not cover this, and that is the point.** A
+  client that only reads submits nothing, so nothing re-checks it, and it keeps
+  receiving every broadcast on the document until its socket closes. A sweep
+  over the connections each instance holds is what closes them, and **its bound
+  is composed rather than asserted**: the worst case from revocation to close is
+  the role cache's staleness plus the sweep's interval, so those two numbers are
+  checked against the five seconds at startup and a configuration that would
+  exceed it refuses to run. That composition has to hold with the pub/sub
+  channel down, since that channel is best effort by construction.
+
 **Authorization**
 - Every hub method and every endpoint re-checks document membership.
 - Two checks, at different costs:
