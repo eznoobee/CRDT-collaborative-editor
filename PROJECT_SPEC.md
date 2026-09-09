@@ -1727,6 +1727,75 @@ across two languages:
 Fixed traces come first because a generated corpus only proves the two
 implementations agree with each other, which they would even if both were wrong.
 
+#### Characterising the corpus
+
+**A count is not coverage.** "1,000 traces" is satisfied by one trace generated a
+thousand times, which is why §11's Phase 5 criterion asks instead for the
+corpus's *distribution over named dimensions*, reported, with any dimension at
+zero failing the phase. This is the same defect as "dashboards exist" (§13.22):
+a criterion measuring the artefact's size rather than its reach.
+
+The dimensions are named **here, before the generator is tuned**, and in §5's
+terms rather than the generator's. Naming them afterwards is how a corpus gets
+tuned to satisfy a metric — and adding a dimension in order to make a number
+look better is expressly not allowed; a dimension is added because §5 says
+something about it.
+
+| Dimension | Why it is a dimension |
+|---|---|
+| **Concurrent inserts at one position** | The tie-break §5 defines. Zero of these and the corpus never exercises `ElementId` ordering at all |
+| **Interleaving pressure** — runs of ≥2 inserted concurrently by ≥2 replicas at one position | The property FugueMax exists for (§13.1). A corpus of single-character concurrent inserts cannot distinguish it from RGA |
+| **Backward runs** — a replica prepending, so its run grows right-to-left | §13.6: the replica-count boundary for backward runs was wrong once already, and only a backward case can find that |
+| **Deletion of concurrently-inserted elements** | Tombstones whose neighbours are themselves concurrent, which is where `RightOrigin` handling gets tested rather than assumed |
+| **Causally delayed delivery** — an operation delivered after later ones from the same replica | §5's readiness rule. Without it every trace is effectively in causal order and the pending set is never entered |
+| **Replica count** ≥3 | Two replicas cannot produce the three-way tie-breaks TPDS Fig. 6 is about |
+| **Document scale** | §13.10: the generator explored shape exhaustively and scale not at all. Traces are small by nature, so this dimension is *deliberately* covered by the property tests at 150k rather than by the corpus, and is listed here so that exclusion is a decision rather than an omission |
+
+**Reported, not merely computed.** The corpus manifest states the counts, and
+the runner fails when any dimension listed above is zero. A dimension the corpus
+does not reach is a hole in exactly the way §13.27 describes: invisible from
+inside every individual trace.
+
+#### Generated traces: a seed and a manifest, both committed
+
+Generated traces are **not** committed one file per trace. Committed instead:
+
+- **The seed**, so any run reproduces the identical corpus.
+- **The manifest** — the dimension counts, the generator version, and a digest
+  of the produced corpus.
+
+The reason is reviewability. A thousand committed trace files turn every
+generator change into a thousand-file diff that nobody reads, and a diff nobody
+reads is a review that does not happen; whereas a changed seed or a changed
+manifest is a few lines that say exactly what moved. The digest is what keeps
+this honest: it fails if the generator produces something different from what
+the manifest describes, which is the case where "reproducible from a seed" would
+otherwise be an assumption rather than a check.
+
+**A failing generated trace is promoted to a committed file.** Once a specific
+trace has found a defect it stops being a sample and becomes a regression test,
+and it is written out in full with a `rationale` naming what it caught — the
+same requirement every hand-written trace carries.
+
+#### Fuzzing in CI
+
+- **A new seed each run**, printed. A fixed seed is a test, not a fuzzer: it
+  explores one path forever and its greenness after the first week means nothing.
+- **The seed is in the failure output**, and the round trip — take the printed
+  seed, reproduce locally — is exercised deliberately at least once. A recovery
+  path nobody has walked is not a recovery path (§13.13's shape).
+- **A minimum number of traces per run, and falling short FAILS the build.** It
+  does not warn. A fuzzer that gave up early and reported green is the same
+  class of defect as the CI that was not running (§13.20): a check reporting on
+  a thing it did not do.
+- **Blocking, not advisory.** An advisory fuzz job is a guard that cannot fail,
+  which is §13.19 again — it verifies that the job ran, not that the invariants
+  hold. The objection that a blocking fuzzer will be flaky points somewhere
+  useful rather than against this: a flake here is either genuine nondeterminism
+  in the cores or a trace whose expectation the corpus states wrongly, and both
+  are defects worth surfacing. **Any flake is a P0 corpus bug**, not a reason to
+  downgrade the job.
+
 ## 10. Observability
 
 - Structured logs, no PII, no document content, no tokens or tickets.
