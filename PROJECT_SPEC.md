@@ -1978,6 +1978,16 @@ only tested by something that treats the deployment as opaque.** A test with
 privileged access to the inside of the thing it is verifying is testing its own
 access.
 
+**And it was broken three commits after it was written.** 5b.4 gave the proxy a
+container healthcheck that fetched the API through the proxy from inside the
+proxy — the exact thing this rule forbids, added by the person who had just
+written the rule, and caught by the walk rather than by remembering. Recorded
+because the interval is the interesting number: **a rule you wrote yourself is
+not self-enforcing, and three commits was enough to forget it.** Rules live in
+the checks that run, not in the memory of whoever wrote them; that is the whole
+argument for §12 being a set of scripts and gates rather than a list of
+intentions.
+
 ### A guard runs on a schedule something else keeps
 
 **A check whose invocation is a judgement call is a check that is skipped exactly
@@ -3122,14 +3132,30 @@ reading as one thing rather than three:
 | **Process** (below) | the preflight's gates all pass | *the gates that exist cover where mistakes are made* — it ran five suites and never the client's |
 | **Build** (§13.26) | `npm run build` was invoked | *the bundle is the one that ships* — vitest's `NODE_ENV=test` made it a development build |
 | **Deployment** (§13.28) | `/health/live` answered 200 | *the stack is usable* — it came up against an empty database and the probe never touched it |
+| **The edit itself** (below) | the patch was issued | *the file changed* — an assertion inside it failed, nothing was written, and the file was not re-read |
 
-The sentence that generalises all three: **a build command is an intention; the
+The sentence that generalises all four: **a build command is an intention; the
 bundle is the fact** — and so for the rest. Every one of these guards was
 checking that the right instruction had been given, and reading as if it had
 checked that the right thing was true. §13.21 (a ratchet keyed on position
 rather than on the property it tracks) and §13.22 (a done-when satisfiable while
 the deliverable is absent) are the same defect again, in a tool and in the
 contract. Six places now; the count is kept in §13.24.
+
+**An action assumed to have happened rather than confirmed — the third
+instance.** In 5b a patch to `docker-compose.yml` failed its own guard
+assertion, wrote nothing, and was not noticed, because the file was never
+re-read afterwards. The migrator therefore kept the previous command line for
+two more CI cycles, and the failure it produced was misdiagnosed as something
+else entirely — a wrong cause published in a commit message, which the follow-up
+had to correct in the permanent record.
+
+Read it beside the two above and the shape is one thing: **CI that was never
+running, a preflight that could not see the client's gates, and an edit that did
+not apply.** In each case an action was believed to have taken effect on the
+strength of having been initiated. The remedy is the same each time and it is
+cheap: confirm the effect, not the instruction. Read the file back. Check the
+run exists. Ask what the guard actually covers.
 
 **The same shape, in the process rather than the code.** Twice in Phase 4 a
 commit went out with a client gate red, because the verification was chained
@@ -3571,3 +3597,41 @@ schema, every green report in this repository is a report about a test host.
 Phase 6's subject is authorization surfaces in a deployment and 6b's is controls
 in the shipped configuration; neither is trustworthy while the published image
 contains no application at all (register row 18).
+
+### 13.29 Three certificates, three one-line ways to make it all go away
+
+Phase 5b needed a self-signed certificate trusted by three different things: the
+API reaching the identity provider, Chromium reaching both the provider and the
+proxy, and Node reaching the proxy. Each arrived as a failure that stopped the
+walk dead, and each had an obvious one-line fix sitting next to the correct one:
+
+| The check | The one line | What was done instead |
+|---|---|---|
+| .NET verifying the issuer's TLS | `ServerCertificateValidationCallback = (…) => true` | `SSL_CERT_FILE` naming a bundle of the system roots **plus** this run's certificate |
+| Chromium verifying anything | `ignoreHTTPSErrors: true`, or `--ignore-certificate-errors` | `--ignore-certificate-errors-spki-list=<this key>` — one public key, pinned |
+| Node's `fetch` verifying the proxy | `NODE_TLS_REJECT_UNAUTHORIZED=0` | `NODE_EXTRA_CA_CERTS` naming that one file |
+
+Each shortcut would have made the walk green immediately. Each would also have
+disabled the check for **everything else that process later does** — and Phase
+6b's entire subject is whether the shipped configuration actually enforces §7's
+transport rules. A test suite that has quietly switched off certificate
+validation cannot report on that, and, worse, would report success.
+
+**The rule, and it is about timing rather than about TLS:** *the pressure to
+disable a check is highest exactly when the check is doing something.* A check
+that has never fired is easy to leave alone. One that is standing between you
+and a green run, at the end of a long phase, after five failed CI cycles, is the
+one that gets switched off — and it is refusing for a reason, because a check
+that refuses nothing does not create that pressure in the first place.
+
+So the counter-rule is mechanical rather than a matter of judgement, since
+judgement is exactly what is degraded at that moment: **name the specific thing
+you are trusting; never widen the class.** A file, a key, a fingerprint. Every
+one of the three correct fixes above is longer to write and narrower in effect
+than its shortcut, and that pairing — more effort, less trust granted — is what
+a correct fix to this kind of problem looks like.
+
+There is a related tell worth noticing. All three shortcuts are *documented
+features* with names that sound procedural: "ignore HTTPS errors", "reject
+unauthorized". Nothing about them announces that a security property is being
+removed, which is precisely why they get reached for while tired.
