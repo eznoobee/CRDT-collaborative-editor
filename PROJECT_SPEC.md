@@ -1330,16 +1330,118 @@ Treat every one of these as a hard requirement with a corresponding test.
 **Abuse resistance**
 - Per-user and per-connection rate limits on operation submission, backed by
   Redis so limits hold across instances. Return a structured throttle response,
-  do not silently drop. Rate limits are expressed in code points per interval,
-  not messages, so run ops cannot bypass them.
+  do not silently drop.
+
+  **The unit is code points per interval, not messages**, so a run op cannot
+  buy 256 characters for the price of one. That is a statement about what is
+  counted and it has to be tested as one: a single 256-code-point run and 256
+  single-character inserts must consume the same budget. A test written with
+  single-character operations passes against a message counter, which is the
+  bypass this clause exists to forbid.
+
+  **"Across instances" is the requirement, not a note about the
+  implementation.** A limiter that holds per process is not a weaker version of
+  this rule, it is a different rule — one an attacker escapes by reconnecting
+  until they land elsewhere. It follows that **this cannot be marked done from a
+  single-instance run**: the budget is exhausted on one instance and the refusal
+  observed on another, or nothing has been shown. Third occurrence of 3b.2's
+  shape — a control that appears to work on one instance and does not exist
+  across two.
+- **Rate limits on the document API too**, per user: creating documents, and
+  granting or revoking membership. §7 named only submission and connections for
+  five phases, which left `POST /documents` an unbounded write path that nothing
+  in this specification forbade — the spec was incomplete rather than the
+  implementation. Units here are requests per interval, since a REST call has no
+  natural size.
 - Connection limits per user. Reject new connections past the cap.
+
+  Distinct from the per-document replica cap, which already exists. The two are
+  observationally identical against one user on one document, so **the test
+  opens connections across different documents**, where only a per-user limit
+  can refuse (§13.31: two mechanisms, one observable).
 - A malformed or oversized message closes the connection after logging.
 
 **Client**
-- Content Security Policy with no `unsafe-inline`. HSTS. `X-Content-Type-Options`.
+- **Content Security Policy, stated as a policy rather than as a prohibition.**
+  "No `unsafe-inline`" is satisfied by `default-src *`, which is why the
+  directives are written here and the test parses them rather than grepping the
+  header:
+
+  | Directive | Value | Why |
+  |---|---|---|
+  | `default-src` | `'none'` | Deny by default; every capability below is granted deliberately |
+  | `script-src` | `'self'` | The build emits one external module and no inline script — verified, not assumed (§13.26's build is the one that ships) |
+  | `style-src` | `'self'` | Same, and inline `style` attributes are blocked with it |
+  | `connect-src` | `'self'` **and the configured issuer's origin** | `/config`, the document API and the hub socket are same-origin; the PKCE token exchange, metadata and JWKS are not |
+  | `img-src` | `'self' data:` | `data:` for anything the build inlines |
+  | `form-action` | `'self'` | Nothing posts a form off-origin |
+  | `frame-ancestors` | `'none'` | Clickjacking; this application is never framed |
+  | `base-uri` | `'none'` | A `<base>` injection reroutes every relative URL, the hub included |
+  | `object-src` | `'none'` | No plugins, ever |
+
+  `connect-src` carrying the **configured** issuer is the load-bearing part and
+  the most likely thing to break silently: a policy assembled without it passes
+  every header assertion and every API test, and fails only in a browser, only
+  after a real sign-in. Hence the done-when below.
+
+  **The policy is enforced, never `Content-Security-Policy-Report-Only`.** The
+  two are indistinguishable in a header dump and one of them enforces nothing.
+
+  **Done when the application does something under it.** Zero violations on a
+  page that has signed in, loaded a document, opened its socket and had text
+  typed into it. Zero violations on an empty page is not weak evidence, it is
+  evidence of nothing: a policy that forbids everything the application needs
+  scores perfectly until the application tries.
+- **HSTS, with a deliberate difference between what is shipped and what is
+  tested — named here rather than left in a comment.**
+
+  | Where | `max-age` | Why |
+  |---|---|---|
+  | Production | 31536000 (one year), `includeSubDomains` | The value that makes HSTS worth having |
+  | This project's Compose stack | 60 seconds | A long `max-age` served once from a development host pins that browser profile to HTTPS for that host for a year, and nothing in the application can undo it |
+
+  The divergence is written down because **a comment in a compose file is the
+  artefact that stops being read**, and a deliberate test/production difference
+  is the highest-value thing for a reader to find. It carries its own row in the
+  §7 requirement map (below) rather than being a footnote to the HSTS row.
+
+  What is under test is not the browser's HSTS implementation: it is that the
+  header is present, enforced, and carries **the configured value**. A short
+  value proves all three.
+- `X-Content-Type-Options: nosniff`.
 - The editor renders text into a DOM text node — never `innerHTML`, never
   `dangerouslySetInnerHTML`. Add a test that a document containing
   `<script>alert(1)</script>` renders as literal text.
+
+**Verified against the application as Compose starts it**
+
+Every requirement in this section is proven by a request that **entered through
+the published port** of a stack brought up from `docker-compose.yml` and a
+`.env`, with nothing reconfigured by the test. That phrasing is deliberate and
+each clause is load-bearing:
+
+- *Through the published port*, so the proxy, the forwarded headers and the
+  routing are in the path. A header asserted at the API is a header the browser
+  may never see.
+- *From `docker-compose.yml` and a `.env`*, so the configuration under test is
+  the shipped configuration. A control that works when the test supplies its
+  settings is §13.28's shape: the check passes and the artefact is broken.
+- *Nothing reconfigured by the test*, because a test that enables the control it
+  is about to verify is testing the framework.
+
+A test host remains the right place for the cases a deployment cannot easily
+produce — a forged replica id, a malformed frame, a clock at an expiry boundary.
+Those keep their existing tests. What changes is that **a test-host test alone
+no longer discharges a §7 requirement**, and the map below is where that is
+tracked.
+
+**The §7 requirement map.** Every requirement in this section has a row naming
+the test that proves it, and **a check fails the build when a requirement has no
+row**. The list is derived from this section's text rather than from the suite:
+deriving it from the tests makes the map a restatement of whatever was written,
+which is the circularity §13.22 warns about — a criterion that cannot be false.
+A requirement genuinely owned by a later phase says so and names the phase,
+rather than being quietly absent.
 
 **Secrets**
 - Nothing in `appsettings.json` but non-secret defaults. Local secrets via
@@ -2004,7 +2106,7 @@ written, not done).
 | 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
 | 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
-| 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list speaks only to operation submission and connections, so a `POST /documents` loop is an unbounded write path that nothing in the spec forbids. The spec is what is incomplete; 6b writes the rule and the limit together | §7 |
+| 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; the limit follows | §7 |
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
