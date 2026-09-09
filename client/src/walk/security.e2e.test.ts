@@ -31,6 +31,22 @@ import { startWalk, type Walk } from './harness';
  * so a missing one fails interpolation before anything starts) and wrongness
  * is silent. A deployment whose audience is misconfigured accepts tokens meant
  * for another service and looks entirely healthy.
+ * </p><p>
+ * <strong>The predictions, and how they did.</strong> Before the first run I
+ * recorded that I expected at least one failure, and named three candidates:
+ * `POST /documents` through a proxy configured for SignalR and the SPA, a
+ * collision between this file's compose bring-up and the walk's, and the
+ * expired-token check landing an `exp` before the `nbf` the harness sets
+ * unconditionally. All eight passed first time and all three predictions were
+ * wrong.
+ * </p><p>
+ * A clean first pass is the outcome §13.28 says to distrust, so it was
+ * checked rather than accepted: the CI log shows this file running as its own
+ * suite (8 tests, 11.3 s), the harness's `close()` tears down with
+ * `--volumes` and `startWalk()` brings up again, so the stack here really was
+ * a second cold start — fast only because the images were already built. The
+ * control test returning a real user id is what rules out the other reading,
+ * a deployment that refuses everything.
  * </p>
  */
 describe('§7 against the deployed stack', () => {
