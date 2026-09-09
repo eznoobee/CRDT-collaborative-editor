@@ -96,18 +96,29 @@ public sealed class DocumentRoleReader : IDocumentRoles, IDocumentRoleWriter, ID
         // because this query synthesises one. A document created before that
         // path existed shows no owner, and that is the truth about its rows
         // rather than something to paper over in a projection.
-        return await _context.DocumentMembers
+        var rows = await _context.DocumentMembers
             .AsNoTracking()
             .Where(member => member.DocumentId == documentId)
             .Join(
                 _context.Users.AsNoTracking(),
                 member => member.UserId,
                 user => user.Id,
-                (member, user) => new DocumentMemberEntry(
-                    member.UserId, user.DisplayName, member.Role, member.GrantedAt))
-            .OrderBy(entry => entry.GrantedAt)
+                (member, user) => new
+                {
+                    member.UserId,
+                    user.DisplayName,
+                    member.Role,
+                    member.GrantedAt,
+                })
+            .OrderBy(row => row.GrantedAt)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+
+        // Projected after the query rather than inside it: EF cannot order by a
+        // property of a record it has not been taught to construct in SQL, and
+        // the failure is a runtime translation error rather than a compile one.
+        return [.. rows.Select(row =>
+            new DocumentMemberEntry(row.UserId, row.DisplayName, row.Role, row.GrantedAt))];
     }
 
     public async Task SetRoleAsync(

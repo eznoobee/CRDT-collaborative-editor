@@ -11,6 +11,10 @@ namespace Editor.Api.Documents;
 /// <param name="Title">A human-readable name. Never interpreted, never rendered as markup.</param>
 public sealed record CreateDocumentRequest(string? Title);
 
+/// <summary>What an owner sends to grant or change a role (§9).</summary>
+/// <param name="Role">The role to grant.</param>
+public sealed record GrantRoleRequest(Role Role);
+
 /// <summary>A document as the caller can see it (§9).</summary>
 /// <param name="Id">The document id, which is also what <c>/d/{id}</c> opens.</param>
 /// <param name="Title">The name the owner gave it.</param>
@@ -59,6 +63,8 @@ public static class DocumentsEndpoints
         documents.MapPost("/", CreateAsync);
         documents.MapGet("/", ListAsync);
         documents.MapGet("/{documentId:guid}", GetAsync);
+        documents.MapGet("/{documentId:guid}/members", ListMembersAsync);
+        documents.MapPut("/{documentId:guid}/members/{memberId:guid}", GrantAsync);
 
         return endpoints;
     }
@@ -184,5 +190,132 @@ public static class DocumentsEndpoints
         // A role for a document this query cannot see means the document was
         // deleted between the two reads. Same answer as never having had access.
         return found is null ? TypedResults.NotFound() : TypedResults.Ok(found);
+    }
+
+    private static async Task<IResult> ListMembersAsync(
+        Guid documentId,
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentRoles roles,
+        IDocumentMemberships memberships,
+        CancellationToken cancellationToken)
+    {
+        var caller = await OwnerAsync(documentId, principal, users, roles, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (caller.Refusal is { } refusal)
+        {
+            return refusal;
+        }
+
+        var members = await memberships.ListMembersAsync(documentId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return TypedResults.Ok(members);
+    }
+
+    private static async Task<IResult> GrantAsync(
+        Guid documentId,
+        Guid memberId,
+        GrantRoleRequest? request,
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentRoles roles,
+        IDocumentRoleWriter writer,
+        IDocumentMemberships memberships,
+        EditorDbContext context,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || !Enum.IsDefined(request.Role))
+        {
+            return TypedResults.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["role"] = ["A role is required, and must be Viewer, Editor or Owner."],
+            });
+        }
+
+        var caller = await OwnerAsync(documentId, principal, users, roles, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (caller.Refusal is { } refusal)
+        {
+            return refusal;
+        }
+
+        if (caller.UserId == memberId)
+        {
+            // Not merely unwise. DocumentRoleReader answers Owner from the
+            // documents.owner_id column whatever document_members says, so a
+            // self-demotion would write a row that has no effect — the stored
+            // role and the effective one would disagree, and the row is what a
+            // reviewer would read.
+            return TypedResults.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["userId"] = ["An owner cannot change their own role."],
+            });
+        }
+
+        // §9's stated limitation: a role can be granted only to a user who has
+        // signed in. There is no directory and no invitation by email address,
+        // and the rejection says so rather than failing at a foreign key
+        // (§13.13 — a rejection the rejected party cannot act on is not one).
+        var exists = await context.Users
+            .AsNoTracking()
+            .AnyAsync(user => user.Id == memberId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!exists)
+        {
+            return TypedResults.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["userId"] =
+                [
+                    "No such user. A role can be granted only to someone who has signed in at least once.",
+                ],
+            });
+        }
+
+        await writer.SetRoleAsync(documentId, memberId, request.Role, caller.UserId, cancellationToken)
+            .ConfigureAwait(false);
+
+        var members = await memberships.ListMembersAsync(documentId, cancellationToken)
+            .ConfigureAwait(false);
+
+        var granted = members.FirstOrDefault(member => member.UserId == memberId);
+        return granted is null ? TypedResults.NotFound() : TypedResults.Ok(granted);
+    }
+
+    /// <summary>
+    /// The caller's id when they own <paramref name="documentId"/>, or the
+    /// refusal §7 requires.
+    /// </summary>
+    /// <remarks>
+    /// The 404/403 split lives here once rather than at each call site, because
+    /// the two are one decision: 404 while the caller has no role at all, so
+    /// nothing reveals that the id is real, and 403 only once they can already
+    /// see the document and there is nothing left to conceal.
+    /// </remarks>
+    private static async Task<(Guid UserId, IResult? Refusal)> OwnerAsync(
+        Guid documentId,
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentRoles roles,
+        CancellationToken cancellationToken)
+    {
+        var userId = await users.ResolveAsync(principal, cancellationToken).ConfigureAwait(false);
+        if (userId is null)
+        {
+            return (Guid.Empty, TypedResults.Unauthorized());
+        }
+
+        var role = await roles.GetRoleAsync(documentId, userId.Value, cancellationToken)
+            .ConfigureAwait(false);
+
+        return role switch
+        {
+            null => (userId.Value, TypedResults.NotFound()),
+            Role.Owner => (userId.Value, null),
+            _ => (userId.Value, TypedResults.Forbid()),
+        };
     }
 }
