@@ -1584,6 +1584,7 @@ A small REST surface, same origin as the client, bearer token in a header:
 
 | Method and path | What it does | Who may |
 |---|---|---|
+| `GET /me` | The caller's own user id and display name | Any authenticated caller |
 | `POST /documents` | Creates a document; the caller becomes its owner | Any authenticated caller |
 | `GET /documents` | The documents the caller can reach, most recently updated first | Any authenticated caller |
 | `GET /documents/{id}` | One document's metadata and the caller's role on it | Anyone with a role on it |
@@ -1623,7 +1624,10 @@ distinction is load-bearing rather than cosmetic:
 **Limitation, stated rather than discovered: a role can be granted only to a
 user who has already signed in.** There is no user directory and no invitation
 by email address. The owner grants by user id, which they obtain from a listing
-of members or from the other person.
+of members or from the other person — which is what `GET /me` is for, and why it
+is part of this surface rather than a convenience. Without it the grant path has
+an input nothing in the product produces, and that is register row 15's shape a
+second time: found by trying to use the path, not by reading it.
 
 The rejected alternative is invite-by-email, and the reason is that it is a
 feature with its own failure modes, none of which are what this project is
@@ -1993,13 +1997,13 @@ written, not done).
 | 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
 | 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
 | 14 | Presence — remote cursors, ephemeral, never persisted | **8** | Deferred out of Phase 4 explicitly. Given its own phase rather than hung off 7: beside the performance targets it would be the row someone closes badly to finish the phase | §9 |
-| 15 | Creating a document, and granting membership | **6** | Both harnesses seed through `psql` because there is no such path. See §13.27 — this is not a deferral, it is a hole nobody had stood in front of | §9, §13.27 |
-| 16 | Listing what you can reach, and revoking access | **6** | 4.10 opens `/d/{id}` and nothing in the product produces an id | §9, §13.27 |
+| 15 | Creating a document, and granting membership | **6 — CLOSED** | Both harnesses seed through `psql` because there is no such path. See §13.27 — this is not a deferral, it is a hole nobody had stood in front of | §9, §13.27 |
+| 16 | Listing what you can reach, and revoking access | **6 — CLOSED** | 4.10 opens `/d/{id}` and nothing in the product produces an id | §9, §13.27 |
 | 17 | The Compose stack configured to serve and authenticate the application | **5b** | `docker-compose.yml` sets no `Oidc__ClientId` and no `Spa__RootPath`, so `/config` answers with an empty client id and the app refuses to start a login it cannot finish | §13.27 |
 | 18 | The published image containing a client at all | **5b** | The Dockerfile copies `src/` and the client lives in `client/`. The one artefact this project publishes has no application in it | §13.27 |
 | 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
-| 21 | Signing out, and switching accounts | **6** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
+| 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
 | 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list speaks only to operation submission and connections, so a `POST /documents` loop is an unbounded write path that nothing in the spec forbids. The spec is what is incomplete; 6b writes the rule and the limit together | §7 |
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 

@@ -273,7 +273,7 @@ jobs:
       - run: npm run build
 
   walk:
-    name: The walk — cold start to sign-in
+    name: The walk — cold start to the first step that cannot be taken
     runs-on: ubuntu-latest
 
     # Replaces the old Compose smoke test, which asserted /health/live and
