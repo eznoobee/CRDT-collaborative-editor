@@ -179,6 +179,7 @@ public sealed class DocumentConnections
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, Entry>> _byDocument = new();
 
     /// <summary>What this instance knows about one connection it holds.</summary>
+    /// <param name="UserId">Whose connection it is, for the membership sweep.</param>
     /// <param name="ReplicaId">The replica this connection authors as (§7).</param>
     /// <param name="ClaimToken">This session's proof that it holds that replica.</param>
     /// <param name="Abort">
@@ -188,19 +189,30 @@ public sealed class DocumentConnections
     /// registry of bare ids produced a fan-out that dropped the slow client by
     /// disconnecting the fast one that happened to be sending.
     /// </param>
-    private readonly record struct Entry(Guid ReplicaId, Guid ClaimToken, Action Abort);
+    private readonly record struct Entry(Guid UserId, Guid ReplicaId, Guid ClaimToken, Action Abort);
 
-    /// <summary>One connection this instance holds, as the renewal loop sees it.</summary>
+    /// <summary>One connection this instance holds, as the sweeps see it.</summary>
+    /// <remarks>
+    /// <c>UserId</c> is here for the membership sweep: §7 requires revocation to
+    /// reach a live connection, and a registry of replica ids alone cannot say
+    /// whose connection a replica belongs to.
+    /// </remarks>
     public readonly record struct HeldConnection(
-        Guid DocumentId, string ConnectionId, Guid ReplicaId, Guid ClaimToken);
+        Guid DocumentId, string ConnectionId, Guid UserId, Guid ReplicaId, Guid ClaimToken);
 
     /// <summary>
     /// Registers a connection along with the means to close it and the claim it
     /// holds.
     /// </summary>
-    public void Add(Guid documentId, string connectionId, Guid replicaId, Guid claimToken, Action abort) =>
+    public void Add(
+        Guid documentId,
+        string connectionId,
+        Guid userId,
+        Guid replicaId,
+        Guid claimToken,
+        Action abort) =>
         _byDocument.GetOrAdd(documentId, _ => new ConcurrentDictionary<string, Entry>())[connectionId] =
-            new Entry(replicaId, claimToken, abort);
+            new Entry(userId, replicaId, claimToken, abort);
 
     /// <summary>Every connection this instance holds, across all documents.</summary>
     /// <remarks>
@@ -217,7 +229,7 @@ public sealed class DocumentConnections
             foreach (var (connectionId, entry) in connections)
             {
                 held.Add(new HeldConnection(
-                    documentId, connectionId, entry.ReplicaId, entry.ClaimToken));
+                    documentId, connectionId, entry.UserId, entry.ReplicaId, entry.ClaimToken));
             }
         }
 

@@ -18,9 +18,17 @@ public sealed class DocumentRoleCacheOptions
     /// uncached lookup per operation is a database round trip per keystroke per
     /// connection, which §8 rules out. Five seconds is the bound, and
     /// invalidation makes the usual case immediate.
+    /// <para>
+    /// The default is below <see cref="MaximumTtl"/> on purpose. §7's bound has
+    /// to hold for a live connection too, and closing one costs the cache's
+    /// staleness plus the membership sweep's interval; leaving a full five
+    /// seconds here would put that sum over the bound. The sweep refuses a
+    /// configuration where it does, so this number and that one cannot drift
+    /// apart silently.
+    /// </para>
     /// </remarks>
     [Range(typeof(TimeSpan), "00:00:00.001", "00:00:05")]
-    public TimeSpan Ttl { get; set; } = MaximumTtl;
+    public TimeSpan Ttl { get; set; } = TimeSpan.FromSeconds(4);
 
     /// <summary>Redis key prefix for cached roles.</summary>
     [Required(AllowEmptyStrings = false)]

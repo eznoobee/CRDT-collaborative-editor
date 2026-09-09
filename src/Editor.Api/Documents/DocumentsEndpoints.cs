@@ -65,6 +65,7 @@ public static class DocumentsEndpoints
         documents.MapGet("/{documentId:guid}", GetAsync);
         documents.MapGet("/{documentId:guid}/members", ListMembersAsync);
         documents.MapPut("/{documentId:guid}/members/{memberId:guid}", GrantAsync);
+        documents.MapDelete("/{documentId:guid}/members/{memberId:guid}", RevokeAsync);
 
         return endpoints;
     }
@@ -283,6 +284,53 @@ public static class DocumentsEndpoints
 
         var granted = members.FirstOrDefault(member => member.UserId == memberId);
         return granted is null ? TypedResults.NotFound() : TypedResults.Ok(granted);
+    }
+
+    private static async Task<IResult> RevokeAsync(
+        Guid documentId,
+        Guid memberId,
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentRoles roles,
+        IDocumentRoleWriter writer,
+        EditorDbContext context,
+        CancellationToken cancellationToken)
+    {
+        var caller = await OwnerAsync(documentId, principal, users, roles, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (caller.Refusal is { } refusal)
+        {
+            return refusal;
+        }
+
+        // The owner column, not the caller's id: a co-owner granted Owner
+        // through document_members must not be able to remove the creator's
+        // row either. Left possible, the document would keep the owner it
+        // cannot show and lose the one it can.
+        var ownerId = await context.Documents
+            .AsNoTracking()
+            .Where(document => document.Id == documentId)
+            .Select(document => document.OwnerId)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (memberId == ownerId)
+        {
+            // A document whose owner has no membership is one nobody can grant
+            // on again, and the recovery is someone editing the database.
+            return TypedResults.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["userId"] = ["A document's owner cannot be removed from it."],
+            });
+        }
+
+        // Idempotent, and deliberately so: revoking a membership that is
+        // already gone is the state the caller wanted, and answering 404 would
+        // make a retry after a dropped response look like a different failure.
+        await writer.RemoveAsync(documentId, memberId, cancellationToken).ConfigureAwait(false);
+
+        return TypedResults.NoContent();
     }
 
     /// <summary>

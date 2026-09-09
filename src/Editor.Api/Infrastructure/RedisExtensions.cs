@@ -62,6 +62,15 @@ public static class RedisExtensions
 
         services.AddHostedService<ReplicaClaimRenewal>();
 
+        // §7's revocation bound applied to a connection that only reads. The
+        // per-submission role check covers a revoked writer and nothing else.
+        services.AddOptions<MembershipSweepOptions>()
+            .BindConfiguration(MembershipSweepOptions.Section)
+            .ValidateOnStart();
+
+        services.AddSingleton<MembershipSweep>();
+        services.AddHostedService(provider => provider.GetRequiredService<MembershipSweep>());
+
         // Off, and post-configured so nothing can turn it back on. With
         // detailed errors on, every hub failure sends the exception's type and
         // message to whoever is connected — server internals to any client —

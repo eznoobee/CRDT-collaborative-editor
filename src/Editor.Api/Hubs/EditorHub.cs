@@ -124,6 +124,7 @@ public sealed partial class EditorHub : Hub
         _connections.Add(
             binding.Value.DocumentId,
             Context.ConnectionId,
+            binding.Value.UserId,
             binding.Value.ReplicaId,
             binding.Value.ClaimToken,
             Context.Abort);
