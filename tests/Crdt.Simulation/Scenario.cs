@@ -1,7 +1,7 @@
 using System.Text;
 using Crdt.Core;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>Direction in which a run of characters was typed.</summary>
 /// <remarks>

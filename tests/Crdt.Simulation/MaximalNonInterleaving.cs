@@ -1,6 +1,6 @@
 using Crdt.Core;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// Evaluates TPDS Definition 4 against a finished simulation.

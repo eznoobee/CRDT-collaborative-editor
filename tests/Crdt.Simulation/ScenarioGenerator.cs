@@ -1,7 +1,7 @@
 using System.Text;
 using Crdt.Core;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// Builds reproducible random scenarios from a seed.
@@ -141,10 +141,21 @@ public static class ScenarioGenerator
         // minimum keeps this correct if that ever stops being true.
         var position = rng.Next(0, participants.Min(r => live[r].Values.Count) + 1);
 
+        // Sometimes every participant types a SINGLE character, which is §5's
+        // tie-break with nothing else in play.
+        //
+        // This was absent entirely until Phase 5 measured for it: every scale
+        // sets MinRunLength to at least two, so in 2,000 generated scenarios not
+        // one concurrent session consisted of single characters, and ElementId
+        // ordering was never exercised on its own — any failure there could be
+        // attributed to run handling instead. Nothing reported the gap, because
+        // a corpus reports its size and not its reach (§9, §13.27).
+        var singles = rng.Next(100) < 25;
+
         var runs = new List<Run>(concurrency);
         foreach (var replica in participants)
         {
-            var length = rng.Next(scale.MinRunLength, scale.MaxRunLength);
+            var length = singles ? 1 : rng.Next(scale.MinRunLength, scale.MaxRunLength);
             var direction = rng.Next(2) == 0 ? RunDirection.Forward : RunDirection.Backward;
             var text = new StringBuilder(length);
             var indices = new List<int>(length);

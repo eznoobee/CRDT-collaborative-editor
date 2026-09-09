@@ -8,6 +8,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Conformance/Conformance.csproj" />
     <Project Path="tests/Crdt.Core.Tests/Crdt.Core.Tests.csproj" />
+    <Project Path="tests/Crdt.Simulation/Crdt.Simulation.csproj" />
     <Project Path="tests/Editor.Api.Tests/Editor.Api.Tests.csproj" />
   </Folder>
 </Solution>

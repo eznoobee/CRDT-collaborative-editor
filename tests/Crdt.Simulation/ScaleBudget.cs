@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// How large the scale cases are allowed to get, so mutation runs can shrink

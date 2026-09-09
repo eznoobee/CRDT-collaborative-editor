@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text;
-using Crdt.Core.Tests.Simulation;
+using Crdt.Simulation;
 using Xunit.Abstractions;
 
 namespace Crdt.Core.Tests;

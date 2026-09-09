@@ -1,6 +1,6 @@
 using Crdt.Core;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// What a replica saw around an insert at the moment it made it.

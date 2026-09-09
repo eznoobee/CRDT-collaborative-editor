@@ -1,6 +1,6 @@
 using Xunit.Sdk;
 
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>Counts how often an observed-but-not-enforced property held.</summary>
 /// <remarks>

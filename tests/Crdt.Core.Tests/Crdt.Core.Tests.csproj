@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Crdt.Core/Crdt.Core.csproj" />
+    <ProjectReference Include="../Crdt.Simulation/Crdt.Simulation.csproj" />
     <!-- Referenced so ArchitectureTests can inspect its assembly. -->
     <ProjectReference Include="../../src/Editor.Domain/Editor.Domain.csproj" />
   </ItemGroup>

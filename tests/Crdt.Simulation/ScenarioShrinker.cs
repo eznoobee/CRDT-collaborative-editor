@@ -1,4 +1,4 @@
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// Reduces a failing scenario to a smaller one that still fails.

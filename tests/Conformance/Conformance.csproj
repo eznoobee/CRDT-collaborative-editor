@@ -16,6 +16,9 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Crdt.Core/Crdt.Core.csproj" />
+    <!-- §9: the generated corpus comes from the same generator the property
+         tests use, not a second one written for this runner. -->
+    <ProjectReference Include="../Crdt.Simulation/Crdt.Simulation.csproj" />
     <!-- The wire encoding lives in Infrastructure because Crdt.Core is BCL-only
          (§4); §6 requires the corpus to exercise it. -->
     <ProjectReference Include="../../src/Editor.Infrastructure/Editor.Infrastructure.csproj" />

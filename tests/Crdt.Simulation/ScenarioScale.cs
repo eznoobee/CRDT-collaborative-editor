@@ -1,4 +1,4 @@
-namespace Crdt.Core.Tests.Simulation;
+namespace Crdt.Simulation;
 
 /// <summary>
 /// How big a generated scenario is, drawn as an explicit dimension rather than
