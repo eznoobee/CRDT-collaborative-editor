@@ -1232,6 +1232,42 @@ Treat every one of these as a hard requirement with a corresponding test.
   pending, which is the §9 failure this whole path exists to avoid.
 - The redirect URI is exact-match, and the `state` parameter is verified on
   return.
+- **Signing out is three separate things, and doing one of them is the defect.**
+  Closing the tab already drops the in-memory token; that is not a sign-out, and
+  a button that only does the same is worse than none, because it reports
+  success. All three are required:
+
+  1. **The client's token and replica state go.** The access token, the user
+     store, and the local replica for any open document — a second person at the
+     same machine must not resume the first person's session or read their text
+     out of IndexedDB.
+  2. **The issuer's session ends** via its `end_session_endpoint`. Without this
+     the next load silently re-authenticates as the same person, because the
+     provider's cookie is still there and the authorization request never
+     prompts. This is the half that is invisible from inside the client: sign-out
+     appears to have worked, and it is only the *next* sign-in that shows it did
+     not. Where a provider advertises no `end_session_endpoint`, the client says
+     so plainly rather than pretending — a silent local-only sign-out on a shared
+     machine is the defect this rule exists for.
+  3. **Unsent work is accounted for.** Signing out with a non-empty outbox
+     either sends it first or tells the user what will be lost, and never
+     discards it silently. This is the same rule as `sign_in_required`'s in §9,
+     arriving from the other direction: there the session ended without being
+     asked, here the user asked, and in both cases unsent work disappearing
+     without a word is the failure.
+
+  Switching accounts is sign-out followed by sign-in and has no path of its own.
+  What it adds is an assertion: after switching, nothing of the previous user's
+  documents is reachable — not from the API, and not from any client-side store
+  keyed by document id alone.
+- **A membership change reaches a live connection, not only the next one.** A
+  user revoked or demoted while connected must be refused within the same
+  five-second bound; a bound proven only against a fresh `negotiate` is a bound
+  on new sessions, and the session that matters is the one already open. A
+  revoked member's next submission is refused with `not_found` and the
+  connection is closed; a member demoted to viewer is refused with `forbidden`
+  and stays connected receiving broadcasts, which is what §9's table already
+  says that code means.
 
 **Authorization**
 - Every hub method and every endpoint re-checks document membership.
@@ -1525,6 +1561,63 @@ is a stress target, not a steady state.
   code-points-only and dependency-free; a core that knew about UTF-16 offsets
   would be a core that knew about the DOM, and the same code has to run in the
   conformance runner where there is no DOM at all.
+
+### The document API
+
+Everything above assumes a document that exists and a membership that was
+granted. Until Phase 6 nothing in the product created either: both test
+harnesses seeded through `psql`, and the application opened `/d/{id}` for an id
+it had no way to produce. That was a hole *between* criteria rather than a
+deferral — §13.27's subject, and register rows 15 and 16.
+
+A small REST surface, same origin as the client, bearer token in a header:
+
+| Method and path | What it does | Who may |
+|---|---|---|
+| `POST /documents` | Creates a document; the caller becomes its owner | Any authenticated caller |
+| `GET /documents` | The documents the caller can reach, most recently updated first | Any authenticated caller |
+| `GET /documents/{id}` | One document's metadata and the caller's role on it | Anyone with a role on it |
+| `GET /documents/{id}/members` | Who has a role on it | Owner |
+| `PUT /documents/{id}/members/{userId}` | Grants or changes a role | Owner |
+| `DELETE /documents/{id}/members/{userId}` | Revokes a role | Owner |
+
+**Every one of them goes through `IDocumentRoles` and `IDocumentRoleWriter`**,
+never through a query of its own against `document_members`. A second path to
+the same table is a second place for §7's five-second bound to be right or
+wrong, and §13.31 is about how invisible the wrong one is: the requirement is
+still met, by the TTL, and every test passes.
+
+**Status codes follow §7 exactly**, which for this surface means the 404/403
+distinction is load-bearing rather than cosmetic:
+
+- A document the caller has no role on answers **404**, whether or not it
+  exists. This applies to reads and writes alike.
+- A caller with a role that is insufficient — an editor or viewer attempting to
+  manage membership — answers **403**. They can already see the document, so
+  there is nothing to conceal.
+- A soft-deleted document is a 404 to everyone, matching `DocumentRoleReader`,
+  which already refuses to return a role for one.
+
+**Limitation, stated rather than discovered: a role can be granted only to a
+user who has already signed in.** There is no user directory and no invitation
+by email address. The owner grants by user id, which they obtain from a listing
+of members or from the other person.
+
+The rejected alternative is invite-by-email, and the reason is that it is a
+feature with its own failure modes, none of which are what this project is
+about. It requires deciding what a pending membership means before the invitee
+ever arrives, whether it expires, whether it is a state the owner can see and
+withdraw, and — the one with real security weight — what happens when that email
+address later belongs to a different OIDC subject. Identity here is the pair
+(issuer, subject) precisely because a subject is unique per issuer and nothing
+else (§6); an email address is not identity, and binding a grant to one would
+make it identity by the back door.
+
+The consequence is that §11's Phase 6 criterion says *grant to a user who has
+signed in* rather than "invite another". The wording matters: a criterion that
+describes a richer feature than the one built is §13.22 in reverse — the
+deliverable is real and the criterion has drifted past it — and the drift is
+discovered by whoever next reads the criterion as a promise.
 
 ### Offline window
 
@@ -1845,7 +1938,7 @@ reviewed. At the end of each phase, stop and report.
 | 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed; **and the client exists as a client** — a browser loads the app, authenticates, opens a document and types, with the text visible (§13.22) |
 | 5b | The artefact runs at all | The walk in §13.27 reaches sign-in against `docker compose up` and a `.env`, with nothing seeded and nothing run by hand: the image contains the client, the schema is applied by something, TLS termination is stated, and the smoke test asserts an endpoint that touches Postgres |
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
-| 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7), and the walk in §13.27 completes end to end: a new user signs in, makes a document, invites another, and both edit it |
+| 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7) **through `IDocumentRoles`, so the eager invalidation and not the TTL is what meets the five-second bound** (§13.31), and the walk in §13.27 completes end to end **with nothing seeded by hand**: a new user signs in, makes a document, **grants a role to a second user who has signed in**, and both edit it |
 | 6b | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
 | 7 | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
 | 8 | Presence | Remote cursors survive concurrent edits: a cursor anchored in text another replica is editing lands where §9's anchoring says it should, and nothing about presence is persisted or replayed |
@@ -1885,6 +1978,7 @@ written, not done).
 | 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
 | 21 | Signing out, and switching accounts | **6** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
+| 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list speaks only to operation submission and connections, so a `POST /documents` loop is an unbounded write path that nothing in the spec forbids. The spec is what is incomplete; 6b writes the rule and the limit together | §7 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -1993,6 +2087,13 @@ preserves the backup's modification time; the restored source was therefore
 *older* than the artefacts compiled from the sabotaged version, so MSBuild
 skipped the recompile and every following run silently executed the previous
 sabotage. See §13.17: the direction that matters is not the one that showed up.
+
+**Where two mechanisms satisfy one requirement, sabotage the stronger one and
+require the fast assertion to fail** (§13.31). Breaking the requirement outright
+is caught by anything; the sabotage worth running is the one that leaves the
+requirement satisfied by the weaker path, because that is the state a real
+mistake produces — an endpoint wired to the undecorated writer, revocation still
+landing inside five seconds, and nothing red.
 
 **When a sabotage survives, the first hypothesis is that the test does not reach
 the code — not that the code is unreachable.** 4.8's end-to-end test stayed green
@@ -3776,3 +3877,63 @@ it does not look like an exclusion. Two equal counts did.
    cheapest available signal and the easiest to scroll past.
 4. **When a distribution is measured for the first time, expect it to be wrong.**
    All three of these were found the first time anyone looked.
+
+### 13.31 Two mechanisms, one requirement, and a test that reaches neither
+
+§7 requires revocation to take effect within five seconds. Two independent
+mechanisms produce that: eager invalidation over Redis pub/sub, and the cache's
+own five-second TTL. Both are deliberate — §7's own text says the pub/sub path
+is "an optimisation over the TTL, not a substitute for it", because treating a
+delivered message as *the* mechanism would make revocation depend on a channel
+with no delivery guarantee.
+
+That deliberate redundancy has a consequence nobody had written down. **A test
+that asserts the requirement — "the role changed within five seconds" — passes
+when either mechanism works, and therefore tests neither.** Wire a membership
+endpoint to the undecorated `DocumentRoleReader` instead of to
+`InvalidatingDocumentRoleWriter`, and every functional test still passes: the
+row is correct in Postgres, the stale entry expires on schedule, and the timing
+assertion is satisfied by the TTL alone. The eager path is simply gone, and the
+suite's report is unchanged.
+
+This is not §13.19. There, a guard checked an instance of a pattern and was read
+as checking the property. Here every check is aimed squarely at the property and
+the property genuinely holds — by the wrong route. **The general form: when a
+requirement can be met by either of two mechanisms, a test asserting the
+requirement tests neither.** It reports that *something* satisfied it.
+
+It is §13.15 arriving in authorization. There, convergence held under a large
+family of wrong implementations, which is why asserting convergence felt so
+reassuring and proved so little. The relationship is exact: a weaker mechanism
+silently substituting for a stronger one, with an observable that cannot tell
+them apart. What is new is that here **both** mechanisms are wanted — the TTL is
+not a bug to be removed, it is the floor under a lossy channel — so the answer
+cannot be "delete one".
+
+The answer is to assert each mechanism where only it can be responsible:
+
+- **The eager path** is asserted by a bound the TTL cannot meet. A grant or a
+  revocation observed materially faster than the TTL can only have come from the
+  invalidation, and the assertion says so in its name rather than reusing the
+  five-second number the other mechanism also satisfies.
+- **The TTL** is asserted with the eager path unavailable — no pub/sub delivery
+  — which is also the real failure it exists for.
+
+And the sabotage that keeps this honest is not "break revocation". It is
+**substitute the weaker mechanism**: replace the decorated writer with the plain
+one and require the fast test to go red. A sabotage that removes the requirement
+entirely would be caught by anything; the one worth running is the one that
+leaves the requirement satisfied.
+
+**Where else this shape is present in this system**, written down now so it is
+not rediscovered one instance at a time:
+
+| Requirement | Strong mechanism | Weaker one that also satisfies it |
+|---|---|---|
+| A revoked user stops editing within 5s | Pub/sub invalidation | The cache TTL |
+| An operation is not applied twice | The dedupe by `ElementId` | The CRDT's own idempotence (§13.15) |
+| A replica id is held by one connection | The Redis `SET … NX` claim | The claim's TTL expiring between attempts |
+| A client resumes rather than re-authors | `negotiate` reissuing the id | A fresh id plus an outbox that happened to be empty |
+
+Each row is a place where the phrasing "assert the requirement" is not enough,
+and the assertion has to name which mechanism it is holding responsible.
