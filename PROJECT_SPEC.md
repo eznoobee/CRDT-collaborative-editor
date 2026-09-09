@@ -4243,3 +4243,44 @@ The generalisation for any suite: **rank checks by how often they have taught
 you something, and the ones at the bottom of that list are the ones to automate
 hardest.** They are not candidates for removal — they are the ones a human loop
 will silently stop performing.
+
+### 13.36 The guard audit: what ten guards actually look at
+
+§13.19 scheduled this and §13.34 said how to run it — **run the guard and read
+what it matched, not whether it passed.** Ten guards, each asked the same two
+questions: what does this scan, and what defeats it without matching its
+pattern?
+
+| Guard | What it looks at | Finding |
+|---|---|---|
+| Architecture test | Reflection over loaded assemblies, plus `ProjectReference` elements in the four projects named in its own allow-list | **Bypass.** It iterated the allow-list, so a *fifth* project under `src/` was not forbidden — it was unexamined. Fixed: `src/` is enumerated and a project missing from the list fails the test |
+| `TokenValidationTests` — switches | Every `.cs` and `.json` under `src/` and `tests/`, excluding itself **by file name** | **Bypass.** Any file named `TokenValidationTests.cs`, anywhere, was exempt: a blind spot creatable by choosing a file name. Fixed: excluded by full path |
+| `TokenValidationTests` — validators | The same files, for a delegate assigned in place of a check | **Bypass, of a different kind.** The configuration-reachable way to weaken §7's lifetime check is `Oidc__ClockSkew` — a *number*, which no pattern over switches and delegates can match, and whose range permitted the framework's five-minute default that `OidcOptions`' own comment condemns. Fixed by tightening the bound to 30 s rather than by adding a pattern, and the deployment suite now derives its expiry margin from that constant |
+| 4.9's storage sweep | `localStorage`, `sessionStorage`, cookies and the URL | **Bypass, and the sharpest.** §7 names five stores; this checked four. The one it skipped is **the only store this client writes to** — IndexedDB holds the replica and the outbox — so a token filed beside them was in the one place the sweep could not look. Fixed, with an assertion that the sweep found *something*, since an empty IndexedDB would make the check a fact about an empty browser |
+| Redaction sentinel | A sentinel value driven through a hub connection and the logging pipeline | **Gap.** It traverses the hub. Phase 6 added six REST endpoints, and the sentinel never travels them, so a token logged by the document API is invisible to it. Recorded as register row 24 rather than fixed here — it is a test to write, not a guard to repair |
+| Seeded-documents grep | `client/src`, for a raw insert into `documents`, `document_members` or `users` | **Gap.** The rule is enforced on the TypeScript side only; the C# harness still writes document rows directly in eleven call sites. Register row 25 — the rule is right and the scope is half of it |
+| Mutation ratchet | Undetected mutants in `Crdt.Core`, keyed on source-line text | **Scope limit, already known and now written down.** Stryker cannot drive the two MTP test projects, so `Editor.Api` and `Editor.Infrastructure` have no mutation coverage at all. Not a bypass; a boundary that had never been stated as one |
+| Workflow check | Every workflow parses, and every job is reachable | **Weakness, unfixed.** It proves the file parses and the jobs exist; a step guarded by an `if:` that is never true satisfies it. Recorded rather than fixed: no bypass exists today, and a check for "this step actually ran" is the CI status the preflight already reads |
+| §13.26 production-build marker | The built bundle, for React's development banner | **Narrow but honest.** It detects React's dev build specifically. Another library's development artefact would pass. Left as is: the marker names the thing it detects and does not claim more |
+| gitleaks | Secret-shaped strings across the repository | **No new finding.** Its patterns are its own and §13.19 already states the weakness — a credential assembled from parts at runtime is not secret-shaped |
+
+**Four bypasses, three of them fixed in this task, each demonstrated in both
+directions**: the violation was introduced, the pre-fix guard was shown green
+over it, the fix was applied, and the same violation was shown red. A fix
+asserted without watching the guard fail is a fix nobody has evidence for.
+
+Two things worth keeping beyond the individual findings.
+
+**Every bypass was found by asking what the guard reads, and none by reading
+what it matches.** The regexes were all correct. The architecture test's
+pattern was right and its *iteration* was wrong; the storage sweep's JWT regex
+was right and its *list of stores* was short; the token scanner's patterns were
+right and the weakening was a number. A guard is a pattern applied to a corpus,
+and the corpus is where the holes are — but the pattern is the part that gets
+reviewed, because it is the part that looks like the rule.
+
+**The two "no finding" rows are the ones to distrust.** Ten guards, four
+bypasses, and a clean bill for gitleaks and the production-build marker is a
+result I would not present as strong: those two are third-party or narrow by
+construction, so "nothing found" partly reports that I had less to look at. If
+this audit runs again it should start with them.

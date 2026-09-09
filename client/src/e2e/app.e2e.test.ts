@@ -131,13 +131,59 @@ describe('the application, in a browser', () => {
     const verifier = last!.form['code_verifier'];
     expect(verifier).toBeTruthy();
 
-    const swept = await page.evaluate(() => {
+    const swept = await page.evaluate(async () => {
       const dump = (store: Storage): string[] =>
         Object.keys(store).map((key) => `${key}=${store.getItem(key) ?? ''}`);
+
+      /**
+       * Everything in every IndexedDB database this origin holds.
+       *
+       * §7 names five stores and this sweep checked four of them. The one it
+       * skipped is the only store this client actually writes to — the replica
+       * and the outbox live there — so a token filed alongside them was the
+       * one place the sweep could not have found it. Added by 6b.2's guard
+       * audit, which is what asking "what does this look at?" rather than
+       * "does it pass?" turns up (§13.34).
+       */
+      const fromIndexedDb = async (): Promise<string[]> => {
+        const found: string[] = [];
+        const databases = await indexedDB.databases();
+
+        for (const { name } of databases) {
+          if (name === undefined) {
+            continue;
+          }
+
+          const opening = indexedDB.open(name);
+          const database = await new Promise<IDBDatabase>((resolve, reject) => {
+            opening.onsuccess = () => resolve(opening.result);
+            opening.onerror = () => reject(opening.error ?? new Error(`open ${name}`));
+          });
+
+          for (const store of Array.from(database.objectStoreNames)) {
+            const read = database.transaction(store, 'readonly').objectStore(store).getAll();
+            const rows = await new Promise<unknown[]>((resolve, reject) => {
+              read.onsuccess = () => resolve(read.result);
+              read.onerror = () => reject(read.error ?? new Error(`read ${name}.${store}`));
+            });
+
+            // Stringified, because a token hidden in a nested field is still a
+            // token in a browser store. Uint8Array members serialise as index
+            // maps, which cannot contain a JWT, so §6's binary payloads add
+            // noise and no false positives.
+            found.push(`${name}.${store}=${JSON.stringify(rows)}`);
+          }
+
+          database.close();
+        }
+
+        return found;
+      };
 
       return {
         local: dump(window.localStorage),
         session: dump(window.sessionStorage),
+        indexed: await fromIndexedDb(),
         cookie: document.cookie,
         url: window.location.href,
         // Anything a redirect left behind in the address bar of this entry.
@@ -145,9 +191,15 @@ describe('the application, in a browser', () => {
       };
     });
 
+    // The sweep has to have looked at something: an empty IndexedDB means the
+    // document never opened, and then "no token in IndexedDB" is a fact about
+    // an empty browser rather than about this client (§13.32's shape).
+    expect(swept.indexed.length).toBeGreaterThan(0);
+
     const everywhere = [
       ...swept.local,
       ...swept.session,
+      ...swept.indexed,
       swept.cookie,
       swept.url,
       swept.search,

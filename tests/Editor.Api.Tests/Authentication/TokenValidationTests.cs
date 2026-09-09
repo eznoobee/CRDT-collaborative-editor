@@ -55,6 +55,10 @@ public sealed partial class TokenValidationTests
         RegexOptions.IgnoreCase)]
     private static partial Regex ReplacedValidation();
 
+    /// <summary>This source file's own path, excluded from the scans below.</summary>
+    private static string ThisFile => Path.Combine(
+        RepoRoot().FullName, "tests", "Editor.Api.Tests", "Authentication", "TokenValidationTests.cs");
+
     [Fact]
     public void No_validation_switch_is_turned_off_anywhere_including_dev_config()
     {
@@ -80,8 +84,14 @@ public sealed partial class TokenValidationTests
                     continue;
                 }
 
-                // This file names the patterns in order to look for them.
-                if (string.Equals(file.Name, "TokenValidationTests.cs", StringComparison.Ordinal))
+                // This file names the patterns in order to look for them, so
+                // it excludes itself — by full path, not by name. Excluding by
+                // name exempts *any* file called TokenValidationTests.cs
+                // anywhere under src/ or tests/, a blind spot anyone can create
+                // by choosing a file name (§13.34: a mechanical guard has
+                // mechanical failure modes, and this one could not tell its own
+                // source from a namesake).
+                if (string.Equals(file.FullName, ThisFile, StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -123,8 +133,14 @@ public sealed partial class TokenValidationTests
                     continue;
                 }
 
-                // This file names the patterns in order to look for them.
-                if (string.Equals(file.Name, "TokenValidationTests.cs", StringComparison.Ordinal))
+                // This file names the patterns in order to look for them, so
+                // it excludes itself — by full path, not by name. Excluding by
+                // name exempts *any* file called TokenValidationTests.cs
+                // anywhere under src/ or tests/, a blind spot anyone can create
+                // by choosing a file name (§13.34: a mechanical guard has
+                // mechanical failure modes, and this one could not tell its own
+                // source from a namesake).
+                if (string.Equals(file.FullName, ThisFile, StringComparison.Ordinal))
                 {
                     continue;
                 }

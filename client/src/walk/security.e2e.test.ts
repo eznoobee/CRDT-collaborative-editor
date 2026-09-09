@@ -93,10 +93,16 @@ describe('§7 against the deployed stack', () => {
     expect(response.status).toBe(401);
   }, 60_000);
 
-  it('refuses an expired token, with no clock skew allowance', async () => {
+  it('refuses a token expired past any tolerated clock skew', async () => {
+    // The margin is derived from §7's bound rather than picked, and that is
+    // the point: at the old five-minute maximum a token expired thirty seconds
+    // ago is *accepted*, so the obvious version of this test passed against a
+    // deployment whose lifetime check had been substantially relaxed from an
+    // environment variable. 6b.2's audit lowered the bound to thirty seconds;
+    // sixty-one is outside it under every configuration §7 permits.
     const stale = walk.oidc.mintWith({
       subject: 'deployment-expired',
-      expiresInSeconds: -30,
+      expiresInSeconds: -61,
     });
 
     const response = await call('/me', stale);
