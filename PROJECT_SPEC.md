@@ -2183,6 +2183,7 @@ written, not done).
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 | 24 | The redaction sentinel driven through the document API | **7** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
 | 25 | The seeded-documents rule enforced on the C# harness too | **7** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
+| 27 | A largest-legitimate-use test for every configured limit | **7** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration | §13.37, §12 |
 | 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
@@ -4467,6 +4468,70 @@ disabled; doing it in the two tests that are about a different cap, in writing,
 with the limit's own tests untouched, is scoping. The difference is whether the
 change is stated and whether anything still exercises the limit.
 
+#### The general form, and it is a class of its own
+
+**No test written for a limit ever notices that the limit is in the wrong
+place.** A limit's tests prove that it *enforces* — that the value is refused
+above the number and accepted below it — and every one of them passes when the
+number is wrong, because they are written in terms of the number. The rate
+limit's suite was green throughout; it was correct; it was testing a limit set
+where a paste breaks.
+
+This is not the same failure as §13.19's guard that cannot fail, or §13.31's two
+mechanisms, or §13.22's existence-instead-of-behaviour. Those are tests that
+reach nothing. This is a test that reaches exactly what it was written to
+reach, is entirely sound, and is silent about the only question that matters
+once the mechanism works. **The mechanism being right and the number being right
+are two claims, and every test in this repository up to 6b.6 tested only the
+first.**
+
+Every tuned value here has that shape:
+
+| Value | Default | Proven to enforce by | Largest legitimate use it must admit |
+|---|---|---|---|
+| `MaxDocumentBytes` | 5 MB | `IngestValidationTests` | a long document, appended to over months |
+| `MaxOperationsPerBatch` | 256 | `IngestValidationTests` | one keystroke batch under load, one paste chunk |
+| `MaxRunCodePoints` | 256 | `IngestValidationTests` | a pasted paragraph before the client splits it |
+| `MaxMessageBytes` | 64 KB | `IngestValidationTests` | the largest batch the client can build |
+| `MaxReplicasPerDocument` | 50 | `NegotiateTests` | a class, a team, a workshop |
+| `CodePointsPerConnection` | 10,000 / 10 s | `RateLimitTests` | pasting three pages |
+| `CodePointsPerUser` | 30,000 / 10 s | `RateLimitTests` | pasting in three tabs at once |
+| `WritesPerUser` | 120 / min | `DocumentApiRateLimitTests` | sharing a new document with a team of thirty |
+| `MaxPerUser` (connections) | 32 | `ConnectionLimitTests` | a dozen documents open, and a wake-from-sleep reconnect on top |
+| `ConnectTicketOptions.Lifetime` | 60 s | `ConnectTicketTests` | a slow first load on a cold stack |
+| `ReplicaClaimOptions.Lifetime` | 2 min | `ReplicaResumptionTests` | a reload across a slow network |
+| `DocumentRoleCacheOptions.Ttl` | 4 s | `DocumentRoleCacheTests` | — bounded by §7's five seconds, not by use |
+| `MembershipSweepOptions.Interval` | 1 s | `MembershipRevocationTests` | — as above |
+| pending-set bound | per connection | `CausalDeliveryTests` | a burst arriving out of order across a partition |
+| offline window | §9 | `offlineWindow.test.ts` | a laptop closed over a weekend |
+
+The right-hand column is the one nothing tests.
+
+#### The standing technique
+
+**For each configured limit, one test that performs the largest thing a real
+user legitimately does and asserts it succeeds.** Not a test of the boundary —
+the boundary is where the limit's own tests already live — but a test written in
+terms of the *use*, whose numbers come from what a person does rather than from
+the configuration. It fails when the limit moves under it, which is exactly the
+event nothing else reports.
+
+Two properties make it work, and both are what made the accidental version work:
+
+1. **It must not read the configured value.** A test that computes its input
+   from `MaxDocumentBytes` is testing the number against itself and passes at
+   any setting. `IngestValidationTests` found the rate limit precisely because
+   it was written about a *different* cap and its volume came from the document
+   size it was filling.
+2. **It must be phrased as the action, not the quantity.** "A three-page paste
+   is accepted" survives a change to how pastes are chunked; "12 batches of 256
+   are accepted" does not, and quietly stops testing pasting.
+
+Two of these already exist by accident. The rest are register row 27, because a
+technique that depends on being remembered is the thing §12 exists to replace —
+and because writing them found, in the one case where it happened by luck, a
+number that broke the application.
+
 ### 13.38 A duration means nothing until you name which boundary it measures
 
 While reading run 79 I wrote: *"The walk job passed — but in 84 seconds, when
@@ -4555,3 +4620,40 @@ is.
 Recorded now rather than after the fourth round, deliberately — writing down
 what would distinguish two explanations *before* seeing the evidence is the
 same discipline as the predictions themselves, applied one level up.
+
+### 13.40 Writing a rule does not install it; a mechanical rule does
+
+§13.38 was written to record that a duration means nothing until you name the
+boundary it measures. **One message later I reported that a CI job had been
+running for thirty-five minutes and was possibly hung. It had been running for
+eight.** I had compared a timestamp against my own sense of how much had
+happened since, which is the same error, in the same session, with the entry
+still on screen.
+
+Nothing followed from it — the next action was to look rather than to act — and
+that is not the point. The point is what it says about what writing a rule
+achieves. **A rule stated as a caution is a thing you agree with; it changes
+what you would say if asked, and not what you do while busy.** "Be careful about
+durations" and "a duration is a property of a boundary" are both true and both
+inert at the moment they are needed, because the moment they are needed is the
+moment you are not thinking about durations at all.
+
+The version that would have caught it is not more emphatic, it is mechanical:
+
+> **Read the clock. Never estimate elapsed time.**
+
+That rule has no judgement in it. It does not ask whether this is a case where
+care is warranted; it replaces the fallible step with an infallible one, and it
+is checkable afterwards — either a clock was read or it was not. The
+distinction is the same one that separates §13.19's guards from good intentions,
+and §12's preflight from a checklist item, arriving one level up: **a rule that
+requires you to notice you are in its situation is a rule that fires only when
+you were already paying attention.**
+
+So the test for a §13 entry is now: *can this be followed without recognising
+that it applies?* Where the answer is no, either it becomes a mechanical
+substitute — read the clock, run the guard and read what it matched, take the
+status file's job list from the workflow files — or it is a note about
+understanding rather than an instruction, and should say so. Several existing
+entries are the second kind honestly; §13.37's standing technique and §12's
+"sabotage from a committed tree" are the first kind deliberately.
