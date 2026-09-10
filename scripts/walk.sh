@@ -6,41 +6,14 @@
 # stops at is the output: a green walk with no recorded stopping point is either
 # a finished product or a walk trimmed to what passes.
 #
-# NOT A PREFLIGHT GATE, deliberately. It needs a Docker daemon, which the
-# sandbox this project is developed in does not have, and a gate that skips when
-# its infrastructure is missing is a check that cannot fail — the exact shape
-# §13.19 is about. It runs in CI as its own job instead, and the preflight
-# already refuses a phase report while any CI job is red, so the coverage is the
-# same and the hole is not.
+# §7's deployment conformance used to run inside this script, because both
+# suites live under src/walk and one vitest config matched both. It is now
+# scripts/deployment.sh with its own CI job — see scripts/compose-suite.sh for
+# why that separation is load-bearing rather than tidiness.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/compose-suite.sh
+source ./scripts/compose-suite.sh
 
-if ! docker info >/dev/null 2>&1; then
-    echo "FAILED: no Docker daemon. The walk tests a deployment; there is nothing to test." >&2
-    exit 1
-fi
-
-# The address the stack is reached by. Not loopback: the API runs in a container
-# that cannot route to the host's loopback, and the browser and the API have to
-# agree on one absolute issuer URL (§4).
-host="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if [[ -z "$host" ]]; then
-    echo "FAILED: no routable IPv4 address; a container cannot reach this host." >&2
-    exit 1
-fi
-
-echo "==> Certificate for $host"
-./scripts/dev-cert.sh deploy/tls "IP:$host"
-
-# Trust for exactly that certificate, and nothing else relaxed. Node reads this
-# at startup, which is why the certificate is made here rather than inside the
-# harness — and it is the same rule as SSL_CERT_FILE for the API and the SPKI
-# pin for Chromium: name the certificate, never disable the check.
-export NODE_EXTRA_CA_CERTS="$PWD/deploy/tls/cert.pem"
-export WALK_HOST="$host"
-
-echo "==> Walking"
-cd client
-[[ -d node_modules ]] || npm ci --silent
-npm run --silent test:walk
+compose_suite test:walk "Walking"

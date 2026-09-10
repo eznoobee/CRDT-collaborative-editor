@@ -1483,7 +1483,13 @@ Those keep their existing tests. What changes is that **a test-host test alone
 no longer discharges a §7 requirement**, and the map below is where that is
 tracked.
 
-**The §7 requirement map.** Every requirement in this section has a row naming
+**The §7 requirement map** lives in `docs/section-7-map.md` and is enforced by
+`Section7MapTests`, which fails the build in three directions: a §7 bullet with
+no row, a row anchored to text §7 no longer contains, and a row naming a test
+that does not exist. The third caught seven wrong names on the commit that
+created the map, and what was left after correcting them is register row 26.
+
+Every requirement in this section has a row naming
 the test that proves it, and **a check fails the build when a requirement has no
 row**. The list is derived from this section's text rather than from the suite:
 deriving it from the tests makes the map a restatement of whatever was written,
@@ -2164,7 +2170,7 @@ written, not done).
 | 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
 | 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b — CLOSED** | A slot per replica in a Redis sorted set, taken at `negotiate` above the resumption branch — beside the replica cap, which is where it belongs by symmetry, every reloaded tab goes uncounted | §7 |
 | 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
-| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
+| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b — CLOSED** | The criterion was rewritten (§13.22); every §7 test used to run against a test host, so a shipped configuration missing a header passed. `security.e2e.test.ts` now runs against the Compose stack in **its own CI job** — folded into the walk's job it could not be required by the preflight's expected-job list, which is this row's own failure mode reappearing inside the mechanism built to prevent it | §11, §13.22 |
 | 14 | Presence — remote cursors, ephemeral, never persisted | **8** | Deferred out of Phase 4 explicitly. Given its own phase rather than hung off 7: beside the performance targets it would be the row someone closes badly to finish the phase | §9 |
 | 15 | Creating a document, and granting membership | **6 — CLOSED** | Both harnesses seed through `psql` because there is no such path. See §13.27 — this is not a deferral, it is a hole nobody had stood in front of | §9, §13.27 |
 | 16 | Listing what you can reach, and revoking access | **6 — CLOSED** | 4.10 opens `/d/{id}` and nothing in the product produces an id | §9, §13.27 |
@@ -2177,6 +2183,7 @@ written, not done).
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 | 24 | The redaction sentinel driven through the document API | **7** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
 | 25 | The seeded-documents rule enforced on the C# harness too | **7** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
+| 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step

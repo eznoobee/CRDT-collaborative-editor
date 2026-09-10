@@ -283,6 +283,38 @@ jobs:
       # cannot even interpolate the compose file, and the walk's harness already
       # includes the stack's logs in the error it throws (§13.23).
 
+  deployment:
+    name: §7 against the deployed stack
+    runs-on: ubuntu-latest
+
+    # Its own job rather than a file inside the walk's, and the separation is
+    # load-bearing. The phase preflight derives its expected job list from this
+    # file, so only a suite with a job of its own can be required by it — folded
+    # into the walk, §7's deployment conformance could stop running with nothing
+    # to notice, which is register row 13's failure mode reappearing inside the
+    # mechanism built to prevent it. client/src/walk/coverage.test.ts fails if
+    # either suite loses its config or its job.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      # As with the walk: no .env written here, no schema applied, no client
+      # built. The harness generates only what a deployment's operator supplies.
+      - name: Deployment conformance
+        run: ./scripts/deployment.sh
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
