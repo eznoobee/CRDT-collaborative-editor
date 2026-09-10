@@ -30,6 +30,7 @@ describe('negotiate refusals', () => {
     [404, REJECTION.notFound],
     [403, REJECTION.forbidden],
     [401, REJECTION.signInRequired],
+    [429, REJECTION.tooManyConnections],
   ])('turns %i into %s', async (status, code) => {
     await expect(transport(status).connect(null)).rejects.toMatchObject({
       name: 'ConnectionRefused',

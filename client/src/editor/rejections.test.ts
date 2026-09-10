@@ -122,6 +122,16 @@ describe('the recovery table', () => {
     expect(recoveryFor(REJECTION.resyncRequired)).toBe('resync');
   });
 
+  it('separates a full document from a person holding too many connections', () => {
+    // Same recovery, two codes, and deliberately not merged. §7's replica cap
+    // means this document cannot take another connection and closing your own
+    // tabs will not help; the connection cap means the opposite. A client that
+    // collapsed them would tell half the people who hit them the wrong thing.
+    expect(recoveryFor(REJECTION.tooManyConnections)).toBe('reconnect');
+    expect(recoveryFor(REJECTION.tooManyReplicas)).toBe('reconnect');
+    expect(REJECTION.tooManyConnections).not.toBe(REJECTION.tooManyReplicas);
+  });
+
   it('stops on a code it has never heard of', () => {
     // The safe assumption about a refusal you do not understand is that
     // repeating it will not help.

@@ -34,26 +34,31 @@ public sealed partial class ReplicaClaimRenewal : BackgroundService
 {
     private readonly DocumentConnections _connections;
     private readonly IReplicaClaims _claims;
+    private readonly IUserConnections _userConnections;
     private readonly ReplicaClaimOptions _options;
     private readonly TimeProvider _time;
     private readonly ILogger<ReplicaClaimRenewal> _logger;
     private long _lost;
+    private long _slotsLost;
 
     public ReplicaClaimRenewal(
         DocumentConnections connections,
         IReplicaClaims claims,
+        IUserConnections userConnections,
         IOptions<ReplicaClaimOptions> options,
         TimeProvider time,
         ILogger<ReplicaClaimRenewal> logger)
     {
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(claims);
+        ArgumentNullException.ThrowIfNull(userConnections);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
 
         _connections = connections;
         _claims = claims;
+        _userConnections = userConnections;
         _options = options.Value;
         _time = time;
         _logger = logger;
@@ -69,6 +74,17 @@ public sealed partial class ReplicaClaimRenewal : BackgroundService
     /// a genuine double-claim, and both are worth knowing about.
     /// </remarks>
     public long LostClaims => Interlocked.Read(ref _lost);
+
+    /// <summary>
+    /// Connection slots that had already aged out when this loop went to renew
+    /// them (§7, §13.15).
+    /// </summary>
+    /// <remarks>
+    /// Above zero means live connections are not being counted against their
+    /// user's cap, which makes the cap quietly larger than it says. Nothing
+    /// else would show it: the connections keep working, which is the point.
+    /// </remarks>
+    public long LostSlots => Interlocked.Read(ref _slotsLost);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -99,6 +115,25 @@ public sealed partial class ReplicaClaimRenewal : BackgroundService
     {
         foreach (var held in _connections.Held())
         {
+            // §7's per-user connection slot, renewed on the same tick and from
+            // the same list. A second timer would be a second thing to get
+            // wrong, and the two have the same lifetime by construction: both
+            // are held for exactly as long as this instance holds the socket.
+            //
+            // A slot that has already aged out is not recreated here — the
+            // registry refuses that deliberately, so a partitioned instance
+            // cannot bring its connections back over the cap. The connection
+            // stays open: losing a slot is a bookkeeping loss, and closing a
+            // working socket over it would turn a Redis blip into disconnected
+            // users. It is counted instead, because a number climbing away from
+            // zero is how this is noticed at all (§13.15).
+            if (!await _userConnections
+                    .RenewAsync(held.UserId, held.ReplicaId, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                Interlocked.Increment(ref _slotsLost);
+            }
+
             var renewed = await _claims
                 .RenewAsync(held.DocumentId, held.ReplicaId, held.ClaimToken, cancellationToken)
                 .ConfigureAwait(false);

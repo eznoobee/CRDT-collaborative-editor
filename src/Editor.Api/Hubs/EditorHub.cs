@@ -28,6 +28,7 @@ public sealed partial class EditorHub : Hub
     private readonly DocumentBroadcaster _broadcaster;
     private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
+    private readonly IUserConnections _userConnections;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
     private readonly IOperationRateLimiter _rateLimits;
@@ -42,6 +43,7 @@ public sealed partial class EditorHub : Hub
         DocumentBroadcaster broadcaster,
         DocumentConnections connections,
         IConnectTicketStore tickets,
+        IUserConnections userConnections,
         IDocumentRoles roles,
         IngestValidator validator,
         IOperationRateLimiter rateLimits,
@@ -55,6 +57,7 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(broadcaster);
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
+        ArgumentNullException.ThrowIfNull(userConnections);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(validator);
         ArgumentNullException.ThrowIfNull(rateLimits);
@@ -68,6 +71,7 @@ public sealed partial class EditorHub : Hub
         _broadcaster = broadcaster;
         _connections = connections;
         _tickets = tickets;
+        _userConnections = userConnections;
         _roles = roles;
         _validator = validator;
         _rateLimits = rateLimits;
@@ -87,6 +91,18 @@ public sealed partial class EditorHub : Hub
             await _claims
                 .ReleaseAsync(
                     binding.DocumentId, binding.ReplicaId, binding.ClaimToken, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            // §7's per-user connection slot, given back here rather than left to
+            // age out. The stale window exists for instances that die, not for
+            // connections that close normally: a user who closes a tab and opens
+            // another would otherwise be charged for both for a minute.
+            //
+            // CancellationToken.None on purpose, like the claim above. This runs
+            // while the connection is being torn down, and a cancelled release
+            // is a slot held until it expires.
+            await _userConnections
+                .ReleaseAsync(binding.UserId, binding.ReplicaId, CancellationToken.None)
                 .ConfigureAwait(false);
 
             if (_connections.Remove(binding.DocumentId, Context.ConnectionId))

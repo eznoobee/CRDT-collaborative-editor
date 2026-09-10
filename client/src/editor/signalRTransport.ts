@@ -145,6 +145,14 @@ export class SignalRTransport implements Transport {
       throw new ConnectionRefused(REJECTION.forbidden);
     }
 
+    if (response.status === 429) {
+      // §7's per-user connection cap. Without this line a 429 is an unlabelled
+      // transport failure: the controller goes offline and retries forever with
+      // nothing on screen saying why, which is exactly the defect 6.5 found in
+      // the 404 path four phases after it was introduced.
+      throw new ConnectionRefused(REJECTION.tooManyConnections);
+    }
+
     if (response.status === 404) {
       throw new ConnectionRefused(REJECTION.notFound);
     }

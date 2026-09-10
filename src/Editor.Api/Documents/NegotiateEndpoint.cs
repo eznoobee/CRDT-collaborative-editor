@@ -73,6 +73,7 @@ public static class NegotiateEndpoint
         IDocumentRoles roles,
         IConnectTicketStore tickets,
         IReplicaClaims claims,
+        IUserConnections connections,
         EditorDbContext context,
         DocumentIngestState state,
         IOptions<IngestLimits> limits,
@@ -105,10 +106,48 @@ public static class NegotiateEndpoint
         // never trusted, and a refusal mints a fresh replica rather than
         // failing — a client whose stored replica was retired needs a working
         // session, not a status it cannot act on (§13.13).
-        if (request?.ReplicaId is { } claimed
-            && await ResumableAsync(context, documentId, userId.Value, claimed, cancellationToken)
+        //
+        // Decided before the connection cap below, and used by it, because the
+        // slot is keyed on the replica and the two paths name different ones.
+        var resumable = request?.ReplicaId is { } asked
+            && await ResumableAsync(context, documentId, userId.Value, asked, cancellationToken)
+                .ConfigureAwait(false);
+
+        // The id this connection will author as, whichever path it takes. The
+        // fresh one is minted here rather than further down so that the cap has
+        // something to key on: §7 and §13.12 still require the *server* to
+        // choose it, and it is generated here for both reasons at once.
+        var replicaId = resumable ? request!.ReplicaId!.Value : Guid.CreateVersion7();
+
+        // §7's per-user connection cap, taken here — ABOVE the resumption
+        // branch, which returns without ever reaching the replica cap below it.
+        //
+        // Beside the replica cap is the obvious placement, since that is the
+        // other §7 connection-time limit, and it is wrong: a client that asks to
+        // resume a replica it owns returns from this method twenty lines from
+        // now, so every resumed connection would be uncounted. §13.32 — a check
+        // attached to one path does not cover the principals who take another,
+        // and a test that only opens fresh sessions would never see it.
+        //
+        // Resumption costs nothing extra, because the slot is keyed on the
+        // replica: a reload re-scores the member it already holds, so a tab that
+        // reconnects all afternoon holds one slot rather than one per attempt.
+        if (!await connections.TryAdmitAsync(userId.Value, replicaId, cancellationToken)
                 .ConfigureAwait(false))
         {
+            // 429 rather than 409. The replica cap's 409 says "this document is
+            // full"; this says "you are holding too many", which is about the
+            // caller rather than the resource and clears on its own as their
+            // other tabs close.
+            return TypedResults.Json(
+                new { code = IngestRejection.TooManyConnections },
+                statusCode: StatusCodes.Status429TooManyRequests);
+        }
+
+        if (resumable)
+        {
+            var claimed = replicaId;
+
             // Taken here rather than at connect: the ticket exists before the
             // connection does, so a claim taken when the socket opens leaves a
             // window in which two negotiate calls both succeed for one replica.
@@ -134,6 +173,25 @@ public static class NegotiateEndpoint
                 return TypedResults.Ok(
                     new NegotiateResponse(resumedTicket, documentId, claimed, role.Value, true));
             }
+
+            // Resumable but not claimable: something else holds it, so this
+            // connection falls through and becomes a fresh replica. The slot
+            // moves with it. Leaving it on the id we are no longer using would
+            // hold a place for a replica this connection does not have and
+            // release the wrong member on disconnect — a slot leaked per lost
+            // race, invisible until it ages out.
+            await connections.ReleaseAsync(userId.Value, claimed, cancellationToken)
+                .ConfigureAwait(false);
+
+            replicaId = Guid.CreateVersion7();
+
+            if (!await connections.TryAdmitAsync(userId.Value, replicaId, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                return TypedResults.Json(
+                    new { code = IngestRejection.TooManyConnections },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
         }
 
         // §7 caps concurrent replicas per document. Checked here rather than at
@@ -153,17 +211,23 @@ public static class NegotiateEndpoint
 
         if (active >= limits.Value.MaxReplicasPerDocument)
         {
+            // The slot goes back. Every other refusal above this one happens
+            // before it is taken; this is the only path that has one in hand
+            // and does not use it, and holding it would charge the caller for a
+            // connection the server just refused to give them.
+            await connections.ReleaseAsync(userId.Value, replicaId, cancellationToken)
+                .ConfigureAwait(false);
+
             // 409, not 404: the caller is a member and can see the document.
             // Concealing the reason would leave them retrying forever.
             return TypedResults.Conflict(new { code = IngestRejection.TooManyReplicas });
         }
 
-        // §7 and §13.12: the server assigns the replica id. A client that chose
+        // §7 and §13.12: the server assigns the replica id — minted above, so
+        // that the connection cap had something to key on. A client that chose
         // its own could name another live replica and author operations
-        // attributed to it — and every replica would converge on the forgery,
+        // attributed to it, and every replica would converge on the forgery,
         // because convergence is what the algorithm guarantees.
-        var replicaId = Guid.CreateVersion7();
-
         context.DocumentReplicas.Add(new DocumentReplica
         {
             DocumentId = documentId,

@@ -1359,6 +1359,32 @@ Treat every one of these as a hard requirement with a corresponding test.
   observationally identical against one user on one document, so **the test
   opens connections across different documents**, where only a per-user limit
   can refuse (§13.31: two mechanisms, one observable).
+
+  **The slot is taken at `negotiate`, above the resumption branch, and keyed on
+  the replica.** All three parts are requirements rather than implementation
+  notes:
+
+  - *At `negotiate`*, because that is the last point where a refusal can carry a
+    code. A cap enforced when the socket opens can only close it, and a closed
+    socket is indistinguishable from a network failure — §13.13's defect, which
+    is how the 404 from `negotiate` went unnoticed for four phases.
+  - *Above the resumption branch*, because that branch **returns before the
+    replica cap ever runs**. Placing the connection cap beside the replica cap
+    is the obvious choice and it leaves every reloaded tab uncounted; a test
+    that only opens fresh sessions passes either way (§13.32).
+  - *Keyed on the replica*, so a reload re-scores the slot it already holds. A
+    tab that reconnects all afternoon costs one slot, not one per attempt, and
+    a client in a reconnect loop cannot exhaust its own cap.
+
+  Held as a sorted set per user, scored by last renewal and purged before every
+  count, so an instance that dies holding slots leaves entries that age out
+  rather than a user locked out of their own account. A plain counter cannot
+  distinguish a slot nobody released from a slot in use and drifts upward
+  forever. The stale window must outlast two renewal ticks, and **that
+  relationship is enforced at startup** rather than stated in a comment — the
+  two numbers live in different files, and a window shorter than the interval
+  expires live connections' slots between ticks, refusing users who are well
+  under the cap, intermittently, with nothing in the logs but a count.
 - A malformed or oversized message closes the connection after logging.
 
 **Client**
@@ -1634,7 +1660,8 @@ is a stress target, not a steady state.
   | `not_found` | The document is gone or access was revoked. Stop the session, surface it, do not retry. |
   | `forbidden` | Demoted to viewer mid-session. Drop to read-only, keep receiving, surface it; the outbox is unsendable and must not be discarded silently. |
   | `malformed` | A bug in this client. Stop submitting, surface it, keep local state for diagnosis; retrying cannot help. |
-  | `too_many_replicas` | §7's cap. Retry with backoff, having released any claim held; surface it if it persists. |
+  | `too_many_replicas` | §7's per-document cap. Retry with backoff, having released any claim held; surface it if it persists. |
+  | `too_many_connections` | §7's per-user cap: this person holds too many connections, across every document. Same recovery as `too_many_replicas` — retry with backoff — and a **different sentence to the user**, which is why it is a separate code. That one means the document is full and closing your own tabs cannot help; this one means exactly that it can. A client that collapsed the two would tell half the people who hit them the wrong thing. |
   | `unknown_origin` | The server does not have an operation this batch references. Catch up by version vector, then resubmit once. Repeated occurrence is a bug, not a race. |
   | `rate_limited` | §7's abuse budget is spent. Wait the delay the refusal carries, then resubmit **the same bytes** — no catch-up, because nothing about the document changed. Unbounded retries, unlike `unknown_origin`: a repeat means the window has not rolled over, which is the server working. |
   | `resync_required` | §5's GC watermark: the referenced id is at or below it and is gone. Discard local state, take a snapshot, and report the unsent operations as lost — this is the one case where §5's "do not drop" rule has an exception, so it is the one the user has to be told about. |
@@ -2113,7 +2140,7 @@ written, not done).
 | 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
 | 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
 | 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
-| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b** | Same | §7 |
+| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b — CLOSED** | A slot per replica in a Redis sorted set, taken at `negotiate` above the resumption branch — beside the replica cap, which is where it belongs by symmetry, every reloaded tab goes uncounted | §7 |
 | 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
 | 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b** | The criterion was rewritten (§13.22); today every §7 test runs against a test host, so a shipped configuration missing a header passes | §11, §13.22 |
 | 14 | Presence — remote cursors, ephemeral, never persisted | **8** | Deferred out of Phase 4 explicitly. Given its own phase rather than hung off 7: beside the performance targets it would be the row someone closes badly to finish the phase | §9 |
@@ -4452,3 +4479,50 @@ arriving as *good* news rather than bad. A number that looks too fast reads as
 and gets no check. The suspicion fired here because the figure was implausible.
 Had the walk step taken 110 seconds, nothing would have prompted a look, and
 the log line proving the suite ran would never have been read.
+
+**And the reader's own chain was wrong in the other direction.** The suspicion
+about 84 seconds was taken as evidence and reasoned forward to a hole in the
+preflight — which was really there, and was there for entirely different
+reasons than the ones inferred. The preflight did require `success` per job;
+what it failed to do was ask whether it had been shown every job, and read the
+run's `status` where it meant `conclusion`. Right conclusion, wrong chain.
+
+Worth recording because **a correct conclusion reached by a wrong chain is the
+hardest kind of error to catch: nothing downstream disagrees.** Every later step
+succeeds — the hole is found, the fix is real, the sabotages go red — and the
+chain that produced it is never revisited, because being right is normally the
+signal that the reasoning was sound. The only thing that separates the two here
+was going back to the primary source after the conclusion had already been
+accepted. That is the habit worth keeping: when a conclusion is confirmed,
+check the chain anyway, because confirmation is exactly when nobody does.
+
+### 13.39 Three prediction rounds wrong in the same direction
+
+6b.1, 6b.3 and 6b.4 each recorded predictions before the first run, each
+predicted at least one failure, and each came back clean. Three rounds, all
+wrong, all in the same direction.
+
+**That is data about the predictions, not about the code.** Two readings, and
+they call for opposite responses:
+
+1. **The artefact is in better shape than the model of it.** Six phases of
+   sabotage practice and vacuity analysis have made the code more likely to be
+   right on the first run than intuition — trained on the earlier phases —
+   expects. If so, the pessimism is a stale prior and should be updated.
+2. **The predictions are being produced as discipline rather than as genuine
+   estimate.** "I expect at least one failure" is the sentence the practice
+   rewards, and a prediction written because the practice expects one is a
+   ritual wearing the practice's clothes. If so, they have stopped being
+   evidence of anything and the streak is an artefact of the format.
+
+Nothing so far distinguishes the two, and guessing between them here would be a
+third prediction of the same kind. What distinguishes them is **the fourth
+round**: a prediction that names a specific mechanism and a specific observable,
+made without reference to how many failures are expected in total, and then
+graded. If that one is wrong too, reading 1 is doing real work. If it is right,
+or if it turns out to be unwriteable without inventing a candidate, reading 2
+is.
+
+Recorded now rather than after the fourth round, deliberately — writing down
+what would distinguish two explanations *before* seeing the evidence is the
+same discipline as the predictions themselves, applied one level up.

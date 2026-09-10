@@ -33,6 +33,17 @@ export const REJECTION = {
   rateLimited: 'rate_limited',
 
   /**
+   * §7's per-user connection cap: this person holds too many connections.
+   *
+   * Not `too_many_replicas`, though both refuse a connection and both recover
+   * by reconnecting later. That one means the document is full and closing your
+   * own tabs will not help; this one means the opposite. The recovery is the
+   * same and the sentence shown to the user is not, which is why they are two
+   * codes rather than one.
+   */
+  tooManyConnections: 'too_many_connections',
+
+  /**
    * §5's GC watermark: the referenced id is at or below it and is gone.
    *
    * Specified before anything emits it. The server side arrives with GC in
@@ -103,6 +114,7 @@ export function recoveryFor(code: string): Recovery {
     case REJECTION.forbidden:
       return 'read-only';
 
+    case REJECTION.tooManyConnections:
     case REJECTION.tooManyReplicas:
     case REJECTION.unauthenticated:
     case REJECTION.signInRequired:

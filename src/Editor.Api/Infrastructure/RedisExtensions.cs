@@ -60,6 +60,32 @@ public static class RedisExtensions
             provider.GetRequiredService<IConnectionMultiplexer>(),
             provider.GetRequiredService<IOptions<ReplicaClaimOptions>>().Value));
 
+        // §7's per-user connection cap. The slot is renewed on the claim
+        // renewal's tick, so its stale window has to outlast that tick by a
+        // margin — a window shorter than the interval expires live connections'
+        // slots between renewals, and the symptom is users refused while well
+        // under the cap, intermittently, with nothing in the logs but a count.
+        //
+        // Composed and enforced at startup rather than asserted in a comment,
+        // the same construction as MembershipSweep's five-second bound: the two
+        // numbers are set in different files by different people, and the
+        // relationship between them is the thing that has to hold.
+        services.AddOptions<ConnectionLimitOptions>()
+            .BindConfiguration(ConnectionLimitOptions.Section)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        services.AddOptions<ConnectionLimitOptions>()
+            .Validate<IOptions<ReplicaClaimOptions>>(
+                (options, claims) => options.StaleAfter >= claims.Value.RefreshInterval * 2,
+                "A connection slot must outlive two renewal ticks, or live connections lose theirs.")
+            .ValidateOnStart();
+
+        services.AddSingleton<IUserConnections>(provider => new RedisUserConnections(
+            provider.GetRequiredService<IConnectionMultiplexer>(),
+            provider.GetRequiredService<IOptions<ConnectionLimitOptions>>().Value,
+            provider.GetRequiredService<TimeProvider>()));
+
         // §7's submission limits. Redis-backed because "across instances" is
         // the requirement rather than a note about the implementation: a
         // per-process limiter is escaped by reconnecting, and §8 forbids

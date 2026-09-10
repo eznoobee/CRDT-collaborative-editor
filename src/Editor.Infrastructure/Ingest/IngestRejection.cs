@@ -50,4 +50,17 @@ public static class IngestRejection
     /// (§13.13).
     /// </remarks>
     public const string RateLimited = "rate_limited";
+
+    /// <summary>
+    /// §7's per-user connection cap. This caller holds too many connections.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="TooManyReplicas"/> on purpose, and the two are
+    /// easy to conflate because both refuse a connection. That one is about the
+    /// document — it is full, and nothing this caller closes will change it.
+    /// This one is about the caller, and clears as their own tabs close. A
+    /// client cannot say anything useful to the person in front of it without
+    /// knowing which.
+    /// </remarks>
+    public const string TooManyConnections = "too_many_connections";
 }
