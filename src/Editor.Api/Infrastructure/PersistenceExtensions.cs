@@ -106,6 +106,24 @@ public static class PersistenceExtensions
 
         services.AddHostedService<DocumentRoleCacheSubscriber>();
 
+        // §5's replica retirement, and the heartbeat without which it retires
+        // live readers. Both are here rather than beside the Redis services
+        // because both write Postgres; the retirement threshold and the
+        // heartbeat interval share one options object so the relationship
+        // between them is visible in one place.
+        services.AddOptions<ReplicaRetirementOptions>()
+            .BindConfiguration(ReplicaRetirementOptions.Section)
+            .Validate(
+                options => options.Heartbeat < options.Retire,
+                "A heartbeat slower than T_retire cannot keep a live replica out of retirement.")
+            .ValidateOnStart();
+
+        services.AddSingleton<ReplicaRetirement>();
+        services.AddHostedService(provider => provider.GetRequiredService<ReplicaRetirement>());
+
+        services.AddSingleton<ReplicaHeartbeat>();
+        services.AddHostedService(provider => provider.GetRequiredService<ReplicaHeartbeat>());
+
         return services;
     }
 

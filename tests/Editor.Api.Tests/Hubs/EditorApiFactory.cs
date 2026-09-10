@@ -18,14 +18,18 @@ public sealed class EditorApiFactory : WebApplicationFactory<Program>
 
     private readonly Dictionary<string, string?>? _settings;
 
+    private readonly Action<IServiceCollection>? _configure;
+
     public EditorApiFactory(
         EditorFixture fixture,
         bool testAuthentication = true,
-        Dictionary<string, string?>? settings = null)
+        Dictionary<string, string?>? settings = null,
+        Action<IServiceCollection>? configure = null)
     {
         _fixture = fixture;
         _testAuthentication = testAuthentication;
         _settings = settings;
+        _configure = configure;
     }
 
     /// <summary>How many role lookups the hub has made.</summary>
@@ -57,6 +61,16 @@ public sealed class EditorApiFactory : WebApplicationFactory<Program>
             // would — through configuration, not by reaching past it.
             builder.ConfigureAppConfiguration(configuration =>
                 configuration.AddInMemoryCollection(_settings));
+        }
+
+        if (_configure is not null)
+        {
+            // Applied before the authentication overrides below so a test can
+            // replace a service the host registered — the clock, in practice.
+            // Configuration is how a deployment changes a number; this is for
+            // the things a deployment cannot change and a test must, and it is
+            // deliberately the narrow door rather than a general one.
+            builder.ConfigureServices(_configure);
         }
 
         if (!_testAuthentication)
