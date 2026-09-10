@@ -479,6 +479,68 @@ converges: one browser tab that never returns blocks GC forever. A replica is
   there — a Phase 4 client that warns correctly about a discard that never
   happens is the shape §13.15 warns about.
 
+#### The stability frontier, precisely enough to implement
+
+§5 has said since Phase 1 that an operation is collectable when "every
+non-retired replica's version vector shows it has been observed". That is the
+right rule and it is not implementable as written, because **the server does not
+know any replica's version vector.** It knows what each replica has *sent*. What
+a replica has *received* is a different thing, and it is the thing causal
+stability is about.
+
+**Definition.** For a document, let `R` be its replicas with `retired_at IS
+NULL`. Each `r ∈ R` has an *acknowledged version vector* `A(r)`: the largest
+version vector for which `r` holds every operation at or below it, with no gaps.
+The frontier is the pointwise minimum:
+
+> `F[s] = min over r ∈ R of A(r)[s]`, for every replica `s` that has ever
+> written to the document.
+
+An operation `(s, n)` is causally stable exactly when `n ≤ F[s]`. Rules 1–4 above
+then decide collectability; stability alone never does.
+
+**`A(r)` is a prefix, not a maximum**, and the distinction is load-bearing. §8
+makes broadcast unordered, so a replica can hold `(s,105)` without `(s,100)`;
+recording 105 would mark 100 stable while a replica is still missing it, and 100
+would then be collected out from under a client that is about to ask for it.
+This is the same reason §8's catch-up is by version vector and never by a
+server_seq watermark, and it is the same mistake one layer down.
+
+**How the server learns `A(r)`.** The client already computes it — it is what
+catch-up sends. It is reported in three places:
+
+1. On catch-up, as today.
+2. Piggybacked on every submission, which costs nothing: a client that is
+   writing has just recomputed it.
+3. By an explicit acknowledgement the client sends on a timer.
+
+**The third is not redundant, and leaving it out is the defect this clause
+exists to prevent.** A viewer submits nothing and catches up once. Under (1) and
+(2) alone its `A(r)` is frozen at the moment it connected, so **one person
+reading a document holds the frontier still for as long as they keep the tab
+open** — and the symptom is not an error, it is GC quietly reclaiming nothing.
+Every test in which the participants type would pass. §13.32's shape again: a
+mechanism attached to writing does not cover principals who only read.
+
+*Rejected: inferring `A(r)` from what the server delivered.* The broadcaster
+knows what it sent each connection, and sent is not received — a dropped socket
+loses the difference, and GC would collect what a client never got. *Rejected:
+deriving stability from `server_seq` alone.* A single number per replica is
+exactly the watermark §8 already refused, for the reason above.
+
+**What `retired_at` does.** A retired replica leaves `R`, so the minimum is taken
+over a smaller set and the frontier advances past whatever it was holding. That
+is the entire mechanism by which GC ever runs, and it is why row 1 blocks this
+work rather than merely preceding it. A retired replica that reconnects is told
+to resync from a snapshot, because the frontier may have moved past state it
+still holds.
+
+**The frontier only ever moves forward.** It is recomputed, not accumulated, and
+a recomputation that produced a lower value would mean a replica un-observed
+something. Store the last value and refuse to lower it: a frontier that moved
+backwards is a bug that would otherwise present as GC collecting an element and
+then a client legitimately naming it.
+
 **GC watermark.** Each document has a watermark: the causal-stability frontier
 below which elements may have been collected. An operation referencing an
 unknown id is buffered if that id is above the watermark, and **rejected with a
@@ -1711,6 +1773,25 @@ is a stress target, not a steady state.
   the expected sequence advances only on a successful append, never on a
   refusal.
 
+  **When the server emits it (Phase 7).** The client contract above was written
+  first, deliberately; this is the rule the server is written against. On
+  ingest, for each operation naming an id `(s, n)` the server does not hold:
+
+  | Condition | Answer | Why |
+  |---|---|---|
+  | `n > F[s]` — above the frontier | buffer as a pending dependency | It may still arrive; §5's causal-readiness rules own it from here. |
+  | `n ≤ F[s]` — at or below | **`resync_required`** | Everyone was known to hold it, so it is not in flight: it existed and was collected. |
+  | `s` is not in the frontier at all | buffer | A replica nobody has heard from is not evidence that anything was collected. |
+
+  The middle row is the whole of it, and the third is what stops a new replica's
+  first operation being answered with an instruction to throw its state away.
+
+  **It is emitted for a reference the server cannot resolve, never for an
+  operation it merely dislikes.** A malformed batch is `malformed`; a batch from
+  the wrong replica is `replica_mismatch`. Widening `resync_required` to mean
+  "something is wrong with this" would make the one refusal that legitimately
+  destroys a user's unsent work the catch-all, which is precisely backwards.
+
   `resync_required` is specified here before anything emits it. §5 defines the
   condition and the server side arrives with GC; defining the client contract
   now means that implementation is written against a stated shape rather than
@@ -2141,7 +2222,8 @@ reviewed. At the end of each phase, stop and report.
 | 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
 | 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7) **through `IDocumentRoles`, so the eager invalidation and not the TTL is what meets the five-second bound** (§13.31), and the walk in §13.27 completes end to end **with nothing seeded by hand**: a new user signs in, makes a document, **grants a role to a second user who has signed in**, and both edit it |
 | 6b | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
-| 7 | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); **`retired_at` is set on `T_retire` inactivity and `resync_required` is emitted** against §9's stated client contract |
+| 7 | GC and lifecycle | `retired_at` is set by a background job on `T_retire` inactivity **and the job reports a non-zero count where retirements are expected**; the stability frontier advances **past a retired replica**, asserted as a number that moves; tombstones below the watermark are collected under §5's four rules. **The done-when is transparency, not convergence**: a replica that has GC'd and one that has not produce **identical §9 normalised form for the same trace**. Convergence alone is satisfied by a wrong document — a collected tombstone that is still referenced resolves to nothing and the algorithm is total, so every replica agrees on text that is wrong, silently and unrecoverably. `resync_required` is emitted against §9's stated contract, §9's offline-window discard is verified end to end, a document can be **removed** (row 23), and the walk observes GC's effect on the deployed stack |
+| 7b | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); `/health/ready` probes Postgres and Redis; the deferred tests of rows 24–27 are written |
 | 8 | Presence | Remote cursors survive concurrent edits: a cursor anchored in text another replica is editing lands where §9's anchoring says it should, and nothing about presence is persisted or replayed |
 
 ### The deferred register
@@ -2162,10 +2244,10 @@ written, not done).
 | 2 | §9's offline-window discard verified end to end | **7** | Blocked by 1. The client half is written and unit-tested against an injected clock; the discard it warns about cannot happen yet | §9, 4.7 |
 | 3 | `resync_required` emitted server-side | **7** | Needs GC. The client contract was specified first, deliberately, so the server is written against a stated shape | §5, §9, §13.13 |
 | 4 | GC of causally stable tombstones, and the watermark that gates it | **7** | Depends on 1: the stability frontier never advances while an abandoned tab counts as live | §5 |
-| 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **7** | 3b's done-when was the protocol settled *before* any throughput number. Outstanding, never skipped | §8 |
-| 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7** | Nothing of it exists today beyond `/health/live` | §10 |
-| 7 | `/health/ready` probing Postgres and Redis | **7** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
-| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
+| 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **7b** | 3b's done-when was the protocol settled *before* any throughput number. Outstanding, never skipped | §8 |
+| 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7b** | Nothing of it exists today beyond `/health/live` | §10 |
+| 7 | `/health/ready` probing Postgres and Redis | **7b** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
+| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **7b** | The criterion was rewritten from "dashboards exist" (§13.22); it needs 5 and 6 first | §11, §13.22 |
 | 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
 | 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
 | 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b — CLOSED** | A slot per replica in a Redis sorted set, taken at `negotiate` above the resumption branch — beside the replica cap, which is where it belongs by symmetry, every reloaded tab goes uncounted | §7 |
@@ -2181,10 +2263,10 @@ written, not done).
 | 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
 | 22 | Rate limiting on the document API | **6b — CLOSED** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; 6b.6 applied it to the route group rather than to the three endpoints that write, charged before the handler decides | §7 |
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
-| 24 | The redaction sentinel driven through the document API | **7** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
-| 25 | The seeded-documents rule enforced on the C# harness too | **7** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
-| 27 | A largest-legitimate-use test for every configured limit | **7** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration | §13.37, §12 |
-| 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
+| 24 | The redaction sentinel driven through the document API | **7b** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
+| 25 | The seeded-documents rule enforced on the C# harness too | **7b** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
+| 27 | A largest-legitimate-use test for every configured limit | **7 and 7b** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration. **Split deliberately: `T_retire` and the GC watermark belong to Phase 7**, because they are new numbers introduced there and §13.37 says their own tests will pass at any value — and a `T_retire` that retires a replica whose owner is at lunch is data loss, not a tuning complaint. The other thirteen are 7b | §13.37, §12 |
+| 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7b** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -2449,6 +2531,36 @@ And enforcing it turned up a second missing path: a grant names a user id, so an
 invitee needs to be able to read their own, and nothing in the product produced
 one until `GET /me` existed. A harness that keeps reaching into the database
 never discovers that, which is the whole argument for the rule.
+
+### Why Phase 7 is split, and why this split is different
+
+3b and 6b were **discovered**. Phase 3 turned out to contain a wire protocol
+nobody had scoped, and Phase 6 turned out to contain the hardening §7 had
+described for five phases; in both cases the split was a correction made after
+the phase had already started going wrong.
+
+Phase 7's split is **visible in advance**, and the deciding argument is not size
+or dependency but **failure mode**:
+
+- In Phase 7, a mistake **corrupts documents** — silently, convergently, and
+  with no way back, because GC is the only operation here that destroys data and
+  §5's convergence guarantee means every replica agrees on the damage.
+- In Phase 7b, a mistake means **you learn nothing** — a load test that reports
+  numbers nobody set a threshold for, a dashboard that exists and diagnoses
+  nothing.
+
+Those need different care and they reward different scepticism, which is reason
+enough not to run them as one phase where the second half is what gets
+compressed when the first runs long. The one real coupling runs one way and
+confirms the order: **7b's load test cannot be trusted until 7's GC exists**,
+because load against a system that never collects tombstones measures a document
+growing monotonically for the length of the run, which is not the steady state
+§8's targets describe.
+
+Recorded because "we split it because it was big" is not a reason anyone can
+check later, and because the next phase that wants splitting should be argued
+the same way — name the failure mode of each half, and if they are the same
+kind, the split is probably cosmetic.
 
 ### No phase is reported complete without a CI preflight
 
@@ -4022,6 +4134,16 @@ the end".
 stopped.** A walk that gets further than the last one is progress that no test
 suite reports; a walk that stops in the same place twice is a row in the
 deferred register that is not moving.
+
+**The walk must reach an invisible subsystem too, and Phase 7 is the first that
+has one.** GC is not a feature: nobody asks for it, no screen shows it, and the
+walk as written cannot tell whether it ran. That is precisely the argument for
+adding a step rather than skipping one — without it, an entire phase is verified
+only against test hosts, which is the state Phase 5b existed to correct. The
+step observes GC's *effect* on the deployed stack: a snapshot that is smaller
+after a collection cycle than before it, or a collected count read from a real
+endpoint. It is a weaker step than "a person does X and sees Y", and a weak step
+against the artefact is worth more than a strong one against a test host.
 
 The first walk, run at the end of Phase 4, produced register rows 15 through 21
 — five of them about the deployment artefact rather than the code, and one of
