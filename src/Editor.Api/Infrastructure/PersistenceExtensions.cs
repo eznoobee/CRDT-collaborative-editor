@@ -104,6 +104,12 @@ public static class PersistenceExtensions
             provider.GetRequiredService<DocumentRoleReader>(),
             provider.GetRequiredService<CachedDocumentRoles>()));
 
+        // §5's stability frontier. Scoped, because it reads and writes through
+        // the request-scoped DbContext like everything else that touches
+        // Postgres; the hub takes a scope per acknowledgement rather than
+        // holding one for the life of a connection.
+        services.AddScoped<IStabilityFrontier, StabilityFrontier>();
+
         services.AddHostedService<DocumentRoleCacheSubscriber>();
 
         // §5's replica retirement, and the heartbeat without which it retires

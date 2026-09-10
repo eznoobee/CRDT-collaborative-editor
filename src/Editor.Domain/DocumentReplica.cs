@@ -25,4 +25,27 @@ public sealed class DocumentReplica
     public long OperationCount { get; set; }
 
     public DateTimeOffset? RetiredAt { get; set; }
+
+    /// <summary>
+    /// What this replica has acknowledged holding: the largest version vector
+    /// below which it has every operation, with no gaps (§5).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The input to the stability frontier, and the reason the frontier is
+    /// computable at all. Everything else in this row describes what the
+    /// replica <em>sent</em>; causal stability is a question about what it has
+    /// <em>received</em>, and the two are different.
+    /// </para><para>
+    /// <strong>A prefix, never a maximum.</strong> §8 makes broadcast
+    /// unordered, so a replica can hold <c>(s,105)</c> without <c>(s,100)</c>.
+    /// Recording the highest thing seen would mark 100 stable while someone is
+    /// still missing it, and 100 would then be collected out from under a
+    /// client about to name it.
+    /// </para><para>
+    /// Empty for a replica that has just connected, which is honest: it holds
+    /// nothing yet, and the frontier is right to wait for it.
+    /// </para>
+    /// </remarks>
+    public Dictionary<Guid, long> Acknowledged { get; set; } = [];
 }

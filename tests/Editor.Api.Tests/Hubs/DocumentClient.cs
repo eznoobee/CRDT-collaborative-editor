@@ -194,6 +194,27 @@ public sealed class DocumentClient : IAsyncDisposable
                 Negotiated.DocumentId, Negotiated.ReplicaId, operations ?? Writer.Type("a")),
             TestContext.Current.CancellationToken);
 
+    /// <summary>
+    /// Tells the server what this client holds, the way a real client's timer
+    /// does (§5).
+    /// </summary>
+    /// <remarks>
+    /// Defaults to this client's own replica state, so a test acknowledges what
+    /// it actually has rather than a number chosen to make the frontier move.
+    /// </remarks>
+    public Task AcknowledgeAsync(Dictionary<Guid, long>? known = null)
+    {
+        // The same shape catch-up sends: per replica, the NEXT sequence
+        // expected. The server converts to "highest held"; sending the
+        // converted form here would leave two conventions on one wire.
+        var vector = known ?? Replica.VersionVector.ToDictionary(
+            entry => ReplicaIdConversion.ToGuid(entry.Key),
+            entry => (long)entry.Value);
+
+        return Connection.InvokeAsync(
+            "AcknowledgeAsync", vector, TestContext.Current.CancellationToken);
+    }
+
     /// <summary>Submits into a document or as a replica this client is not bound to.</summary>
     public Task<SubmitResult> SubmitAsAsync(Guid documentId, Guid replicaId, byte[] operations) =>
         Connection.InvokeAsync<SubmitResult>(

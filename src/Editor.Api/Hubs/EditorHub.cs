@@ -29,6 +29,7 @@ public sealed partial class EditorHub : Hub
     private readonly DocumentConnections _connections;
     private readonly IConnectTicketStore _tickets;
     private readonly IUserConnections _userConnections;
+    private readonly IServiceScopeFactory _scopes;
     private readonly IDocumentRoles _roles;
     private readonly IngestValidator _validator;
     private readonly IOperationRateLimiter _rateLimits;
@@ -44,6 +45,7 @@ public sealed partial class EditorHub : Hub
         DocumentConnections connections,
         IConnectTicketStore tickets,
         IUserConnections userConnections,
+        IServiceScopeFactory scopes,
         IDocumentRoles roles,
         IngestValidator validator,
         IOperationRateLimiter rateLimits,
@@ -58,6 +60,7 @@ public sealed partial class EditorHub : Hub
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(tickets);
         ArgumentNullException.ThrowIfNull(userConnections);
+        ArgumentNullException.ThrowIfNull(scopes);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(validator);
         ArgumentNullException.ThrowIfNull(rateLimits);
@@ -72,6 +75,7 @@ public sealed partial class EditorHub : Hub
         _connections = connections;
         _tickets = tickets;
         _userConnections = userConnections;
+        _scopes = scopes;
         _roles = roles;
         _validator = validator;
         _rateLimits = rateLimits;
@@ -288,6 +292,102 @@ public sealed partial class EditorHub : Hub
     }
 
     /// <summary>
+    /// Records what this replica holds, so the stability frontier can move
+    /// (PROJECT_SPEC.md §5).
+    /// </summary>
+    /// <param name="known">
+    /// The version vector below which this client holds every operation, with
+    /// no gaps. A prefix, never a maximum: §8 makes broadcast unordered, and
+    /// reporting the highest thing seen would mark stable an operation someone
+    /// is still missing.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <strong>A method of its own, and that is the point of it.</strong> The
+    /// same vector is recorded on catch-up and on every submission, and both of
+    /// those are attached to <em>doing</em> something. A viewer submits nothing
+    /// and catches up once, so under those two paths alone its acknowledgement
+    /// freezes at the moment it connected — and one person reading a document
+    /// holds the frontier still for as long as their tab is open, with no error
+    /// anywhere and GC quietly reclaiming nothing. §13.32, third occurrence: a
+    /// signal attached to an action covers only the principals who take it.
+    /// </para><para>
+    /// Answered with nothing. A client that cannot tell whether its
+    /// acknowledgement landed loses nothing by it — the next one supersedes it,
+    /// and the frontier only ever moves forward.
+    /// </para>
+    /// </remarks>
+    public async Task AcknowledgeAsync(Dictionary<Guid, long> known)
+    {
+        ArgumentNullException.ThrowIfNull(known);
+
+        if (!TryGetBinding(out var binding))
+        {
+            return;
+        }
+
+        // No role check, deliberately, and it is worth saying why rather than
+        // leaving it to be noticed. This reports what the caller already holds
+        // and returns nothing; a revoked member calling it learns nothing they
+        // did not have and changes nothing they could not already change by
+        // holding their socket open. The membership sweep is what closes that
+        // socket (§7).
+        await RecordAcknowledgementAsync(binding, known).ConfigureAwait(false);
+    }
+
+    /// <summary>Writes an acknowledgement through a scoped context.</summary>
+    private async Task RecordAcknowledgementAsync(
+        ConnectionBinding binding, Dictionary<Guid, long> known)
+    {
+        if (known.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var next in known.Values)
+        {
+            // A negative sequence would be stored and then compared as a
+            // minimum, dragging the frontier below zero and marking nothing
+            // stable forever. Refused silently: this method has no answer, and
+            // a malformed acknowledgement from a client that is otherwise
+            // working is not worth closing a connection over.
+            if (next < 0)
+            {
+                return;
+            }
+        }
+
+        // NEXT EXPECTED on the wire, HIGHEST HELD in the frontier, and the
+        // conversion is here because getting it wrong is unrecoverable in one
+        // direction. A vector saying "next is 5" means this replica holds 0..4;
+        // storing 5 would claim it holds an operation it has not seen, and the
+        // minimum would mark that operation stable while somebody is still
+        // waiting for it — after which GC may collect what it references. An
+        // entry of 0 means nothing held from that author and contributes no
+        // entry at all rather than -1.
+        var held = new Dictionary<Guid, long>(known.Count);
+        foreach (var (author, next) in known)
+        {
+            if (next > 0)
+            {
+                held[author] = next - 1;
+            }
+        }
+
+        if (held.Count == 0)
+        {
+            return;
+        }
+
+        await using var scope = _scopes.CreateAsyncScope();
+        var frontier = scope.ServiceProvider.GetRequiredService<IStabilityFrontier>();
+
+        await frontier
+            .AcknowledgeAsync(binding.DocumentId, binding.ReplicaId, held, CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// What this connection has missed, given what it already has.
     /// </summary>
     /// <param name="known">
@@ -337,6 +437,12 @@ public sealed partial class EditorHub : Hub
 
             vector[ReplicaIdConversion.FromGuid(replica)] = (ulong)next;
         }
+
+        // Piggybacked: a client asking to catch up has just told us exactly
+        // what it holds, and recording it costs one write it was already
+        // paying for. Not sufficient on its own — a viewer catches up once —
+        // which is what AcknowledgeAsync exists for.
+        await RecordAcknowledgementAsync(binding, known).ConfigureAwait(false);
 
         var caught = await _catchUp
             .ReadAsync(binding.DocumentId, vector, forceSnapshot, Context.ConnectionAborted)

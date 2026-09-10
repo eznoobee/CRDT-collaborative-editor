@@ -1,5 +1,8 @@
+using System.Text.Json;
 using Editor.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Editor.Infrastructure.Persistence;
 
@@ -23,6 +26,46 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
     public DbSet<DocumentOperationRow> DocumentOperations => Set<DocumentOperationRow>();
 
     public DbSet<DocumentSnapshotRow> DocumentSnapshots => Set<DocumentSnapshotRow>();
+
+    /// <summary>
+    /// Serialises a version vector to jsonb by name, rather than opting the
+    /// whole data source into dynamic JSON.
+    /// </summary>
+    /// <remarks>
+    /// Npgsql refuses to write an arbitrary <c>Dictionary</c> to a jsonb
+    /// parameter unless <c>EnableDynamicJson</c> is called, and that call is a
+    /// global opt-in: it turns on reflection-based serialisation for every type
+    /// this data source ever writes, not for the two columns that need it.
+    /// §13.29's rule — name the specific thing you are trusting, never widen
+    /// the class — makes this the narrower choice, and it costs one converter.
+    /// </remarks>
+    private static readonly ValueConverter<Dictionary<Guid, long>, string> VersionVectorConverter =
+        new(
+            vector => JsonSerializer.Serialize(vector, VersionVectorJson),
+            json => JsonSerializer.Deserialize<Dictionary<Guid, long>>(json, VersionVectorJson)
+                ?? new Dictionary<Guid, long>());
+
+    /// <summary>
+    /// Compares and clones version vectors by value.
+    /// </summary>
+    /// <remarks>
+    /// A converted mutable reference type is compared by reference unless it is
+    /// told otherwise, so EF would miss every in-place change to a vector and
+    /// silently save nothing. The snapshot clone matters for the same reason:
+    /// without it the "original" value is the same object as the current one,
+    /// and nothing ever looks modified.
+    /// </remarks>
+    private static readonly ValueComparer<Dictionary<Guid, long>> VersionVectorComparer =
+        new(
+            (left, right) => left != null && right != null
+                ? left.Count == right.Count && !left.Except(right).Any()
+                : left == right,
+            vector => vector.Aggregate(
+                0,
+                (hash, entry) => HashCode.Combine(hash, entry.Key, entry.Value)),
+            vector => new Dictionary<Guid, long>(vector));
+
+    private static readonly JsonSerializerOptions VersionVectorJson = new(JsonSerializerDefaults.Web);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -52,6 +95,14 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
             entity.Property(e => e.CreatedAt).HasColumnName("created_at");
             entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
             entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
+
+            // §5's watermark. Read on the ingest path to decide resync_required
+            // and written only by the frontier job, so it lives beside the
+            // document rather than in a table needing a join per submission.
+            entity.Property(e => e.StabilityFrontier)
+                .HasColumnName("stability_frontier")
+                .HasColumnType("jsonb")
+                .HasConversion(VersionVectorConverter, VersionVectorComparer);
         });
 
         modelBuilder.Entity<DocumentMember>(entity =>
@@ -80,6 +131,16 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
             entity.Property(e => e.LastSeenAt).HasColumnName("last_seen_at");
             entity.Property(e => e.OperationCount).HasColumnName("operation_count");
             entity.Property(e => e.RetiredAt).HasColumnName("retired_at");
+
+            // jsonb rather than a side table. It is read once per frontier
+            // computation and written once per acknowledgement, always whole
+            // and always by primary key — there is no query that wants its
+            // entries individually, and a table would add a join to every
+            // frontier computation to buy nothing.
+            entity.Property(e => e.Acknowledged)
+                .HasColumnName("acknowledged")
+                .HasColumnType("jsonb")
+                .HasConversion(VersionVectorConverter, VersionVectorComparer);
         });
 
         modelBuilder.Entity<DocumentOperationRow>(entity =>
