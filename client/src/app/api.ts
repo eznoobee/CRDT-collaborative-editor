@@ -111,6 +111,18 @@ export class DocumentApi {
 }
 
 async function detailOf(response: Response): Promise<string> {
+  // §7's document-API rate limit. Its body carries a code rather than a
+  // problem document, so without this line the reader gets "The server
+  // answered 429" — technically surfaced and useless, which is the half of
+  // §13.13 that is easy to satisfy and easy to fail. The recovery is waiting,
+  // so the sentence says to wait.
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get('retry-after'));
+    return Number.isFinite(seconds) && seconds > 0
+      ? `Too many requests. Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`
+      : 'Too many requests. Wait a moment and try again.';
+  }
+
   const text = await response.text().catch(() => '');
   if (text === '') {
     return `The server answered ${response.status}.`;

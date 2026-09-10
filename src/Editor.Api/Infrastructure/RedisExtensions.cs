@@ -95,9 +95,27 @@ public static class RedisExtensions
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
+        // One window implementation behind both of §7's rate limits. The unit
+        // differs — code points here, requests on the document API — and
+        // nothing else does.
+        services.AddSingleton(provider => new RedisFixedWindow(
+            provider.GetRequiredService<IConnectionMultiplexer>()));
+
         services.AddSingleton<IOperationRateLimiter>(provider => new RedisOperationRateLimiter(
-            provider.GetRequiredService<IConnectionMultiplexer>(),
+            provider.GetRequiredService<RedisFixedWindow>(),
             provider.GetRequiredService<IOptions<RateLimitOptions>>().Value));
+
+        // §7's document-API limits (register row 22). Same window, requests
+        // rather than code points.
+        services.AddOptions<DocumentApiRateLimitOptions>()
+            .BindConfiguration(DocumentApiRateLimitOptions.Section)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        services.AddSingleton<IDocumentApiRateLimiter>(provider =>
+            new RedisDocumentApiRateLimiter(
+                provider.GetRequiredService<RedisFixedWindow>(),
+                provider.GetRequiredService<IOptions<DocumentApiRateLimitOptions>>().Value));
 
         services.AddHostedService<ReplicaClaimRenewal>();
 

@@ -1353,6 +1353,28 @@ Treat every one of these as a hard requirement with a corresponding test.
   in this specification forbade — the spec was incomplete rather than the
   implementation. Units here are requests per interval, since a REST call has no
   natural size.
+
+  **Applied to the route group, not to the three endpoints that write.** A limit
+  added by hand to each write endpoint is 5b.4's shape — a control applied to
+  the endpoints someone remembered — and the failure is silent, because an
+  endpoint nobody thought of looks exactly like an endpoint that does not need
+  it. On the group, the next write endpoint added to that file is limited before
+  its author has considered the question. The filter charges by method, so the
+  test drives *every* write route past the budget rather than one of them.
+
+  **Charged before the handler decides.** A loop of calls that will all be
+  refused with 404 still costs a role lookup and a Postgres round trip each, so
+  a limit that only counted the calls reaching a write would leave the cheapest
+  abuse unbounded.
+
+  **Reads are excluded deliberately**, and the exclusion is asserted rather than
+  assumed: a test drives a read well past the write budget and expects it to
+  answer. "Reads are excluded on purpose" and "reads were forgotten" look
+  identical in the code, and only one of them is a decision.
+
+  **`negotiate` is not covered by this limit** and is not an omission: the
+  resource it consumes is a connection, not a row, and §7's per-user connection
+  cap is what bounds it.
 - Connection limits per user. Reject new connections past the cap.
 
   Distinct from the per-document replica cap, which already exists. The two are
@@ -2151,7 +2173,7 @@ written, not done).
 | 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
 | 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
-| 22 | Rate limiting on the document API | **6b** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; the limit follows | §7 |
+| 22 | Rate limiting on the document API | **6b — CLOSED** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; 6b.6 applied it to the route group rather than to the three endpoints that write, charged before the handler decides | §7 |
 | 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
 | 24 | The redaction sentinel driven through the document API | **7** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
 | 25 | The seeded-documents rule enforced on the C# harness too | **7** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
+using Editor.Infrastructure.Ingest;
 using Editor.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
@@ -73,7 +74,24 @@ public static class DocumentsEndpoints
         // grant path rather than by reading it.
         endpoints.MapGet("/me", WhoAsync).RequireAuthorization();
 
+        // §7's document-API rate limit, on the GROUP rather than on the three
+        // endpoints that write (register row 22).
+        //
+        // Applied here so it cannot be forgotten. A limit added to each write
+        // endpoint by hand is the shape 5b.4 already produced once — a control
+        // applied to the endpoints someone remembered — and the failure is
+        // silent, because an endpoint nobody thought of looks exactly like an
+        // endpoint that does not need it. On the group, the next write endpoint
+        // added to this file is limited before its author has thought about it.
+        //
+        // The filter charges by method, so the reads pass through unbilled;
+        // that is §7's list and the reasoning is in DocumentApiRateLimitOptions.
+        //
+        // negotiate is not in this group and is not covered here. It is capped
+        // by §7's per-user connection limit instead, which is the right limit
+        // for it — the resource it consumes is a connection, not a row.
         var documents = endpoints.MapGroup("/documents").RequireAuthorization();
+        documents.AddEndpointFilter(DocumentWriteRateLimitAsync);
 
         documents.MapPost("/", CreateAsync);
         documents.MapGet("/", ListAsync);
@@ -83,6 +101,70 @@ public static class DocumentsEndpoints
         documents.MapDelete("/{documentId:guid}/members/{memberId:guid}", RevokeAsync);
 
         return endpoints;
+    }
+
+    /// <summary>
+    /// Charges §7's document-API budget for a request that writes.
+    /// </summary>
+    /// <remarks>
+    /// Before the handler and before authorization has been evaluated against
+    /// the target document, deliberately: a loop of calls that will all be
+    /// refused with 404 still costs a role lookup and a Postgres round trip
+    /// each, so a limit that only counted the calls that got as far as writing
+    /// would leave the cheapest attack unbounded. The caller must still be
+    /// authenticated — the budget is per user, and there is nobody to charge
+    /// otherwise.
+    /// </remarks>
+    private static async ValueTask<object?> DocumentWriteRateLimitAsync(
+        EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var method = context.HttpContext.Request.Method;
+        var writes = HttpMethods.IsPost(method)
+            || HttpMethods.IsPut(method)
+            || HttpMethods.IsDelete(method)
+            || HttpMethods.IsPatch(method);
+
+        if (!writes)
+        {
+            return await next(context).ConfigureAwait(false);
+        }
+
+        var users = context.HttpContext.RequestServices.GetRequiredService<CurrentUser>();
+        var userId = await users
+            .ResolveAsync(context.HttpContext.User, context.HttpContext.RequestAborted)
+            .ConfigureAwait(false);
+
+        if (userId is null)
+        {
+            // Not this filter's refusal to make. The handler answers an
+            // unidentifiable caller with §7's 404, and answering differently
+            // here would leak that the route exists.
+            return await next(context).ConfigureAwait(false);
+        }
+
+        var limits = context.HttpContext.RequestServices
+            .GetRequiredService<IDocumentApiRateLimiter>();
+
+        var budget = await limits
+            .ChargeWriteAsync(userId.Value, context.HttpContext.RequestAborted)
+            .ConfigureAwait(false);
+
+        if (budget.Allowed)
+        {
+            return await next(context).ConfigureAwait(false);
+        }
+
+        // Retry-After in seconds, per RFC 9110. The hub's throttle carries
+        // milliseconds in its own field because it answers a client that
+        // resubmits a batch; this answers an HTTP caller, and the header is
+        // what an HTTP caller already knows how to read.
+        context.HttpContext.Response.Headers.RetryAfter =
+            ((int)Math.Ceiling(budget.RetryAfter.TotalSeconds))
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return TypedResults.Json(
+            new { code = IngestRejection.RateLimited },
+            statusCode: StatusCodes.Status429TooManyRequests);
     }
 
     private static async Task<IResult> CreateAsync(

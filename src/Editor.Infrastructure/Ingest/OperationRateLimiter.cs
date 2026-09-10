@@ -1,5 +1,3 @@
-using StackExchange.Redis;
-
 namespace Editor.Infrastructure.Ingest;
 
 /// <summary>What a rate-limit check answers.</summary>
@@ -51,24 +49,16 @@ public interface IOperationRateLimiter
 /// </remarks>
 public sealed class RedisOperationRateLimiter : IOperationRateLimiter
 {
-    private const string ChargeScript = """
-        local total = redis.call('INCRBY', KEYS[1], ARGV[1])
-        if total == tonumber(ARGV[1]) then
-          redis.call('PEXPIRE', KEYS[1], ARGV[2])
-        end
-        local ttl = redis.call('PTTL', KEYS[1])
-        return {total, ttl}
-        """;
 
-    private readonly IConnectionMultiplexer _redis;
+    private readonly RedisFixedWindow _window;
     private readonly RateLimitOptions _options;
 
-    public RedisOperationRateLimiter(IConnectionMultiplexer redis, RateLimitOptions options)
+    public RedisOperationRateLimiter(RedisFixedWindow window, RateLimitOptions options)
     {
-        ArgumentNullException.ThrowIfNull(redis);
+        ArgumentNullException.ThrowIfNull(window);
         ArgumentNullException.ThrowIfNull(options);
 
-        _redis = redis;
+        _window = window;
         _options = options;
     }
 
@@ -107,32 +97,6 @@ public sealed class RedisOperationRateLimiter : IOperationRateLimiter
         return new RateLimitDecision(false, wait);
     }
 
-    private async Task<(long Total, TimeSpan Ttl)> ChargeOneAsync(string key, int codePoints)
-    {
-        var result = (RedisResult[]?)await _redis.GetDatabase()
-            .ScriptEvaluateAsync(
-                ChargeScript,
-                [key],
-                [codePoints, (long)_options.Interval.TotalMilliseconds])
-            .ConfigureAwait(false);
-
-        if (result is null || result.Length < 2)
-        {
-            // The script always returns two values, so this is unreachable
-            // short of a Redis fault. Refusing the submission on a fault would
-            // make a Redis blip look like abuse to the user; charging nothing
-            // and allowing it keeps typing working, and §7's other checks are
-            // unaffected. Stated because "fail open" is a choice that has to
-            // be a deliberate one.
-            return (0, _options.Interval);
-        }
-
-        var total = (long)result[0];
-        var ttl = (long)result[1];
-
-        // A negative TTL means no expiry was observed, which the script makes
-        // impossible on the creating increment; fall back to the full interval
-        // rather than telling a client to retry immediately.
-        return (total, ttl > 0 ? TimeSpan.FromMilliseconds(ttl) : _options.Interval);
-    }
+    private async Task<WindowCharge> ChargeOneAsync(string key, int codePoints) =>
+        await _window.ChargeAsync(key, codePoints, _options.Interval).ConfigureAwait(false);
 }
