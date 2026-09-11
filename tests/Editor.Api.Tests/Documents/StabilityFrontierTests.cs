@@ -262,8 +262,17 @@ public sealed class StabilityFrontierTests
         // It matters for one element per author and it is not benign: the
         // window is between a replica appearing and its first catch-up landing,
         // which is exactly when a reconnecting client is holding offline state
-        // the server cannot see. Next-expected form removes it, and this test
-        // fails if anyone reintroduces the conversion.
+        // the server cannot see.
+        //
+        // What this test pins is the invariant, not the arithmetic: in
+        // next-expected form a dropped entry and a stored zero mean the same
+        // thing, so the old habit of dropping zeros is harmless here and this
+        // test cannot see it. The two halves that make the old pairing
+        // impossible are pinned elsewhere, deliberately —
+        // A_viewer_who_only_reads_does_not_hold_the_frontier_still fails if the
+        // hub converts on the way in, and Crdt.Core's
+        // Collect_treats_the_frontier_as_strictly_exclusive fails if the
+        // comparison stops being strict. Neither half is reintroducible alone.
         _fixture.RequireBoth();
         await using var factory = new EditorApiFactory(_fixture);
 

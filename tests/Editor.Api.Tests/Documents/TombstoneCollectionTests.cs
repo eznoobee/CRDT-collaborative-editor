@@ -203,27 +203,32 @@ public sealed class TombstoneCollectionTests
         // excluded because representation is exactly what collection changes;
         // `text` and `versionVector` are the meaning, and they may not move.
         //
-        // The continuation is not decoration. Before it, two replicas agree
-        // trivially — they have applied the same operations and neither has had
-        // to decide where anything new goes. Collection can only be wrong once
-        // something attaches near where the tombstones were, because what a
-        // tombstone is FOR is being named by a later insert. So the continuation
-        // includes the case rule 4 exists for: an insert at the end of the
-        // visible text, whose right origin is the retained leading tombstone of
-        // the collected run. Had the leader gone, the collected replica would
-        // name a different right origin from the control, and the two would
-        // order a concurrent insert differently ever after.
+        // THE CONTINUATION HAS TO BE CONCURRENT, and the first version of this
+        // test was not. Generating one operation on the collected replica and
+        // applying that same operation to the control is transparent by
+        // construction: whatever right origin the collected replica computed,
+        // the control simply accepts. Deleting rule 4 outright left that
+        // version green. What a right origin is FOR is ordering an insert
+        // against a competing one, so the two replicas have to each compose an
+        // insert at the same position, from their own view, and then exchange.
+        //
+        // If the retained leading tombstone were collected, the collected
+        // replica would name end-of-document as its right origin while the
+        // uncollected one names the tombstone, and the two would interleave the
+        // pair differently — permanent divergence, converged, with no error
+        // anywhere.
         _fixture.RequireBoth();
         await using var factory = new EditorApiFactory(_fixture);
 
         var documentId = await CollectableDocumentAsync(factory, "owner-headline", "typist-headline");
 
-        // The control: the document as a replica that never collected sees it,
-        // taken before collection and kept for the rest of the test.
-        var control = await ReplayAsync(factory, documentId);
-
         var collected = await CollectAsync(factory, documentId);
         Assert.Equal(7, collected);
+
+        // The peer that never collected: a replica that was already online and
+        // has no reason to resync, rebuilt from the log with an identity of its
+        // own so it can author.
+        var uncollected = await ReplayAsync(factory, documentId, Guid.CreateVersion7());
 
         // A client that joins now and resyncs from a snapshot holds the
         // COLLECTED state — it has never seen the elements that went.
@@ -232,24 +237,24 @@ public sealed class TombstoneCollectionTests
         latecomer.ApplyCatchUp(await latecomer.CatchUpAsync(forceSnapshot: true));
 
         Assert.True(
-            latecomer.Replica.AllIds.Count < control.AllIds.Count,
+            latecomer.Replica.AllIds.Count < uncollected.AllIds.Count,
             "the latecomer resynced to a snapshot that had not been collected");
 
-        // Two inserts: one at the very end of the visible text, whose right
-        // origin is the retained tombstone, and one in the middle, which is the
-        // ordinary case that must not regress.
-        var appended = latecomer.Replica.Insert(latecomer.Replica.Values.Count, new Rune('!'));
-        var inserted = latecomer.Replica.Insert(3, new Rune('Z'));
+        // Both append at the end of the visible text, each from its own view,
+        // with no knowledge of the other. This is the position where the
+        // collected run was, so it is where a right origin has to agree.
+        var fromCollected = latecomer.Replica.Insert(
+            latecomer.Replica.Values.Count, new Rune('!'));
+        var fromUncollected = uncollected.Insert(uncollected.Values.Count, new Rune('?'));
 
-        var batch = OperationBinary.Encode([appended, inserted]);
-        Assert.Null((await latecomer.SubmitAsync(batch)).Code);
+        Assert.Null((await latecomer.SubmitAsync(OperationBinary.Encode([fromCollected]))).Code);
 
-        // The same operations reach the replica that never collected.
-        control.Apply(appended);
-        control.Apply(inserted);
+        // And exchange.
+        uncollected.Apply(fromCollected);
+        latecomer.Replica.Apply(fromUncollected);
 
         var collectedForm = SnapshotSerializer.Serialize(latecomer.Replica);
-        var controlForm = SnapshotSerializer.Serialize(control);
+        var controlForm = SnapshotSerializer.Serialize(uncollected);
 
         // The exclusion is only meaningful if the excluded field actually
         // differs; otherwise this passes over a collector that collected
@@ -376,7 +381,8 @@ public sealed class TombstoneCollectionTests
     /// because that starts from the latest snapshot — which is the thing
     /// collection has just changed.
     /// </remarks>
-    private static async Task<Replica> ReplayAsync(EditorApiFactory factory, Guid documentId)
+    private static async Task<Replica> ReplayAsync(
+        EditorApiFactory factory, Guid documentId, Guid? asReplica = null)
     {
         await using var scope = factory.Services.CreateAsyncScope();
         var context = scope.ServiceProvider.GetRequiredService<EditorDbContext>();
@@ -386,7 +392,7 @@ public sealed class TombstoneCollectionTests
             .OrderBy(row => row.ServerSeq)
             .ToListAsync(TestContext.Current.CancellationToken);
 
-        var replica = new Replica(ReplicaIdConversion.FromGuid(documentId));
+        var replica = new Replica(ReplicaIdConversion.FromGuid(asReplica ?? documentId));
         foreach (var row in rows)
         {
             replica.Apply(OperationMapper.FromRow(row));

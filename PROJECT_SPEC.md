@@ -597,6 +597,51 @@ being wrong destroys data silently, convergently, and everywhere at once, and it
 is the reason §5's four collection rules are stated as necessary conditions
 rather than as a heuristic.
 
+**The continuation must also be concurrent, and this clause was written after
+the first version of the test was found to be vacuous.** Composing one operation
+on the collected replica and applying that same operation to the uncollected one
+proves nothing: whatever right origin the collected replica computed, the other
+simply accepts. Deleting rule 4 outright left that comparison green. A right
+origin exists to order an insert *against a competing one*, so the two replicas
+must each compose an insert at the same position from their own view and then
+exchange. With rule 4 removed and the comparison made concurrent, the collected
+replica names end-of-document where the uncollected one names the retained
+tombstone, and the resulting operation cannot be applied at all — observed as
+`"collect m!"` against `"collect m?!"`.
+
+#### What collection actually reclaims, which is less than it sounds
+
+Rule 2 (a collectable element must be a leaf) combines with the tree a text
+editor produces to make **a tombstone in the middle of forward-typed text
+uncollectable, permanently.** Typing left to right makes each character the right
+child of the previous one, so the document is a chain; a deleted character in the
+middle still has a visible right child hanging off it, is therefore not a leaf,
+and remains as a structural placeholder. Only a *trailing* run collects, from the
+tail inwards, down to the run's leader.
+
+That is correct behaviour and it is not a defect to be fixed by relaxing rule 2
+— the placeholder is what keeps a concurrent insert ordering the same way on
+every replica. It is recorded here because the consequence is easy to miss and
+expensive to discover later: **deleting a word from the middle of a paragraph,
+the most ordinary editing action there is, reclaims nothing.** Every collection
+test written before this clause deleted from the end of the document, so the
+suite could not distinguish "GC works" from "GC works on the one shape we
+happened to test", and 7b would have gone on to measure a reclamation rate that
+does not occur in use. 7b measures against realistic edit traces or it measures
+nothing; whether the payload of a placeholder tombstone can be dropped while its
+position is kept is a 7b question, on evidence.
+
+#### Nothing writes a periodic snapshot
+
+§6 says a snapshot is taken every 500 operations. `SnapshotPolicy` and
+`DocumentStore.SaveSnapshotAsync` exist and are correct; **nothing in the running
+server calls either.** They are reachable only from tests, so a document is
+always rebuilt by full replay of its log, and the collector's own write is
+currently the only snapshot the product ever stores. This is a §13.40 instance
+at the level of a whole subsystem — the policy was specified, implemented, and
+never installed — and it is carried as a register row rather than fixed here,
+because wiring it changes the load characteristics §8 is measured against.
+
 `T_retire` therefore also bounds offline editing. See §9.
 
 ### Required invariants
@@ -2316,6 +2361,8 @@ written, not done).
 | 25 | The seeded-documents rule enforced on the C# harness too | **7b** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
 | 27 | A largest-legitimate-use test for every configured limit | **7 and 7b** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration. **Split deliberately: `T_retire` and the GC watermark belong to Phase 7**, because they are new numbers introduced there and §13.37 says their own tests will pass at any value — and a `T_retire` that retires a replica whose owner is at lunch is data loss, not a tuning complaint. The other thirteen are 7b | §13.37, §12 |
 | 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7b** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
+| 28 | §6's periodic snapshot is never taken | **7b** | Found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause cannot arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` are implemented and correct, and nothing in `src/` calls either: every document is rebuilt by full replay of its log, and the collector's write is the only snapshot the product stores. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
+| 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -2459,7 +2506,7 @@ reach it" invites fixing the test. Prefer the second until the setup has been
 shown to exercise the path — a surviving sabotage is evidence about the test
 first and about the code only after that.
 
-### Two questions to ask of every mechanism
+### Three questions to ask of every mechanism
 
 Both come from patterns that have now recurred often enough to stop being
 observations and become things to check for. Ask them while proposing the work,
@@ -2492,6 +2539,15 @@ every time.
 driven by a timer, a hosted service, or a background sweep, at least one test
 must exercise it with **nobody calling it**: arrange the state, move the clock,
 and require the mechanism's own counter to move on its own.
+
+**3. In this comparison, does each side decide for itself?** (§13.42.) For any
+test that asserts two things agree — two implementations, two replicas, two
+encodings of the same state — check that neither side's answer was copied,
+adopted, or delivered from the other. 7.3's transparency test composed its
+continuation on the collected replica and handed the result to the control,
+which made agreement true by construction: it passed with the rule it existed to
+protect deleted from the code. The repair is to ask what the mechanism is *for*
+and make both sides exercise it independently.
 
 ### Name the vacuity risk before writing the test
 
@@ -4903,3 +4959,40 @@ The general form is one level up from §13.19. That entry is about a guard whose
 sound and whose *trigger* is missing — and the two are indistinguishable from a
 green run, because both produce a passing test over a mechanism that never runs
 in production.
+
+### 13.42 A differential test is vacuous when one side is derived from the other
+
+7.3's headline property is that a collected replica and one that never collected
+agree. The first version of the test produced the continuation *on the collected
+replica* and applied the resulting operation to the control. It passed. It also
+passed with §5's rule 4 deleted from `Replica.Collect` — the rule whose entire
+purpose is to keep that comparison honest — and it was the count assertion beside
+it, not the comparison, that went red.
+
+The reason generalises past GC. **A comparison between two implementations, two
+replicas or two states is only a comparison while both sides decide
+independently.** The collected replica computed a right origin from its own view;
+the control was handed that answer and had nothing left to decide. Transparency
+was true by construction, so the test could not have failed, and it had exactly
+the shape §13.19 describes: a sound-looking assertion over an input that cannot
+disagree with it.
+
+The fix is to ask what the thing under test is *for*. A right origin exists to
+order an insert against a competing one, so the continuation has to be
+concurrent: each replica composes an insert at the same position from its own
+view, and then they exchange. Made concurrent, the sabotage is caught
+immediately, and caught in the strongest available form — the operation naming
+the over-collected tombstone cannot be applied at all, so the texts differ
+outright rather than subtly.
+
+The question to ask, next to §13.41's:
+
+> **In this comparison, does each side decide for itself?** If one side's answer
+> is copied, adopted, or delivered from the other, the test is asserting that
+> assignment works.
+
+It is worth noting where this was caught: not by writing the test, and not by
+running it, but by running the sabotage. Both of the last two entries were found
+that way. A test written to check a property and a test that can fail to check it
+look identical in a green run, and the sabotage is the only routine step that
+distinguishes them.

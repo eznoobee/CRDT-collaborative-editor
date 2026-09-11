@@ -120,6 +120,63 @@ public sealed class SnapshotTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task A_collected_snapshot_replaces_an_uncollected_one_at_the_same_sequence()
+    {
+        fixture.RequireDatabase();
+
+        // The periodic snapshot and the collector can both land on the same
+        // server_seq, and they do not carry the same state. The periodic write
+        // is ON CONFLICT DO NOTHING, which is right for it — two instances
+        // crossing the threshold together agree, so the loser has nothing to
+        // add — and would be wrong for the collector, whose whole purpose is to
+        // put DIFFERENT state at that sequence. Skipping it leaves the
+        // collector's count describing bytes that were never written.
+        //
+        // Reachable only from here today: nothing in the running server calls
+        // SaveSnapshotAsync at all, so §6's every-500-operations policy never
+        // fires and the conflict cannot arise through the product. That is
+        // recorded as a gap rather than a reason to leave the contract
+        // untested, because the collector's write is currently the ONLY
+        // snapshot the product ever stores.
+        var documentId = PostgresFixture.NewDocumentId();
+        var writer = new OperationLogWriter(fixture.DataSource);
+        var store = new DocumentStore(fixture.DataSource);
+
+        var source = new Replica(Replica(1));
+        var operations = Type(source, "abcdef");
+        operations.Add(source.Delete(5));
+        operations.Add(source.Delete(4));
+        operations.Add(source.Delete(3));
+
+        var appended = await writer.AppendAsync(
+            documentId, operations, TestContext.Current.CancellationToken);
+
+        await store.SaveSnapshotAsync(
+            documentId, source, appended.HighestServerSeq, TestContext.Current.CancellationToken);
+
+        var uncollected = source.AllIds.Count;
+
+        var collected = await store.LoadForCollectionAsync(
+            documentId, Replica(9), TestContext.Current.CancellationToken);
+
+        Assert.True(collected.Replica.Collect(source.VersionVector) > 0, "nothing was collectable");
+
+        await store.SaveCollectedSnapshotAsync(
+            documentId,
+            collected.Replica,
+            collected.ServerSeq,
+            TestContext.Current.CancellationToken);
+
+        var reloaded = await store.LoadAsync(
+            documentId, Replica(9), TestContext.Current.CancellationToken);
+
+        Assert.True(
+            reloaded.AllIds.Count < uncollected,
+            $"the stored snapshot still holds {reloaded.AllIds.Count} of {uncollected} elements");
+        Assert.Equal(source.Text, reloaded.Text);
+    }
+
+    [Fact]
     public void Snapshot_serialisation_round_trips()
     {
         var source = new Replica(Replica(1));
