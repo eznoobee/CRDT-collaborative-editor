@@ -205,8 +205,9 @@ public sealed class DocumentClient : IAsyncDisposable
     public Task AcknowledgeAsync(Dictionary<Guid, long>? known = null)
     {
         // The same shape catch-up sends: per replica, the NEXT sequence
-        // expected. The server converts to "highest held"; sending the
-        // converted form here would leave two conventions on one wire.
+        // expected. The server stores it unchanged — §5 keeps one convention
+        // on the wire and in the frontier precisely so there is no conversion
+        // to get wrong at zero.
         var vector = known ?? Replica.VersionVector.ToDictionary(
             entry => ReplicaIdConversion.ToGuid(entry.Key),
             entry => (long)entry.Value);

@@ -60,6 +60,23 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
         """;
 
     /// <summary>
+    /// The collector's write. <c>DO NOTHING</c> is right for the periodic
+    /// snapshot — two servers crossing the threshold together agree, so the
+    /// loser has nothing to add — and wrong here: collection produces a
+    /// <em>different</em> snapshot at the same sequence, and skipping the write
+    /// would leave the collector reporting elements it did not remove. The
+    /// count and the bytes have to move together or the count is a lie.
+    /// </summary>
+    private const string ReplaceSnapshot = """
+        INSERT INTO document_snapshots (document_id, server_seq, state, version_vector, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (document_id, server_seq) DO UPDATE
+        SET state = EXCLUDED.state,
+            version_vector = EXCLUDED.version_vector,
+            created_at = EXCLUDED.created_at;
+        """;
+
+    /// <summary>
     /// Rebuilds a document: the latest snapshot, then every operation after it.
     /// </summary>
     public async Task<Replica> LoadAsync(
@@ -84,12 +101,92 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
         return replica;
     }
 
+    /// <summary>
+    /// Rebuilds a document for collection, answering the sequence it reached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Collection runs against the full replay, never against a stored
+    /// snapshot in place.</strong> <see cref="LoadAsync"/> applies every
+    /// operation after the latest snapshot, so an element collected out of that
+    /// snapshot can still be named as a parent or right origin by an operation
+    /// already in the log behind it — and the replay that used to succeed
+    /// stops. §5's four rules say what a <em>future</em> operation may name;
+    /// they say nothing about the past, and the past is exactly what sits
+    /// between a snapshot and the head.
+    /// </para><para>
+    /// Collecting the replayed state and writing it back at the sequence the
+    /// replay reached moves that boundary to the head, where the rules do
+    /// apply. The sequence is returned rather than looked up again because the
+    /// two must be the same number: a snapshot stamped later than the state it
+    /// contains silently drops every operation in between.
+    /// </para><para>
+    /// Repeatable read for the same reason. The snapshot and the operations
+    /// after it are two queries, and a snapshot written between them by the
+    /// periodic policy would otherwise have its operations replayed twice.
+    /// </para>
+    /// </remarks>
+    public async Task<(Replica Replica, long ServerSeq)> LoadForCollectionAsync(
+        Guid documentId, ReplicaId asReplica, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = await connection
+            .BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken)
+            .ConfigureAwait(false);
+
+        var (serverSeq, replica) = await ReadSnapshotAsync(
+            connection, documentId, asReplica, cancellationToken).ConfigureAwait(false);
+
+        await using var command = new NpgsqlCommand(OperationsAfter, connection);
+        command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter { Value = serverSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
+
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var row = ReadRow(reader, documentId);
+                replica.Apply(OperationMapper.FromRow(row));
+                serverSeq = row.ServerSeq;
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return (replica, serverSeq);
+    }
+
     /// <summary>Writes a snapshot at <paramref name="serverSeq"/>.</summary>
-    public async Task SaveSnapshotAsync(
+    public Task SaveSnapshotAsync(
         Guid documentId,
         Replica replica,
         long serverSeq,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        WriteSnapshotAsync(InsertSnapshot, documentId, replica, serverSeq, cancellationToken);
+
+    /// <summary>
+    /// Writes a collected snapshot at <paramref name="serverSeq"/>, replacing
+    /// whatever is stored there.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="SaveSnapshotAsync"/> rather than a flag on it.
+    /// The two differ in whether they may overwrite state a client could
+    /// already be reading, which is the kind of difference a caller should have
+    /// to name.
+    /// </remarks>
+    public Task SaveCollectedSnapshotAsync(
+        Guid documentId,
+        Replica replica,
+        long serverSeq,
+        CancellationToken cancellationToken = default) =>
+        WriteSnapshotAsync(ReplaceSnapshot, documentId, replica, serverSeq, cancellationToken);
+
+    private async Task WriteSnapshotAsync(
+        string sql,
+        Guid documentId,
+        Replica replica,
+        long serverSeq,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(replica);
 
@@ -106,7 +203,7 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        await using var command = new NpgsqlCommand(InsertSnapshot, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
         command.Parameters.Add(new NpgsqlParameter { Value = serverSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
         command.Parameters.Add(new NpgsqlParameter

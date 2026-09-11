@@ -130,6 +130,20 @@ public static class PersistenceExtensions
         services.AddSingleton<ReplicaHeartbeat>();
         services.AddHostedService(provider => provider.GetRequiredService<ReplicaHeartbeat>());
 
+        // §5's tombstone collection. Scoped like everything else that reads
+        // Postgres through EF; the hosted service takes a scope per sweep.
+        services.AddScoped<ISnapshotGarbageCollector, SnapshotGarbageCollector>();
+
+        services.AddOptions<TombstoneCollectionOptions>()
+            .BindConfiguration(TombstoneCollectionOptions.Section)
+            .Validate(
+                options => options.BatchSize > 0,
+                "A collector with an empty batch examines no documents and reports success.")
+            .ValidateOnStart();
+
+        services.AddSingleton<TombstoneCollector>();
+        services.AddHostedService(provider => provider.GetRequiredService<TombstoneCollector>());
+
         return services;
     }
 

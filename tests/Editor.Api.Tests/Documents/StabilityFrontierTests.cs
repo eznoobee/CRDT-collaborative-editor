@@ -136,9 +136,10 @@ public sealed class StabilityFrontierTests
         Assert.Equal(0, result.Live);
         Assert.True(result.Advanced, "an abandoned document's frontier never moved");
 
-        // "gone tomorrow" is 13 code points, submitted as seq 0..12, so the
-        // highest is 12 and everything at or below it is stable.
-        Assert.Equal(12, result.Frontier[replicaId]);
+        // "gone tomorrow" is 13 code points, submitted as seq 0..12. The
+        // frontier counts operations rather than naming the highest, so
+        // "everything is stable" is 13 and not 12 (§5).
+        Assert.Equal(13, result.Frontier[replicaId]);
     }
 
     [Fact]
@@ -238,11 +239,59 @@ public sealed class StabilityFrontierTests
 
         var result = await AdvanceAsync(factory, documentId);
 
-        // Five code points, seq 0..4. The frontier reaches 4 only because the
-        // viewer said so; without its acknowledgement the minimum is whatever
-        // it held at connect, which is nothing.
+        // Five code points, seq 0..4, so a frontier of 5 says all five are
+        // held everywhere. It reaches 5 only because the viewer said so;
+        // without its acknowledgement the minimum is whatever it held at
+        // connect, which is nothing.
         Assert.True(result.Advanced, "the frontier did not move");
-        Assert.Equal(4, result.Frontier[typist.Negotiated.ReplicaId]);
+        Assert.Equal(5, result.Frontier[typist.Negotiated.ReplicaId]);
+    }
+
+    [Fact]
+    public async Task A_replica_that_acknowledges_holding_nothing_holds_the_frontier_at_nothing()
+    {
+        // THE ZERO CASE, THROUGH THE HUB, and it is a regression test for a
+        // representation rather than for a branch. The frontier used to be
+        // stored as the highest sequence held, which cannot express "holds
+        // nothing from this author": sequence numbers start at zero, so zero
+        // already means "holds (author, 0)". The conversion dropped zero
+        // entries instead, and a dropped entry reads back from the minimum as
+        // zero — the same value. The result was that the first operation of
+        // every author counted as stable while a live replica had never seen it.
+        //
+        // It matters for one element per author and it is not benign: the
+        // window is between a replica appearing and its first catch-up landing,
+        // which is exactly when a reconnecting client is holding offline state
+        // the server cannot see. Next-expected form removes it, and this test
+        // fails if anyone reintroduces the conversion.
+        _fixture.RequireBoth();
+        await using var factory = new EditorApiFactory(_fixture);
+
+        var documentId = await DocumentSetup.DocumentAsync(factory, "owner-zero");
+        await DocumentSetup.GrantAsync(factory, documentId, "author-zero", Role.Editor);
+        await DocumentSetup.GrantAsync(factory, documentId, "newcomer-zero", Role.Editor);
+
+        await using var author = await DocumentClient.JoinAsync(factory, "author-zero", documentId);
+        var typed = author.Writer.Type("x");
+        Assert.Null((await author.SubmitAsync(typed)).Code);
+        author.ApplyLocal(typed);
+        await author.AcknowledgeAsync();
+
+        // A replica that has connected and holds nothing at all. It sends the
+        // vector a real client sends before its first catch-up: its own entry
+        // at zero, and nothing from the author.
+        await using var newcomer = await DocumentClient.JoinAsync(factory, "newcomer-zero", documentId);
+        await newcomer.AcknowledgeAsync(new Dictionary<Guid, long>
+        {
+            [newcomer.Negotiated.ReplicaId] = 0,
+            [author.Negotiated.ReplicaId] = 0,
+        });
+
+        var result = await AdvanceAsync(factory, documentId);
+
+        // Zero, not one. One would mean the author's first operation is stable
+        // everywhere, which the newcomer has just said it is not.
+        Assert.Equal(0, result.Frontier[author.Negotiated.ReplicaId]);
     }
 
     private static async Task<FrontierResult> AdvanceAsync(

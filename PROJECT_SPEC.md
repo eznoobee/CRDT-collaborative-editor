@@ -496,8 +496,29 @@ The frontier is the pointwise minimum:
 > `F[s] = min over r ∈ R of A(r)[s]`, for every replica `s` that has ever
 > written to the document.
 
-An operation `(s, n)` is causally stable exactly when `n ≤ F[s]`. Rules 1–4 above
+An operation `(s, n)` is causally stable exactly when `n < F[s]`. Rules 1–4 above
 then decide collectability; stability alone never does.
+
+**The frontier is stored in next-expected form, the same form a version vector
+already has, and the strictness of that `<` is the whole reason.** `A(r)[s]` is a
+*count*: the number of operations from `s` that `r` holds, so `0` means it holds
+none of them. The tempting alternative — store the highest sequence number held,
+and test `n ≤ F[s]` — is off by one at exactly the end that matters. Sequence
+numbers start at zero, so in that form `0` means "holds `(s,0)`", and there is no
+value left for "holds nothing from `s`". A replica that has acknowledged nothing
+is then indistinguishable from one holding the first operation, and the first
+operation of every author is marked stable while a live replica has never seen
+it. Dropping the entry instead of storing a zero does not escape this: a minimum
+taken over the authors that exist must read a missing key as "holds nothing",
+which lands on the same zero.
+
+The consequence is narrow and it is not benign. It is one element per author —
+`(s,0)` — and it is collectable during the window between a replica appearing
+(negotiate writes the row with an empty acknowledgement) and its first catch-up
+landing, which is precisely when a reconnecting client holds offline state the
+server has not seen. The representation, not a guard, is what removes it:
+`Replica.Collect` tests `Seq < F[s]`, the client sends next-expected, and no
+conversion sits in between to get wrong.
 
 **`A(r)` is a prefix, not a maximum**, and the distinction is load-bearing. §8
 makes broadcast unordered, so a replica can hold `(s,105)` without `(s,100)`;
@@ -547,6 +568,34 @@ unknown id is buffered if that id is above the watermark, and **rejected with a
 structured `resync-required` response** if it is at or below it. This is the one
 case where a pending operation is dropped, and it is why §5's "do not drop"
 rule has an exception rather than a contradiction.
+
+**GC transparency, and what it is compared against.** A replica that has
+collected and one that has not must produce **identical §9 normalised form in
+every field except `elements`**, for the same trace and for any continuation
+applied afterwards. Each half of that sentence is doing work:
+
+- **`elements` is excluded because it is the representation, and representation
+  is exactly what GC changes.** Requiring it to match would make the property
+  false by definition and there would be nothing left to test.
+- **`text` and `versionVector` are the meaning, and must not move.** The version
+  vector especially: collecting an element does not un-observe it, so a GC'd
+  replica that forgets an author has lost the ability to refuse a duplicate.
+- **Comparing only `text` would be convergence, which is not the check.** A
+  collected tombstone that is still referenced resolves to nothing, and the
+  algorithm is total: the reference is simply dropped and every replica agrees
+  on text that is *wrong*. Convergence holds, the document is incorrect, and
+  nothing anywhere reports it. The comparison has to be against a replica that
+  did not collect, because only that replica knows what the text should have
+  been.
+- **The continuation is required, not optional.** Comparing two replicas at the
+  moment of collection tests nothing about the future references collection was
+  supposed to make impossible. The continuation must include an insert whose
+  right origin is a retained tombstone and one adjacent to a collected region.
+
+This is the phase's headline property. It is the one place in this system where
+being wrong destroys data silently, convergently, and everywhere at once, and it
+is the reason §5's four collection rules are stated as necessary conditions
+rather than as a heuristic.
 
 `T_retire` therefore also bounds offline editing. See §9.
 
@@ -2416,7 +2465,10 @@ Both come from patterns that have now recurred often enough to stop being
 observations and become things to check for. Ask them while proposing the work,
 beside the vacuity risk.
 
-**1. Who takes this action, and who doesn't?** (§13.32.) Any mechanism keyed on
+**1. For any mechanism keyed on an action: who is the legitimate user that
+never performs it?** (§13.32.) Phrased to have an answer rather than to prompt
+thinking — every occurrence so far has been a specific person doing something
+ordinary: three viewers who only read, and a tab that reloaded. Any mechanism keyed on
 an action — a check on submission, a signal derived from writing, a limit
 charged at connect — covers only the principals who take that action. Name the
 principal who does not, and decide deliberately whether they are covered. Four

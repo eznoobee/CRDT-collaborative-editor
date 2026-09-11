@@ -29,4 +29,16 @@ public sealed class Document
     /// every replica.
     /// </remarks>
     public Dictionary<Guid, long> StabilityFrontier { get; set; } = [];
+
+    /// <summary>When a collection sweep last examined this document.</summary>
+    /// <remarks>
+    /// Stored so a sweep that examines a bounded batch rotates through every
+    /// document rather than through the first <c>BatchSize</c> of them. Without
+    /// it the batch is stable under any fixed ordering, and the documents past
+    /// the end are never collected at all — the same shape as §13.32, with
+    /// "the document that sorts late" in place of a user who never acts.
+    /// Written on every sweep, whether or not anything was collected, because
+    /// it records that the document was looked at.
+    /// </remarks>
+    public DateTimeOffset? LastCollectedAt { get; set; }
 }

@@ -4,9 +4,10 @@ namespace Editor.Infrastructure.Persistence;
 
 /// <summary>What a frontier computation found.</summary>
 /// <param name="Frontier">
-/// Per replica, the highest sequence number every live replica is known to
-/// hold. An operation <c>(s, n)</c> is causally stable when <c>n &lt;=
-/// Frontier[s]</c>.
+/// Per replica, the number of that replica's operations every live replica is
+/// known to hold — next-expected form, as a version vector already is. An
+/// operation <c>(s, n)</c> is causally stable when <c>n &lt; Frontier[s]</c>,
+/// and <c>0</c> means nothing is held from <c>s</c> (§5).
 /// </param>
 /// <param name="Advanced">
 /// Whether this computation moved the stored frontier forward.
@@ -180,7 +181,9 @@ public sealed class StabilityFrontier : IStabilityFrontier
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        return rows.ToDictionary(row => row.Replica, row => row.Highest);
+        // One past the highest sequence in the log, because the frontier counts
+        // operations: a document whose only operation is (s,0) has one of them.
+        return rows.ToDictionary(row => row.Replica, row => row.Highest + 1);
     }
 
     /// <summary>Every replica that has ever written to the document.</summary>
@@ -200,6 +203,14 @@ public sealed class StabilityFrontier : IStabilityFrontier
     /// holds nothing from it — its contribution to that author's minimum is
     /// zero, and skipping the missing key would read as "no constraint" and
     /// mark that author's whole history stable.
+    /// <para>
+    /// Zero is a usable answer here only because the frontier counts operations
+    /// rather than naming the highest one held. In next-expected form zero says
+    /// "none", which is what a missing key means; in highest-held form it would
+    /// say "holds <c>(s,0)</c>", and the first operation of every author would
+    /// be stable from the moment a replica that has acknowledged nothing exists.
+    /// §5 has the full argument.
+    /// </para>
     /// </remarks>
     private static Dictionary<Guid, long> Minimum(
         List<Dictionary<Guid, long>> acknowledged, List<Guid> authors)

@@ -357,33 +357,19 @@ public sealed partial class EditorHub : Hub
             }
         }
 
-        // NEXT EXPECTED on the wire, HIGHEST HELD in the frontier, and the
-        // conversion is here because getting it wrong is unrecoverable in one
-        // direction. A vector saying "next is 5" means this replica holds 0..4;
-        // storing 5 would claim it holds an operation it has not seen, and the
-        // minimum would mark that operation stable while somebody is still
-        // waiting for it — after which GC may collect what it references. An
-        // entry of 0 means nothing held from that author and contributes no
-        // entry at all rather than -1.
-        var held = new Dictionary<Guid, long>(known.Count);
-        foreach (var (author, next) in known)
-        {
-            if (next > 0)
-            {
-                held[author] = next - 1;
-            }
-        }
-
-        if (held.Count == 0)
-        {
-            return;
-        }
-
+        // NEXT EXPECTED on the wire and next expected in the frontier, stored
+        // as it arrives. There was a conversion here to highest-held form, and
+        // it was wrong at zero: a vector saying "next is 0" means this replica
+        // holds nothing from that author, which highest-held cannot express —
+        // dropping the entry reads back as zero from the minimum, and zero in
+        // that form claims (author, 0) is held. §5 has the argument; the point
+        // for this method is that storing what the client sent, unmodified, is
+        // what removes the failure rather than a check that catches it.
         await using var scope = _scopes.CreateAsyncScope();
         var frontier = scope.ServiceProvider.GetRequiredService<IStabilityFrontier>();
 
         await frontier
-            .AcknowledgeAsync(binding.DocumentId, binding.ReplicaId, held, CancellationToken.None)
+            .AcknowledgeAsync(binding.DocumentId, binding.ReplicaId, known, CancellationToken.None)
             .ConfigureAwait(false);
     }
 

@@ -103,6 +103,12 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
                 .HasColumnName("stability_frontier")
                 .HasColumnType("jsonb")
                 .HasConversion(VersionVectorConverter, VersionVectorComparer);
+
+            entity.Property(e => e.LastCollectedAt).HasColumnName("last_collected_at");
+
+            // The collector's batch order. Nulls first, so a document that has
+            // never been collected is examined before one that has.
+            entity.HasIndex(e => e.LastCollectedAt);
         });
 
         modelBuilder.Entity<DocumentMember>(entity =>
