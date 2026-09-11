@@ -2410,6 +2410,37 @@ reach it" invites fixing the test. Prefer the second until the setup has been
 shown to exercise the path — a surviving sabotage is evidence about the test
 first and about the code only after that.
 
+### Two questions to ask of every mechanism
+
+Both come from patterns that have now recurred often enough to stop being
+observations and become things to check for. Ask them while proposing the work,
+beside the vacuity risk.
+
+**1. Who takes this action, and who doesn't?** (§13.32.) Any mechanism keyed on
+an action — a check on submission, a signal derived from writing, a limit
+charged at connect — covers only the principals who take that action. Name the
+principal who does not, and decide deliberately whether they are covered. Four
+occurrences, each found later and more expensively than this question would
+have cost:
+
+| Occurrence | The action | Who doesn't take it | What it cost |
+|---|---|---|---|
+| 6.4 | submitting an operation | a viewer, who only reads | a revoked reader kept receiving every broadcast |
+| 6b.5 | opening a fresh connection | a tab that reloads and resumes | every reloaded tab uncounted against §7's cap |
+| 7.1 | connecting | someone who stays connected and reads | a live replica retired underneath an open socket, advancing the frontier past state it holds |
+| 7.2 | catching up, or submitting | a viewer, again | one person reading holds the stability frontier still, and GC reclaims nothing |
+
+The fourth is the one that graduated this from a recorded pattern to a
+checklist item: it was *predicted* from the pattern before the code existed,
+found exactly where predicted, and the sabotage confirmed only the viewer's
+test could see it. A pattern that predicts is a pattern worth asking about
+every time.
+
+**2. Does anything invoke this, or only the test?** (§13.41.) For anything
+driven by a timer, a hosted service, or a background sweep, at least one test
+must exercise it with **nobody calling it**: arrange the state, move the clock,
+and require the mechanism's own counter to move on its own.
+
 ### Name the vacuity risk before writing the test
 
 **Every task in a phase breakdown states how its test could pass meaninglessly,
@@ -4403,6 +4434,11 @@ this, and what do they have to *do* to be subject to it? If the answer is "make
 a request", then everyone who makes no request is uncovered, and that set is
 usually the readers.
 
+**This is now a checklist item rather than a pattern to recognise** — §12's
+"who takes this action, and who doesn't?" — because the fourth occurrence was
+*predicted* from it before any code existed and found exactly where predicted.
+A pattern that predicts has earned being asked every time.
+
 ### 13.33 A timing budget tests whichever mechanism meets it
 
 §13.31 says a requirement satisfiable by either of two mechanisms is tested by
@@ -4779,3 +4815,39 @@ status file's job list from the workflow files — or it is a note about
 understanding rather than an instruction, and should say so. Several existing
 entries are the second kind honestly; §13.37's standing technique and §12's
 "sabotage from a committed tree" are the first kind deliberately.
+
+### 13.41 A test that invokes the mechanism directly proves the mechanism works, not that anything invokes it
+
+7.1's retirement tests all called `RetireAsync` themselves. Every one passed,
+the sweep was correct, and **all of them would have passed with the hosted
+service unregistered** — the mechanism right and unreachable, which is §13.19's
+shape appearing inside the tests written to avoid it. It was found by writing
+the sabotages rather than by writing the tests, which is the second time this
+family has recurred inside a defence against itself (§13.33 was the first: a
+test written to catch §13.31 passing by way of a substitute mechanism).
+
+Two occurrences make it general. The rule:
+
+> **For anything driven by a timer, a hosted service, or a background sweep, at
+> least one test must exercise it with nobody calling it.** Arrange the state,
+> move the clock, and require the mechanism's own counter to move on its own.
+
+**The hole appears exactly where the mechanism is conveniently callable**, and
+that is the part worth internalising. `ReplicaRetirement`'s effect is a database
+column, so calling the sweep directly was the short path and the tests took it.
+`MembershipSweep`'s effect is a socket closing, which cannot be observed without
+waiting for the real thing — so 6.4's tests never had the option and never
+acquired the hole. **The convenient entry point is the risk factor**, not the
+subsystem's importance.
+
+That asymmetry was checked rather than assumed. Unregistering `MembershipSweep`'s
+hosted service turns `A_revoked_reader_loses_the_connection_it_is_already_holding`
+red — *"The connection was still open after 2507 ms"* — so 6.4 was clean, and
+the reason it was clean is that its author had no shortcut available. Not
+virtue: geometry.
+
+The general form is one level up from §13.19. That entry is about a guard whose
+*assertion* cannot fail. This is about a guard whose assertion is perfectly
+sound and whose *trigger* is missing — and the two are indistinguishable from a
+green run, because both produce a passing test over a mechanism that never runs
+in production.
