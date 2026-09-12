@@ -55,6 +55,24 @@ public sealed class DocumentIngestState
         WHERE o.document_id = $1 AND o.op_type = '{OperationMapper.InsertType}';
         """;
 
+    // The same ids again, without the insert filter. Distinguishes "no such
+    // operation" from "that operation is a delete", which decide different
+    // rejection codes (§9): only the first can be a collected element.
+    private const string KnownOperations = """
+        SELECT o.replica_id, o.seq
+        FROM document_ops AS o
+        JOIN unnest($2::uuid[], $3::bigint[]) AS wanted(replica_id, seq)
+          ON o.replica_id = wanted.replica_id AND o.seq = wanted.seq
+        WHERE o.document_id = $1;
+        """;
+
+    // §5's watermark, read only when a reference could not be resolved. Not
+    // cached: the frontier decides whether a client is told to destroy its
+    // unsent work, and a stale one is wrong in exactly that direction.
+    private const string Frontier = """
+        SELECT stability_frontier FROM documents WHERE id = $1;
+        """;
+
     private const string ActiveReplicas = """
         SELECT COUNT(*) FROM document_replicas
         WHERE document_id = $1 AND retired_at IS NULL;
@@ -117,8 +135,15 @@ public sealed class DocumentIngestState
     /// operations that reference it. The query is one round trip per batch
     /// rather than per operation, which is what makes it affordable (§8).
     /// </remarks>
-    public async Task<HashSet<ElementId>> KnownElementsAsync(
-        Guid documentId, IReadOnlyCollection<ElementId> ids, CancellationToken cancellationToken)
+    public Task<HashSet<ElementId>> KnownElementsAsync(
+        Guid documentId, IReadOnlyCollection<ElementId> ids, CancellationToken cancellationToken) =>
+        LookupAsync(KnownElements, documentId, ids, cancellationToken);
+
+    private async Task<HashSet<ElementId>> LookupAsync(
+        string sql,
+        Guid documentId,
+        IReadOnlyCollection<ElementId> ids,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(ids);
 
@@ -138,7 +163,7 @@ public sealed class DocumentIngestState
             index++;
         }
 
-        await using var command = _dataSource.CreateCommand(KnownElements);
+        await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue(documentId);
         command.Parameters.AddWithValue(replicas);
         command.Parameters.AddWithValue(sequences);
@@ -154,6 +179,42 @@ public sealed class DocumentIngestState
         }
 
         return known;
+    }
+
+    /// <summary>
+    /// Which of the given ids name an operation of any kind, insert or delete.
+    /// </summary>
+    public Task<HashSet<ElementId>> KnownOperationsAsync(
+        Guid documentId, IReadOnlyCollection<ElementId> ids, CancellationToken cancellationToken) =>
+        LookupAsync(KnownOperations, documentId, ids, cancellationToken);
+
+    /// <summary>§5's stored frontier for a document, in next-expected form.</summary>
+    public async Task<Dictionary<ReplicaId, ulong>> FrontierAsync(
+        Guid documentId, CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(Frontier);
+        command.Parameters.AddWithValue(documentId);
+
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        var frontier = new Dictionary<ReplicaId, ulong>();
+
+        if (value is not string json || json.Length == 0)
+        {
+            return frontier;
+        }
+
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        foreach (var entry in document.RootElement.EnumerateObject())
+        {
+            var count = entry.Value.GetInt64();
+            if (count > 0)
+            {
+                frontier[ReplicaIdConversion.FromGuid(Guid.Parse(entry.Name))] =
+                    ReplicaIdConversion.ToUInt64(count);
+            }
+        }
+
+        return frontier;
     }
 
     /// <summary>Records a batch that was accepted and written.</summary>

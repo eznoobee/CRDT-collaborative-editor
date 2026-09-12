@@ -126,9 +126,13 @@ public sealed class IngestValidator
 
         // §5's readiness, enforced at ingest rather than buffered. See below for
         // why the server has no pending set at all.
-        if (!await OriginsExistAsync(documentId, operations, cancellationToken).ConfigureAwait(false))
+        var missing = await MissingOriginsAsync(documentId, operations, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (missing.Count > 0)
         {
-            return IngestResult.Reject(IngestRejection.UnknownOrigin);
+            return IngestResult.Reject(
+                await ClassifyAsync(documentId, missing, cancellationToken).ConfigureAwait(false));
         }
 
         var live = await _state.LiveBytesAsync(documentId, cancellationToken).ConfigureAwait(false);
@@ -170,7 +174,7 @@ public sealed class IngestValidator
     /// pending set to bound.
     /// </para>
     /// </remarks>
-    private async Task<bool> OriginsExistAsync(
+    private async Task<HashSet<ElementId>> MissingOriginsAsync(
         Guid documentId,
         IReadOnlyList<Operation> operations,
         CancellationToken cancellationToken)
@@ -202,13 +206,14 @@ public sealed class IngestValidator
 
         if (referenced.Count == 0)
         {
-            return true;
+            return referenced;
         }
 
         var known = await _state.KnownElementsAsync(documentId, referenced, cancellationToken)
             .ConfigureAwait(false);
 
-        return referenced.IsSubsetOf(known);
+        referenced.ExceptWith(known);
+        return referenced;
 
         void Require(ElementId? id)
         {
@@ -217,5 +222,69 @@ public sealed class IngestValidator
                 referenced.Add(value);
             }
         }
+    }
+
+    /// <summary>
+    /// Which refusal an unresolvable reference earns (§9).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>resync_required</c> is the one refusal in this system that legitimately
+    /// destroys a user's unsent work, so it is emitted only where the server can
+    /// say the referenced element <em>existed and was collected</em> — below
+    /// §5's frontier, for an author the frontier knows, with no operation of that
+    /// sequence number in the log at all. Everything else stays
+    /// <c>unknown_origin</c>.
+    /// </para><para>
+    /// Two narrowings beyond the frontier comparison, both of which the table in
+    /// §9 originally missed. An id at or above the frontier is not evidence of
+    /// collection, because not everyone held it. And an id naming an operation
+    /// that <em>does</em> exist but is a delete is a client bug, not a
+    /// collection: deletes consume sequence numbers, so such an id sits below
+    /// the frontier and would otherwise be answered with an instruction to throw
+    /// state away.
+    /// </para><para>
+    /// The frontier is read here rather than on every submission. It is a query,
+    /// and this path runs only when a reference failed to resolve — which for a
+    /// correct client is never.
+    /// </para>
+    /// </remarks>
+    private async Task<string> ClassifyAsync(
+        Guid documentId,
+        HashSet<ElementId> missing,
+        CancellationToken cancellationToken)
+    {
+        var frontier = await _state.FrontierAsync(documentId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (frontier.Count == 0)
+        {
+            return IngestRejection.UnknownOrigin;
+        }
+
+        var below = new HashSet<ElementId>();
+        foreach (var id in missing)
+        {
+            if (frontier.TryGetValue(id.Replica, out var count) && id.Seq < count)
+            {
+                below.Add(id);
+            }
+        }
+
+        if (below.Count == 0)
+        {
+            return IngestRejection.UnknownOrigin;
+        }
+
+        // Of the ids below the frontier, any that name an operation the log
+        // still holds are references to a delete, not to something collected.
+        var operations = await _state.KnownOperationsAsync(documentId, below, cancellationToken)
+            .ConfigureAwait(false);
+
+        below.ExceptWith(operations);
+
+        return below.Count > 0
+            ? IngestRejection.ResyncRequired
+            : IngestRejection.UnknownOrigin;
     }
 }

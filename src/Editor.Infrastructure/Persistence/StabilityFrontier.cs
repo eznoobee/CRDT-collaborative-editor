@@ -119,9 +119,11 @@ public sealed class StabilityFrontier : IStabilityFrontier
             return new FrontierResult(new Dictionary<Guid, long>(), false, 0);
         }
 
-        var computed = live.Count == 0
-            ? await EverythingAsync(documentId, cancellationToken).ConfigureAwait(false)
-            : Minimum(live, await AuthorsAsync(documentId, cancellationToken).ConfigureAwait(false));
+        // What the log actually holds, per author. This is both the answer for
+        // a document with no live replicas and the ceiling for one with them.
+        var logged = await LoggedAsync(documentId, cancellationToken).ConfigureAwait(false);
+
+        var computed = live.Count == 0 ? logged : Minimum(live, logged);
 
         var advanced = false;
         foreach (var (author, seq) in computed)
@@ -155,7 +157,8 @@ public sealed class StabilityFrontier : IStabilityFrontier
     }
 
     /// <summary>
-    /// The frontier for a document with no live replicas: everything.
+    /// How many operations the log holds from each author — the frontier for a
+    /// document with no live replicas, and the ceiling for every other one.
     /// </summary>
     /// <remarks>
     /// <strong>The empty set is not zero, and getting this backwards is the
@@ -171,7 +174,7 @@ public sealed class StabilityFrontier : IStabilityFrontier
     /// are most worth reclaiming.
     /// </para>
     /// </remarks>
-    private async Task<Dictionary<Guid, long>> EverythingAsync(
+    private async Task<Dictionary<Guid, long>> LoggedAsync(
         Guid documentId, CancellationToken cancellationToken)
     {
         var rows = await _context.DocumentOperations
@@ -186,40 +189,44 @@ public sealed class StabilityFrontier : IStabilityFrontier
         return rows.ToDictionary(row => row.Replica, row => row.Highest + 1);
     }
 
-    /// <summary>Every replica that has ever written to the document.</summary>
-    private async Task<List<Guid>> AuthorsAsync(
-        Guid documentId, CancellationToken cancellationToken) =>
-        await _context.DocumentOperations
-            .Where(row => row.DocumentId == documentId)
-            .Select(row => row.ReplicaId)
-            .Distinct()
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
-
-    /// <summary>The pointwise minimum, over the authors that exist.</summary>
+    /// <summary>The pointwise minimum, over the authors that exist, clamped to the log.</summary>
     /// <remarks>
+    /// <para>
     /// Taken over the authors rather than over the keys present in the
     /// acknowledgements, because a replica that has never heard of an author
     /// holds nothing from it — its contribution to that author's minimum is
     /// zero, and skipping the missing key would read as "no constraint" and
     /// mark that author's whole history stable.
-    /// <para>
+    /// </para><para>
     /// Zero is a usable answer here only because the frontier counts operations
     /// rather than naming the highest one held. In next-expected form zero says
     /// "none", which is what a missing key means; in highest-held form it would
     /// say "holds <c>(s,0)</c>", and the first operation of every author would
     /// be stable from the moment a replica that has acknowledged nothing exists.
     /// §5 has the full argument.
+    /// </para><para>
+    /// <strong>The clamp is not defensive tidying; without it a client decides
+    /// what GC destroys.</strong> Acknowledgements are client-supplied, and the
+    /// minimum bounds a liar only while an honest replica is also live — so a
+    /// client alone on a document controls the minimum outright. Observed
+    /// before the clamp existed: a document holding three operations, one
+    /// client, one acknowledgement claiming a thousand, and a stored frontier
+    /// of 1000. <see cref="Crdt.Core.Replica.Collect"/> tests
+    /// <c>Seq &lt; F[s]</c>, so every tombstone in the document became
+    /// collectable on that client's say-so, and because the frontier never
+    /// moves backwards the claim could not be undone by anyone joining later.
+    /// The log is evidence and an acknowledgement is a claim; the frontier is
+    /// the smaller of the two.
     /// </para>
     /// </remarks>
     private static Dictionary<Guid, long> Minimum(
-        List<Dictionary<Guid, long>> acknowledged, List<Guid> authors)
+        List<Dictionary<Guid, long>> acknowledged, Dictionary<Guid, long> logged)
     {
-        var frontier = new Dictionary<Guid, long>(authors.Count);
+        var frontier = new Dictionary<Guid, long>(logged.Count);
 
-        foreach (var author in authors)
+        foreach (var (author, ceiling) in logged)
         {
-            var lowest = long.MaxValue;
+            var lowest = ceiling;
             foreach (var replica in acknowledged)
             {
                 var held = replica.TryGetValue(author, out var seq) ? seq : 0;

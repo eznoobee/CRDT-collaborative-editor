@@ -34,6 +34,18 @@ public static class IngestRejection
     /// </summary>
     public const string UnknownOrigin = "unknown_origin";
 
+    /// <summary>
+    /// The batch names an element that existed and was collected (§5, §9).
+    /// </summary>
+    /// <remarks>
+    /// The one refusal that legitimately destroys a user's unsent work, which is
+    /// why it is the narrowest: it requires the id to be below §5's frontier,
+    /// for an author the frontier knows, with no operation of that sequence
+    /// number in the log. Anything the server merely dislikes is
+    /// <see cref="UnknownOrigin"/>.
+    /// </remarks>
+    public const string ResyncRequired = "resync_required";
+
     /// <summary>The document is at its size cap.</summary>
     public const string DocumentFull = "document_full";
 

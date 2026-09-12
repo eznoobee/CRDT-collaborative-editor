@@ -1873,12 +1873,53 @@ is a stress target, not a steady state.
 
   | Condition | Answer | Why |
   |---|---|---|
-  | `n > F[s]` — above the frontier | buffer as a pending dependency | It may still arrive; §5's causal-readiness rules own it from here. |
-  | `n ≤ F[s]` — at or below | **`resync_required`** | Everyone was known to hold it, so it is not in flight: it existed and was collected. |
-  | `s` is not in the frontier at all | buffer | A replica nobody has heard from is not evidence that anything was collected. |
+  | `n ≥ F[s]` — at or above the frontier | `unknown_origin` | Not everyone held it, so it is not evidence of collection. |
+  | `n < F[s]` — below | **`resync_required`** | Everyone was known to hold it, so it is not in flight: it existed and was collected. |
+  | `s` is not in the frontier at all | `unknown_origin` | A replica nobody has heard from is not evidence that anything was collected. |
+  | operation `n` from `s` exists but is not an insert | `unknown_origin` | A delete's sequence number is not an element id. |
 
-  The middle row is the whole of it, and the third is what stops a new replica's
-  first operation being answered with an instruction to throw its state away.
+  The middle row is the whole of it, and the others are what stop a new
+  replica's first operation being answered with an instruction to throw its
+  state away.
+
+  **Three corrections to this table, made in 7.4 when the server was written
+  against it.** Each was a place where the table, written from the client's side
+  before any server existed, did not survive contact with the server that exists.
+
+  1. **The comparison is strict, and against a count.** §5's frontier is stored
+     in next-expected form, so `F[s]` is *how many* of `s`'s operations everyone
+     holds and an operation is stable exactly when `n < F[s]`. The original
+     `n ≤ F[s]` was written against a highest-held frontier that §5 no longer
+     uses, and reading it literally now would answer `resync_required` for the
+     first operation past the frontier — one that is still legitimately in
+     flight.
+  2. **The server does not buffer, so "buffer" was never its answer.**
+     `IngestValidator` has no pending set by design: at ingest a non-ready
+     operation is a bug or an attack rather than a race, because a client can
+     only name its own earlier operations or ones it learned from a broadcast
+     the server sent after committing them. Buffering there would be buffering
+     an id that may never arrive. The server's answer for those rows is
+     `unknown_origin`, which is what it already emitted before this clause
+     existed; `resync_required` narrows that code rather than replacing it.
+  3. **A reference to a delete's sequence number is not a collected element.**
+     Deletes consume sequence numbers, so `(s, n)` can name an operation that
+     exists and is not an insert. Such a reference resolves to nothing and sits
+     below the frontier, and the first three rows alone would answer
+     `resync_required` — telling a user to destroy their unsent work because of
+     a client bug. That is the widening this section forbids, arriving from the
+     opposite direction, so the server distinguishes "no such operation" from
+     "not an insert" and only the former can be a collection.
+
+  **The frontier is clamped to the log, or none of this means anything.**
+  `F[s]` never exceeds the number of operations the log holds from `s`.
+  Acknowledgements are client-supplied and the pointwise minimum bounds a liar
+  only while an honest replica is also live — a client alone on a document
+  controls the minimum outright. Measured before the clamp existed: three
+  operations in the log, one client, one acknowledgement claiming a thousand,
+  and a stored frontier of 1000. Since collection tests `Seq < F[s]` and the
+  frontier never moves backwards, that single message made every tombstone in
+  the document permanently collectable. **The log is evidence; an
+  acknowledgement is a claim; the frontier is the smaller of the two.**
 
   **It is emitted for a reference the server cannot resolve, never for an
   operation it merely dislikes.** A malformed batch is `malformed`; a batch from
