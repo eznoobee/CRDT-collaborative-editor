@@ -2404,6 +2404,7 @@ written, not done).
 | 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7b** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
 | 28 | §6's periodic snapshot is never taken | **7b** | Found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause cannot arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` are implemented and correct, and nothing in `src/` calls either: every document is rebuilt by full replay of its log, and the collector's write is the only snapshot the product stores. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
 | 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
+| 30 | `resync_required` has no reachable path until the log is truncated | **7b** | Found in 7.4 while writing the emitter. §5's collection shrinks the snapshot and never the log, and the frontier is clamped to the log — so an id below the frontier from a known author is always present, and the condition cannot arise from any client action. The rule is implemented, narrow, and pinned by sabotage, and every test of it constructs the frontier directly because nothing else can. The end-to-end test belongs with log truncation, and is a row rather than a good intention | §5, §9, §13.19 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -2539,6 +2540,21 @@ working tree by design, so the working tree is exactly what must not hold the
 only copy of anything: commit first, or copy the file aside and restore from the
 copy. This is the second time a sabotage run has been wrong about *what was on
 disk* rather than about the code (§13.17's stale-build case is the first).
+
+**It happened again in 7.4, to the same rule, written down.** Two source files
+carried that task's whole implementation uncommitted; three sabotages were
+applied and reverted with `git checkout`, and the revert took the implementation
+with it. The tell was three sabotages producing *identical* failure lists — a
+sabotage that changes one comparison cannot break the same three tests as one
+that removes a clamp in a different file, and that mismatch is what exposed it
+rather than anything in the output saying so. Knowing the rule was not enough;
+what would have worked is mechanical, in §13.40's sense: **commit before the
+first sabotage, not before the first revert.** The temptation is to sabotage as
+soon as the tests are green, because that is the moment the question arises, and
+the commit feels like it belongs after the answer.
+
+Watch for the signature. **When two different sabotages fail the same set of
+tests, doubt the tree before doubting the tests.**
 
 This is the Phase 3 shutdown-race test again (right subject, wrong path), and it
 is now twice. The order matters because the two hypotheses lead opposite ways:
