@@ -2433,9 +2433,9 @@ written, not done).
 
 | # | Deferred | Owner | Why it was deferred | Where it is stated |
 |---|---|---|---|---|
-| 1 | `retired_at` actually set by a background job on `T_retire` inactivity | **7** | Needs no new subsystem; blocks two things below and was not on Phase 4's critical path | §5 |
-| 2 | §9's offline-window discard verified end to end | **7** | Blocked by 1. The client half is written and unit-tested against an injected clock; the discard it warns about cannot happen yet | §9, 4.7 |
-| 3 | `resync_required` emitted server-side | **7** | Needs GC. The client contract was specified first, deliberately, so the server is written against a stated shape | §5, §9, §13.13 |
+| 1 | `retired_at` actually set by a background job on `T_retire` inactivity | **CLOSED (7.1)** | `ReplicaRetirement`, with a `ReplicaHeartbeat` beside it because the column was written only by `negotiate` and would otherwise have retired a live reader underneath an open socket. Its trigger test — nobody calls the sweep, the clock moves, the counter moves — is what §13.41 was written from | §5, §13.41 |
+| 2 | §9's offline-window discard verified end to end | **CLOSED (7.5)** | And the discard turned out to be silent: `SyncController` emptied the outbox and reported nothing, which is the data-loss bug §9 names, in the code since Phase 4. The branch that reported correctly was the unreachable one. Verified in three places — the server retires and declines, the client discards and reports the count, and the raw negotiate body carries the two fields the client keys on. The browser-level observation is row 31 | §9, §13.19 |
+| 3 | `resync_required` emitted server-side | **CLOSED (7.4)** | Emitted only where the server can say the element existed and was collected, with three corrections to §9's table. Also the task that found the frontier was unclamped, letting one client's acknowledgement decide what GC destroys. The condition itself is unreachable until the log is truncated, which is row 30 — stated rather than dressed up | §5, §9 |
 | 4 | GC of causally stable tombstones, and the watermark that gates it | **7** | Depends on 1: the stability frontier never advances while an abandoned tab counts as live | §5 |
 | 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **7b** | 3b's done-when was the protocol settled *before* any throughput number. Outstanding, never skipped | §8 |
 | 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7b** | Nothing of it exists today beyond `/health/live` | §10 |
@@ -2616,6 +2616,19 @@ the commit feels like it belongs after the answer.
 
 Watch for the signature. **When two different sabotages fail the same set of
 tests, doubt the tree before doubting the tests.**
+
+**And the same order applies to a failing gate.** 7.7's preflight failed on
+`tests`, `interop` and `e2e`, and the first explanation reached for was that this
+environment has no Docker daemon — an explanation that required nothing of
+anybody and happened to be false. All three refuse without
+`EDITOR_TEST_POSTGRES` and `EDITOR_TEST_REDIS`, which that shell did not have;
+with them, every gate is green. `e2e` drives the pre-installed Chromium against
+an API it starts as a process, and the Docker lines in its log are
+Testcontainers falling back to the local services and passing. **A failure is
+evidence about the invocation before it is evidence about the code, and an
+environment-limitation story is the most comfortable wrong answer available** —
+the same preference for "the test does not reach it" over "the code is
+redundant" that this section already argues for, one layer out.
 
 This is the Phase 3 shutdown-race test again (right subject, wrong path), and it
 is now twice. The order matters because the two hypotheses lead opposite ways:
