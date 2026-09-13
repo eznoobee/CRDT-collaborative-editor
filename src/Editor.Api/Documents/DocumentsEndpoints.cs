@@ -99,6 +99,7 @@ public static class DocumentsEndpoints
         documents.MapGet("/{documentId:guid}/members", ListMembersAsync);
         documents.MapPut("/{documentId:guid}/members/{memberId:guid}", GrantAsync);
         documents.MapDelete("/{documentId:guid}/members/{memberId:guid}", RevokeAsync);
+        documents.MapDelete("/{documentId:guid}", RemoveAsync);
 
         return endpoints;
     }
@@ -462,6 +463,45 @@ public static class DocumentsEndpoints
     /// nothing reveals that the id is real, and 403 only once they can already
     /// see the document and there is nothing left to conceal.
     /// </remarks>
+    /// <summary>§9's <c>DELETE /documents/{id}</c>: removes a document.</summary>
+    /// <remarks>
+    /// <para>
+    /// Owner only, and soft: §11 keeps the operation log, so this is the
+    /// document disappearing from everywhere a person can reach it rather than
+    /// the history being destroyed. An editor is refused — being able to write
+    /// in a document is not being able to end it for everyone else.
+    /// </para><para>
+    /// Idempotency falls out of the filter rather than needing a case of its
+    /// own: a second delete finds no document with <c>deleted_at</c> null, and
+    /// a document that is not there is §7's 404 — the same answer a
+    /// non-member gets, which is the point of that rule.
+    /// </para><para>
+    /// The removal itself, and why writing the column is not the whole job, is
+    /// in <see cref="IDocumentRemoval"/>.
+    /// </para>
+    /// </remarks>
+    private static async Task<IResult> RemoveAsync(
+        Guid documentId,
+        ClaimsPrincipal principal,
+        CurrentUser users,
+        IDocumentRoles roles,
+        IDocumentRemoval removal,
+        CancellationToken cancellationToken)
+    {
+        var caller = await OwnerAsync(documentId, principal, users, roles, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (caller.Refusal is { } refusal)
+        {
+            return refusal;
+        }
+
+        var removed = await removal.RemoveAsync(documentId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return removed ? TypedResults.NoContent() : TypedResults.NotFound();
+    }
+
     private static async Task<(Guid UserId, IResult? Refusal)> OwnerAsync(
         Guid documentId,
         ClaimsPrincipal principal,

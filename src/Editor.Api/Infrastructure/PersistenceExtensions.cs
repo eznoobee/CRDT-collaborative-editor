@@ -100,6 +100,14 @@ public static class PersistenceExtensions
         services.AddScoped<IDocumentMemberships>(
             provider => provider.GetRequiredService<DocumentRoleReader>());
 
+        // §9's removal. Scoped like the writer, and for the same reason: it
+        // writes Postgres through the request's context and then invalidates.
+        services.AddScoped<IDocumentRemoval>(provider => new DocumentRemoval(
+            provider.GetRequiredService<EditorDbContext>(),
+            provider.GetRequiredService<IDocumentMemberships>(),
+            provider.GetRequiredService<CachedDocumentRoles>(),
+            provider.GetRequiredService<TimeProvider>()));
+
         services.AddScoped<IDocumentRoleWriter>(provider => new InvalidatingDocumentRoleWriter(
             provider.GetRequiredService<DocumentRoleReader>(),
             provider.GetRequiredService<CachedDocumentRoles>()));
