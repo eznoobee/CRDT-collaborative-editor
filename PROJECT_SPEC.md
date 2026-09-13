@@ -1982,6 +1982,19 @@ A small REST surface, same origin as the client, bearer token in a header:
 | `GET /documents/{id}/members` | Who has a role on it | Owner |
 | `PUT /documents/{id}/members/{userId}` | Grants or changes a role | Owner |
 | `DELETE /documents/{id}/members/{userId}` | Revokes a role | Owner |
+| `DELETE /documents/{id}` | Removes the document | Owner |
+
+**Removal is soft, and writing `deleted_at` is not the whole of it.** §11 keeps
+the operation log, so this is the document leaving every place a person can
+reach it rather than the history being destroyed. Every path that *reads the
+document row* has filtered on `deleted_at` since Phase 2 — which is why a
+handler that only wrote the column would look completely correct from this
+table and leave the person who already had the document open typing into it.
+A live connection is checked against the role cache, and so is the sweep that
+would close it, so removal invalidates the cached role for **every member**;
+§13.32, with "the user who never performs the action" being the one who never
+performs a read. `negotiate` is on that side of the line too, so on a stale
+cache even a *fresh* connection to a removed document would still be granted.
 
 **Every membership decision goes through `IDocumentRoles` and
 `IDocumentRoleWriter`**, never through a query of its own against
@@ -2424,7 +2437,7 @@ written, not done).
 | 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
 | 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
 | 22 | Rate limiting on the document API | **6b — CLOSED** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; 6b.6 applied it to the route group rather than to the three endpoints that write, charged before the handler decides | §7 |
-| 23 | Removing a document | **7** | Found by the walk in Phase 6: a person can make documents and cannot get rid of any of them. `documents.deleted_at` has existed since Phase 2 and every read honours it, so the storage is there and no path reaches it — the same shape as rows 15 and 16, one level up. Invisible to every test because every test creates what it needs and never tidies up | §9, §13.27 |
+| 23 | Removing a document | **CLOSED (7.6)** | `DELETE /documents/{id}`, owner only, soft. The finding was that writing `deleted_at` is the half that already worked: removing the cache invalidation turns three tests red — a held connection stays open, the server goes on accepting operations into the removed document, and `negotiate` still grants a brand-new connection to it. The walk's step 10 no longer stops; it removes a document a person made. Its previous assertion, that no `[data-delete-document]` element existed, is worth recording as a near miss: that selector never matched anything either way, so the step would have gone on passing beside a working Remove button under a different name | §9, §13.19, §13.27, §13.32 |
 | 24 | The redaction sentinel driven through the document API | **7b** | Found by 6b.2's guard audit: the sentinel travels a hub connection and none of the six REST endpoints Phase 6 added, so a token or ticket logged by the document API is invisible to it. A test to write rather than a guard to repair | §7, §13.19, §13.36 |
 | 25 | The seeded-documents rule enforced on the C# harness too | **7b** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
 | 27 | A largest-legitimate-use test for every configured limit | **7 and 7b** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration. **Split deliberately: `T_retire` and the GC watermark belong to Phase 7**, because they are new numbers introduced there and §13.37 says their own tests will pass at any value — and a `T_retire` that retires a replica whose owner is at lunch is data loss, not a tuning complaint. The other thirteen are 7b | §13.37, §12 |

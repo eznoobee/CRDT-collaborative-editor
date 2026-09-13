@@ -310,38 +310,68 @@ describe('the walk: cold start to the first step that cannot be taken', () => {
       .toContain('This document is gone');
   }, 600_000);
 
-  it('step 10 — STOPS HERE: nothing in this product removes a document', async () => {
-    // The walk's output for Phase 6. Steps 1 to 9 pass, which is three steps
-    // further than Phase 5b reached, and this is where it ends now.
+  it('step 10 — a person gets rid of a document they made', async () => {
+    // Where the walk stopped for Phase 6, and register row 23. A person could
+    // make documents and could not get rid of any of them: the schema has
+    // `deleted_at` and every read honoured it, so the storage existed since
+    // Phase 2 and no path reached it — rows 15 and 16's shape one level up,
+    // invisible to every test because every test creates what it needs and
+    // never tidies up.
     //
-    // A person can make documents and cannot get rid of any of them. The
-    // schema has `deleted_at` and DocumentRoleReader honours it — a soft-deleted
-    // document is a 404 to everyone, tested since 6.1 — so the *storage* for
-    // this has existed since Phase 2 and no path reaches it. That is register
-    // rows 15 and 16's shape exactly, one level up: a capability the data model
-    // anticipates and the product cannot perform, invisible to every test
-    // because every test creates what it needs and never tidies up.
-    //
-    // Asserted as the gap rather than worked around. Owned by a register row
-    // rather than fixed here, because it was found after the phase's breakdown
-    // was approved and quietly widening the phase is how the register stops
-    // being a record of anything.
+    // The step it replaced asserted the absence of a `[data-delete-document]`
+    // element. That selector never matched anything, then or now, so leaving it
+    // in place would have let the walk go on reporting the gap as closed by an
+    // assertion that could not have noticed either way. Replaced rather than
+    // amended, deliberately (§13.19).
     walk.oidc.accounts.add('walker');
     const { page } = await walk.browsing.open();
 
     await page.goto(walk.baseUrl);
     await pick(page, 'walker');
-    await page.waitForSelector('[data-testid="documents"]', { timeout: 60_000 });
 
-    // Everything the walk has made so far is still listed, and the page offers
-    // nothing that would remove any of it.
-    const listed = await page.evaluate(
-      () => window.document.querySelectorAll('[data-testid="documents"] li').length,
+    // Its own document, made here, so the step neither depends on nor destroys
+    // what the earlier steps built.
+    await page.waitForSelector('[data-testid="create"]', { timeout: 60_000 });
+    await page.fill('[data-testid="new-title"]', 'A document to be got rid of');
+    await page.click('[data-testid="create"]');
+
+    await page.waitForFunction(
+      () => /\/d\/[0-9a-fA-F-]{36}$/.test(window.location.pathname),
+      undefined,
+      { timeout: 60_000 },
     );
 
-    expect(listed).toBeGreaterThan(0);
+    const path = new URL(page.url()).pathname;
+    const documentId = path.slice(path.lastIndexOf('/') + 1);
+
+    await page.click('[data-testid="home-link"]');
+    await page.waitForSelector(`[data-remove="${documentId}"]`, { timeout: 60_000 });
+
+    // The product asks before destroying something, so the walk answers.
+    page.once('dialog', (dialog) => void dialog.accept());
+    await page.click(`[data-remove="${documentId}"]`);
+
+    // Gone from the listing, on the server's say-so rather than by the page
+    // splicing a row out of its own state.
+    await page.waitForFunction(
+      (id: string) => window.document.querySelector(`[data-document="${id}"]`) === null,
+      documentId,
+      { timeout: 60_000 },
+    );
+
+    // And gone as a destination: the URL a person may still have open, or
+    // bookmarked, no longer opens a document.
+    await page.goto(`${walk.baseUrl}/d/${documentId}`);
+
+    await page.waitForFunction(
+      () => window.document.querySelector('[role="alert"]') !== null
+        || window.document.querySelector('[data-testid="documents"]') !== null,
+      undefined,
+      { timeout: 60_000 },
+    );
+
     expect(await page.evaluate(
-      () => window.document.querySelector('[data-delete-document]') !== null,
+      () => window.document.querySelector('textarea') !== null,
     )).toBe(false);
   }, 300_000);
 });

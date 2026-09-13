@@ -111,7 +111,113 @@ describe('Home', () => {
 
     expect(screen.getByTestId('home-problem').textContent).toContain('A title is required.');
   });
+
+  it('removes a document and refreshes what is left', async () => {
+    // Register row 23: a person could make documents and could not get rid of
+    // any of them. The listing is re-read rather than the row spliced out
+    // locally, because the server decides what is left — splicing would show a
+    // removal that failed as though it had worked.
+    const removed: string[] = [];
+    let listings = 0;
+
+    render(
+      <Home
+        api={api({
+          list: () => {
+            listings += 1;
+            return Promise.resolve(listings === 1 ? [summary('doomed', 'Doomed')] : []);
+          },
+          remove: (id: string) => { removed.push(id); return Promise.resolve(); },
+        })}
+        me={me}
+        signOut={() => Promise.resolve()}
+      />,
+    );
+
+    await settle();
+
+    confirming(true);
+    fireEvent.click(screen.getByText('Remove'));
+    await settle();
+
+    expect(removed).toEqual(['doomed']);
+    expect(screen.getByTestId('no-documents')).toBeTruthy();
+  });
+
+  it('does not remove anything when the confirmation is declined', async () => {
+    // The pair. Without it, "removes on click" is satisfied by a button that
+    // removes whatever the person meant — and this one sits beside the link
+    // they click all day.
+    const removed: string[] = [];
+
+    render(
+      <Home
+        api={api({
+          list: () => Promise.resolve([summary('safe', 'Safe')]),
+          remove: (id: string) => { removed.push(id); return Promise.resolve(); },
+        })}
+        me={me}
+        signOut={() => Promise.resolve()}
+      />,
+    );
+
+    await settle();
+
+    confirming(false);
+    fireEvent.click(screen.getByText('Remove'));
+    await settle();
+
+    expect(removed).toEqual([]);
+    expect(screen.getByText('Safe')).toBeTruthy();
+  });
+
+  it('offers no remove control to someone who is not the owner', async () => {
+    // The server refuses an editor's DELETE, so this is not the enforcement —
+    // it is not showing someone a button that exists to fail.
+    render(
+      <Home
+        api={api({
+          list: () => Promise.resolve([
+            { ...summary('theirs', 'Theirs'), role: ROLE.editor },
+          ]),
+        })}
+        me={me}
+        signOut={() => Promise.resolve()}
+      />,
+    );
+
+    await settle();
+
+    expect(screen.getByText('Theirs')).toBeTruthy();
+    expect(screen.queryByText('Remove')).toBeNull();
+  });
+
+  it('says what went wrong when a removal is refused', async () => {
+    render(
+      <Home
+        api={api({
+          list: () => Promise.resolve([summary('gone', 'Gone')]),
+          remove: () => Promise.reject(new ApiRefusal(404, 'nope')),
+        })}
+        me={me}
+        signOut={() => Promise.resolve()}
+      />,
+    );
+
+    await settle();
+
+    confirming(true);
+    fireEvent.click(screen.getByText('Remove'));
+    await settle();
+
+    expect(screen.getByTestId('home-problem').textContent).toContain('That document is gone');
+  });
 });
+
+/** Answers the browser's confirmation for one click. */
+function confirming(answer: boolean): void {
+  vi.spyOn(window, 'confirm').mockReturnValue(answer);
+}
 
 /**
  * Lets queued promise callbacks run inside React's act() window.

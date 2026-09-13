@@ -87,6 +87,11 @@ export class DocumentApi {
     await this.call<null>('DELETE', `/documents/${documentId}/members/${userId}`);
   }
 
+  /** Removes a document. Owner only; the operation log is kept (§11). */
+  async remove(documentId: string): Promise<void> {
+    await this.call<null>('DELETE', `/documents/${documentId}`);
+  }
+
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token = await this.tokens.token();
     const response = await fetch(`${this.origin}${path}`, {

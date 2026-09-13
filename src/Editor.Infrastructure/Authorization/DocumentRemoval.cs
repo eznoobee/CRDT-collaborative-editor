@@ -31,6 +31,14 @@ public interface IDocumentRemoval
 /// already uses for revocation — invalidate — and the only difference is that a
 /// deletion has no single user, so it invalidates for every member.
 /// </para><para>
+/// <strong>And "the half that already worked" was smaller than it looked.</strong>
+/// Removing the invalidation turns three tests red, not two: the listing and the
+/// metadata read do query the document row and go on behaving, but
+/// <c>negotiate</c> asks <see cref="IDocumentRoles"/> — so on a stale cache a
+/// client could still open a brand-new connection to a document that had been
+/// removed. The cache is not a performance detail sitting beside the deletion
+/// check; for everything on the live path it <em>is</em> the deletion check.
+/// </para><para>
 /// One class rather than the decorator <see cref="InvalidatingDocumentRoleWriter"/>
 /// uses, for the same reason that decorator exists: there must be no way to
 /// perform this write without the invalidation. There was no pre-existing

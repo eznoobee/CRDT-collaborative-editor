@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { ApiRefusal, type DocumentApi, type DocumentSummary, type Identity } from './api';
+import { ApiRefusal, ROLE, type DocumentApi, type DocumentSummary, type Identity } from './api';
 
 export interface HomeProps {
   readonly api: DocumentApi;
@@ -41,6 +41,21 @@ export function Home(props: HomeProps): React.JSX.Element {
   }, [api]);
 
   useEffect(refresh, [refresh]);
+
+  const remove = (document: DocumentSummary) => {
+    // Confirmed, because removal is not undoable from anywhere a person can
+    // reach — §11 keeps the operation log, but nothing in this application
+    // reads a removed document back. A one-click destructive action beside a
+    // link people click all day is a mis-click waiting to happen.
+    if (!window.confirm(`Remove “${document.title}”? This cannot be undone here.`)) {
+      return;
+    }
+
+    api.remove(document.id).then(
+      () => { setProblem(null); refresh(); },
+      (error: unknown) => { setProblem(messageFor(error)); },
+    );
+  };
 
   const create = () => {
     const wanted = title.trim();
@@ -89,6 +104,17 @@ export function Home(props: HomeProps): React.JSX.Element {
               {documents.map((document) => (
                 <li key={document.id}>
                   <a data-document={document.id} href={`/d/${document.id}`}>{document.title}</a>
+                  {document.role === ROLE.owner
+                    ? (
+                      <button
+                        type="button"
+                        data-remove={document.id}
+                        onClick={() => { remove(document); }}
+                      >
+                        Remove
+                      </button>
+                    )
+                    : null}
                 </li>
               ))}
             </ul>
