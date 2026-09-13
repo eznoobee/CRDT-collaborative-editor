@@ -2054,6 +2054,33 @@ warns correctly about something that never happens passes every test anyone
 would write for it — §13.15's shape, and §12's rule that a task whose
 verification needs infrastructure that does not exist yet is written, not done.
 
+**What 7.5 found when retirement finally existed: the discard was silent.**
+`SyncController` handled a declined resumption by emptying the outbox and
+reporting nothing, so `problem` stayed null and the user was told nothing — the
+exact data-loss bug the paragraph above forbids, sitting in the code for three
+phases. The test that covered the path asserted only that the queue emptied, and
+its fixture held a single *empty* batch, so a correct implementation and a silent
+one produced identical observations (§13.19). It now reports
+`resync_required` with the count, which is the code §9 already defines for this
+condition and the message the client already had written for it — the
+contract-first decision paying off exactly as intended, in that the sentence
+shown to the user needed no invention when the event finally became possible.
+
+**Note which branch was reachable.** The `resync` recovery in the rejection
+table is reached only by a server-sent `resync_required`, which 7.4 established
+cannot be emitted while the log is intact. So the branch that reported the loss
+correctly was the unreachable one, and the branch that actually ran did not
+report it. Two mechanisms for one condition, and the tests covered the one that
+never fires.
+
+**The seam is its own test.** The client's entire discard is keyed on two fields
+of negotiate's JSON — `resumed` false, `replicaId` changed. Every other test of
+this path asserts against a shape it declared itself: the C# ones through a typed
+record, the TypeScript ones through a fake transport. A rename or a casing change
+on either side leaves all of them green and the discard silently dead in the
+browser, which was confirmed by giving the property a different JSON name and
+watching six retirement tests pass while only the raw-body one failed.
+
 ### Conformance testing
 
 `tests/Conformance/traces/` holds shared JSON traces. Both implementations replay
@@ -2405,6 +2432,7 @@ written, not done).
 | 28 | §6's periodic snapshot is never taken | **7b** | Found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause cannot arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` are implemented and correct, and nothing in `src/` calls either: every document is rebuilt by full replay of its log, and the collector's write is the only snapshot the product stores. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
 | 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
 | 30 | `resync_required` has no reachable path until the log is truncated | **7b** | Found in 7.4 while writing the emitter. §5's collection shrinks the snapshot and never the log, and the frontier is clamped to the log — so an id below the frontier from a known author is always present, and the condition cannot arise from any client action. The rule is implemented, narrow, and pinned by sabotage, and every test of it constructs the frontier directly because nothing else can. The end-to-end test belongs with log truncation, and is a row rather than a good intention | §5, §9, §13.19 |
+| 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step

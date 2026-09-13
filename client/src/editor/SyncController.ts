@@ -1,6 +1,6 @@
 import { Replica, decodeSnapshot, parseReplicaId } from '../crdt';
 import { Backoff, DEFAULT_BACKOFF, type BackoffOptions } from './backoff';
-import { recoveryFor } from './rejections';
+import { REJECTION, recoveryFor } from './rejections';
 import type { DocumentSession } from './DocumentSession';
 
 /** What the server answered a submission with (§7). */
@@ -269,7 +269,26 @@ export class SyncController {
     const refused = requested !== null && !session.resumed;
 
     if (refused) {
+      // §9's offline-window discard, and the ONE path by which it actually
+      // happens. A replica idle past T_retire is retired server-side, so the
+      // resumption is declined and a fresh id assigned; everything in the
+      // outbox was authored under the old id and tier-1 would refuse all of
+      // it. Dropping it is correct and it is §5's single exception to "do not
+      // drop", which is exactly why the count is reported rather than the
+      // queue quietly emptying. §9: accepting an hour of offline work and
+      // throwing it away without warning is a data-loss bug, not a limitation.
+      //
+      // The code is resync_required rather than one of its own. The condition
+      // is the same condition — discard local state, take a snapshot, report
+      // what was lost — arriving through negotiate instead of through a
+      // submission, and a second code would be a second sentence for one
+      // event.
+      const lost = this.outbox.length;
       this.outbox = [];
+
+      if (lost > 0) {
+        this.fail(REJECTION.resyncRequired, lost);
+      }
     }
 
     this.replicaId = session.replicaId;

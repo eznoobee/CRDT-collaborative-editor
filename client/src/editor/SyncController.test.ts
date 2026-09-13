@@ -196,24 +196,53 @@ describe('resumption', () => {
     expect(transport.connects).toEqual([ID]);
   });
 
-  it('discards the outbox when the server refused the resumption', async () => {
+  it('discards the outbox when the server refused the resumption, and says so', async () => {
     // §7: a fresh id means the batches were authored under a replica this
     // connection may not use, and tier-1 refuses every one of them. Keeping
     // them would mean retrying forever against a rejection that never changes.
+    //
+    // §9's OFFLINE-WINDOW DISCARD, and this is the only path by which it
+    // actually happens: a replica idle past T_retire is retired server-side and
+    // its resumption declined. The discard is correct; doing it silently is the
+    // data-loss bug §9 names. This test previously asserted only that the queue
+    // emptied, over an outbox holding a single EMPTY batch — so a correct
+    // implementation and a silent one produced the same observation, and the
+    // controller went a whole phase dropping work without telling anyone.
     const transport = new FakeTransport();
     transport.connectResults = [{ replicaId: FRESH, resumed: false }];
 
-    const { sync } = controller(transport, {
-      replicaId: ID,
-      outbox: [encodeOperations([])],
-    });
+    const stranded = new Replica(parseReplicaId(ID));
+    const outbox = [...'lost work'].map((value, index) =>
+      encodeOperations([stranded.insert(index, value)]),
+    );
+
+    const { sync } = controller(transport, { replicaId: ID, outbox });
 
     await sync.start();
 
     expect(sync.pending).toHaveLength(0);
 
+    // The number, not merely a flag. Nine batches went; a report of one would
+    // understate it and a report of zero is the bug.
+    expect(sync.problem).toEqual({ code: 'resync_required', lost: outbox.length });
+
     // And it takes a snapshot rather than a delta, because the local replica
     // may hold operations that are no longer valid.
+    expect(transport.forced).toEqual([true]);
+  });
+
+  it('reports nothing when a refused resumption had nothing to lose', async () => {
+    // The other half of the pair. A client that reconnects after a clean exit
+    // has an empty outbox, and telling it work was lost would be a false alarm
+    // shown at exactly the moment the user is being reassured.
+    const transport = new FakeTransport();
+    transport.connectResults = [{ replicaId: FRESH, resumed: false }];
+
+    const { sync } = controller(transport, { replicaId: ID, outbox: [] });
+
+    await sync.start();
+
+    expect(sync.problem).toBeNull();
     expect(transport.forced).toEqual([true]);
   });
 
@@ -233,6 +262,11 @@ describe('resumption', () => {
 
     expect(sync.pending).toHaveLength(1);
     expect(transport.forced).toEqual([false]);
+
+    // And nothing was reported lost, because nothing was. Without this, "a
+    // refusal reports the loss" is satisfied by a controller that reports one
+    // on every reconnect.
+    expect(sync.problem).toBeNull();
   });
 });
 

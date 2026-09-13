@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using Editor.Api.Documents;
 using Editor.Api.Hubs;
 using Editor.Api.Tests.Hubs;
@@ -256,6 +257,58 @@ public sealed class ReplicaRetirementTests
         // needs a working session rather than a status it cannot act on.
         Assert.False(after.Negotiated.Resumed);
         Assert.NotEqual(replicaId, after.Negotiated.ReplicaId);
+    }
+
+    [Fact]
+    public async Task The_declined_resumption_reaches_the_client_in_the_shape_it_reads()
+    {
+        // §9's offline-window discard, at the seam. The client's whole discard
+        // is keyed on two fields of negotiate's JSON: `resumed` being false and
+        // `replicaId` differing from what it asked for. Every other test of
+        // this path — the C# ones through a typed record, the TypeScript ones
+        // through a fake transport — asserts against a shape it declared
+        // itself, so a rename or a casing change on either side would leave all
+        // of them green and the discard silently dead in the browser.
+        //
+        // So this reads the raw body. It is the one assertion in the pair that
+        // neither side could satisfy alone.
+        _fixture.RequireBoth();
+        var clock = new FakeTimeProvider(Now);
+        await using var factory = Frozen(_fixture, clock);
+
+        var documentId = await DocumentSetup.DocumentAsync(factory, "owner-shape");
+        await DocumentSetup.GrantAsync(factory, documentId, "shape", Role.Editor);
+
+        Guid replicaId;
+        await using (var before = await DocumentClient.JoinAsync(factory, "shape", documentId))
+        {
+            replicaId = before.Negotiated.ReplicaId;
+            Assert.Null((await before.CatchUpAsync()).Code);
+        }
+
+        await ClosedAsync(factory, replicaId);
+
+        clock.Advance(TimeSpan.FromDays(8));
+        await factory.Services.GetRequiredService<ReplicaRetirement>()
+            .RetireAsync(TestContext.Current.CancellationToken);
+
+        Assert.NotNull(await RetiredAtAsync(factory, replicaId));
+
+        using var http = factory.ClientFor("shape");
+        using var response = await http.PostAsJsonAsync(
+            new Uri($"/documents/{documentId}/negotiate", UriKind.Relative),
+            new { replicaId },
+            TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        using var json = System.Text.Json.JsonDocument.Parse(body);
+
+        // The field names the client reads, verbatim, and their values.
+        Assert.False(json.RootElement.GetProperty("resumed").GetBoolean());
+        Assert.NotEqual(
+            replicaId, json.RootElement.GetProperty("replicaId").GetGuid());
     }
 
     /// <summary>Waits until this instance no longer holds the replica's connection.</summary>
