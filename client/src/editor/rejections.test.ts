@@ -25,6 +25,10 @@ const ID = '00000000-0000-0000-0000-00000000000a';
 const PEER = parseReplicaId('00000000-0000-0000-0000-00000000000b');
 
 class RefusingTransport implements Transport {
+  acknowledge(): Promise<void> {
+    return Promise.resolve();
+  }
+
   broadcast: ((operations: Uint8Array) => void) | null = null;
   closed: (() => void) | null = null;
 
@@ -82,7 +86,18 @@ function harness(transport: RefusingTransport) {
     [],
     {
       random: () => 0.5,
+
+      // §5's report timer shares the controller's scheduling seam with the
+      // reconnect backoff. This file is about retries, so the acknowledgement
+      // is given an interval no backoff produces and dropped — counting it as
+      // a scheduled retry is what turned two of these tests red when the timer
+      // was added.
+      acknowledgeEveryMs: ACK_EVERY_MS,
       schedule: (run, delayMs) => {
+        if (delayMs === ACK_EVERY_MS) {
+          return;
+        }
+
         delays.push(delayMs);
         pending.push(run);
       },
@@ -147,6 +162,9 @@ describe('the recovery table', () => {
     expect(recoveryFor(REJECTION.replicaMismatch)).toBe('stop');
   });
 });
+
+/** An interval the reconnect backoff never produces, so the two timers are told apart. */
+const ACK_EVERY_MS = 987_654;
 
 describe('acting on a refusal', () => {
   it('catches up and retries once on unknown_origin, then gives up', async () => {

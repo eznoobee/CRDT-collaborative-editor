@@ -191,6 +191,11 @@ export class SignalRTransport implements Transport {
     return { replicaId: negotiated.replicaId, resumed: negotiated.resumed };
   }
 
+  /** §5's timed report of what this replica holds. */
+  async acknowledge(known: Record<string, number>): Promise<void> {
+    await this.require().invoke('AcknowledgeAsync', known);
+  }
+
   async submit(operations: Uint8Array): Promise<SubmitOutcome> {
     const connection = this.require();
     if (this.assigned === null) {

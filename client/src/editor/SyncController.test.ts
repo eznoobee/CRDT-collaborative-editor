@@ -27,6 +27,9 @@ const PEER = parseReplicaId('00000000-0000-0000-0000-00000000000b');
 /** What the server mints when it refuses a resumption (§7). */
 const FRESH = '00000000-0000-0000-0000-00000000000c';
 
+/** An interval the reconnect backoff never produces, so the two timers are told apart. */
+const ACK_EVERY_MS = 987_654;
+
 class FakeTransport implements Transport {
   broadcast: ((operations: Uint8Array) => void) | null = null;
   closed: (() => void) | null = null;
@@ -39,6 +42,14 @@ class FakeTransport implements Transport {
   /** Queued answers; the last one repeats. */
   connectResults: (Session | Error)[] = [{ replicaId: ID, resumed: false }];
   catchUpResult: CatchUpOutcome = { code: null, snapshot: null, operations: encodeOperations([]) };
+
+  /** Every acknowledgement the controller sent, in order (§5). */
+  acknowledged: Record<string, number>[] = [];
+
+  acknowledge(known: Record<string, number>): Promise<void> {
+    this.acknowledged.push(known);
+    return Promise.resolve();
+  }
   submitResults: (SubmitOutcome | Error)[] = [{ code: null }];
 
   connect(replicaId: string | null): Promise<Session> {
@@ -96,6 +107,7 @@ function controller(transport: FakeTransport, options: {
   restored?: string;
 } = {}) {
   const pending: (() => void)[] = [];
+  const acks: (() => void)[] = [];
   const sync = new SyncController(
     (replicaId) => {
       const built = new DocumentSession(parseReplicaId(replicaId), () => {});
@@ -110,7 +122,16 @@ function controller(transport: FakeTransport, options: {
     options.outbox ?? [],
     {
       random: () => 0.5,
-      schedule: (run) => pending.push(run),
+
+      // §5's report timer and the reconnect backoff share one scheduling seam
+      // in the controller, which is right there and wrong here: a test that
+      // drains "the next scheduled thing" would run whichever was queued first
+      // and assert about the other. Routed apart by delay, with an interval no
+      // backoff produces, so `tick` still means "run the retry".
+      acknowledgeEveryMs: ACK_EVERY_MS,
+      schedule: (run, delayMs) => {
+        (delayMs === ACK_EVERY_MS ? acks : pending).push(run);
+      },
     },
   );
 
@@ -119,6 +140,14 @@ function controller(transport: FakeTransport, options: {
     /** Runs whatever retry was scheduled. */
     async tick(): Promise<void> {
       const next = pending.shift();
+      next?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+    /** Runs the acknowledgement timer (§5), which is not a retry. */
+    async ackTick(): Promise<void> {
+      const next = acks.shift();
       next?.();
       await Promise.resolve();
       await Promise.resolve();
@@ -182,6 +211,74 @@ describe('connecting', () => {
     // The local text is gone, which is what a snapshot means: the server's
     // whole answer, taken when local state was not worth reconciling.
     expect(sync.session?.text).toBe('server');
+  });
+});
+
+describe("§5's acknowledgement", () => {
+  it('reports what this replica holds on its own timer, with nobody calling it', async () => {
+    // §13.41, ACROSS THE CLIENT/SERVER BOUNDARY. The hub has had
+    // AcknowledgeAsync since 7.2, added because a viewer never submits and
+    // would otherwise freeze the stability frontier. Nothing in this client
+    // ever called it. The server-side tests all passed — they drive the hub
+    // method directly — and in the product the frontier stayed wherever
+    // catch-up left it, which for a fresh replica is nothing, so garbage
+    // collection could only run on documents everybody had abandoned for seven
+    // days.
+    //
+    // So: nobody calls anything here. The controller goes live, the scheduled
+    // work runs, and the transport has to receive an acknowledgement on its
+    // own.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+    sync.session?.edit('hello');
+
+    expect(transport.acknowledged).toHaveLength(0);
+
+    await harness.ackTick();
+
+    expect(transport.acknowledged).toHaveLength(1);
+
+    // And it reports what the replica actually holds, not an empty vector: five
+    // code points from this replica. An acknowledgement of nothing is what the
+    // frontier already had.
+    const [first] = transport.acknowledged;
+    expect(Object.values(first!)).toEqual([5]);
+  });
+
+  it('keeps reporting, because one report is a frontier that stops advancing', async () => {
+    // The pair. A single acknowledgement at connect is what catch-up already
+    // did; the property is that it repeats while the tab is open.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+
+    sync.session?.edit('a');
+    await harness.ackTick();
+    sync.session?.edit('ab');
+    await harness.ackTick();
+
+    expect(transport.acknowledged).toHaveLength(2);
+    expect(Object.values(transport.acknowledged[1]!)).toEqual([2]);
+  });
+
+  it('stops when the controller stops', async () => {
+    // A tab that has been closed must not go on holding a slot in anyone's
+    // arithmetic, and a timer that outlives its controller is a leak in a
+    // single-page application that opens documents repeatedly.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+    await sync.stop();
+    await harness.ackTick();
+
+    expect(transport.acknowledged).toHaveLength(0);
   });
 });
 

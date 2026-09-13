@@ -70,6 +70,17 @@ export interface Transport {
 
   catchUp(known: Record<string, number>, forceSnapshot: boolean): Promise<CatchUpOutcome>;
 
+  /**
+   * Tells the server what this replica holds (§5's third report path).
+   *
+   * @remarks
+   * Separate from catch-up because a client that is up to date has nothing to
+   * catch up on and still has to say so: the stability frontier is the minimum
+   * over what live replicas have acknowledged, and a replica that stops
+   * reporting freezes it at whatever it last said.
+   */
+  acknowledge(known: Record<string, number>): Promise<void>;
+
   /** Registers the handler for broadcasts (§8). */
   onBroadcast(handler: (operations: Uint8Array) => void): void;
 
@@ -100,6 +111,17 @@ export interface SyncOptions {
 
   /** Schedules a retry. Injected so tests do not wait out real delays. */
   readonly schedule?: (run: () => void, delayMs: number) => void;
+
+  /**
+   * How often to report what this replica holds, in milliseconds (§5).
+   *
+   * @remarks
+   * A throughput knob rather than a correctness one, in one direction only:
+   * reporting less often delays GC and never breaks it, because the frontier is
+   * a minimum over what replicas have *said*, and saying less is always safe.
+   * Not reporting at all is the failure — see the timer below.
+   */
+  readonly acknowledgeEveryMs?: number;
 }
 
 /**
@@ -125,6 +147,8 @@ export class SyncController {
   private readonly transport: Transport;
   private readonly backoff: Backoff;
   private readonly schedule: (run: () => void, delayMs: number) => void;
+  private readonly acknowledgeEveryMs: number;
+  private acknowledging = false;
   private readonly listeners = new Set<() => void>();
 
   private outbox: Uint8Array[] = [];
@@ -157,6 +181,12 @@ export class SyncController {
     this.outbox = [...outbox];
     this.backoff = new Backoff(options.backoff ?? DEFAULT_BACKOFF, options.random);
     this.schedule = options.schedule ?? ((run, delay) => setTimeout(run, delay));
+
+    // Thirty seconds. §5 bounds nothing here — a slower report only delays
+    // collection — so this is chosen against the other end: T_retire is seven
+    // days, and a report frequent enough that an ordinary session contributes
+    // many of them costs one small message a minute per open tab.
+    this.acknowledgeEveryMs = options.acknowledgeEveryMs ?? 30_000;
 
     transport.onBroadcast((operations) => {
       // A broadcast can land before this client has a session — the server
@@ -311,7 +341,68 @@ export class SyncController {
     await this.reconcile(refused);
 
     this.setState('live');
+    this.beginAcknowledging();
     await this.drain();
+  }
+
+  /**
+   * Reports what this replica holds, on a timer, for as long as it is live (§5).
+   *
+   * @remarks
+   * <p>
+   * <b>Nothing else reports it, and without this the stability frontier never
+   * advances for a document anybody has open.</b> §5 names three paths by which
+   * the server learns what a replica holds: catch-up, a piggyback on
+   * submission, and this timer. Catch-up runs once per connection and reports
+   * what the client held <i>before</i> it received anything, which for a new
+   * replica is nothing; the piggyback is not built (register row 32). So this
+   * is the only one, and with it missing the frontier stayed where catch-up
+   * left it and garbage collection could only ever run on a document whose
+   * replicas had all been retired — seven days of nobody opening it.
+   * </p><p>
+   * That is §13.32's shape one layer out: 7.2 added the acknowledgement to the
+   * hub because a viewer never submits, and then the only thing that called it
+   * was a test client. §13.41's question — does anything invoke this, or only
+   * the test? — has to be asked across the client/server boundary too, because
+   * "the product" is both.
+   * </p><p>
+   * Failures are swallowed. An acknowledgement is advisory: losing one delays
+   * collection and breaks nothing, and a rejected promise here would surface as
+   * an unhandled rejection in a browser tab that is otherwise working.
+   * </p>
+   */
+  private beginAcknowledging(): void {
+    if (this.acknowledging) {
+      return;
+    }
+
+    this.acknowledging = true;
+    this.schedule(() => void this.acknowledgeTick(), this.acknowledgeEveryMs);
+  }
+
+  private async acknowledgeTick(): Promise<void> {
+    if (this.stopped) {
+      this.acknowledging = false;
+      return;
+    }
+
+    if (this.current === 'live' && this.sessionState !== null) {
+      const known: Record<string, number> = {};
+      for (const [replica, next] of this.sessionState.versionVector) {
+        known[replica] = Number(next);
+      }
+
+      try {
+        await this.transport.acknowledge(known);
+      } catch {
+        // Advisory. The next tick reports a superset of this one.
+      }
+    }
+
+    this.acknowledging = false;
+    if (!this.stopped) {
+      this.beginAcknowledging();
+    }
   }
 
   /** Stops reconnecting and closes. */

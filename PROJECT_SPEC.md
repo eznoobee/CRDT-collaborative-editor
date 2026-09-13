@@ -543,6 +543,24 @@ open** — and the symptom is not an error, it is GC quietly reclaiming nothing.
 Every test in which the participants type would pass. §13.32's shape again: a
 mechanism attached to writing does not cover principals who only read.
 
+**7.7's finding: two of those three paths did not exist, and the one that did
+reports nothing useful.** The piggyback was never built, and the timed
+acknowledgement existed only as a hub method that nothing in the browser
+called — `AcknowledgeAsync` was added in 7.2 with a C# test client as its only
+caller. That leaves catch-up, which runs once per connection and reports what
+the client held *before* it received anything: for a fresh replica, nothing. So
+the frontier stayed where catch-up left it for as long as anyone had the
+document open, and collection could only ever run on a document whose replicas
+had all been retired — seven days of nobody touching it.
+
+Every server-side test passed throughout, because they drive the hub method
+directly. **§13.41's question has to be asked across the client/server boundary,
+not only within one side of it:** "does anything invoke this" means anything in
+the product, and the product is both halves. The clause above was written to
+stop a viewer freezing the frontier, and the defect it warned about arrived
+anyway, one layer out — with *every* replica in the viewer's position, because
+none of them reported either.
+
 *Rejected: inferring `A(r)` from what the server delivered.* The broadcaster
 knows what it sent each connection, and sent is not received — a dropped socket
 loses the difference, and GC would collect what a client never got. *Rejected:
@@ -2446,6 +2464,8 @@ written, not done).
 | 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
 | 30 | `resync_required` has no reachable path until the log is truncated | **7b** | Found in 7.4 while writing the emitter. §5's collection shrinks the snapshot and never the log, and the frontier is clamped to the log — so an id below the frontier from a known author is always present, and the condition cannot arise from any client action. The rule is implemented, narrow, and pinned by sabotage, and every test of it constructs the frontier directly because nothing else can. The end-to-end test belongs with log truncation, and is a row rather than a good intention | §5, §9, §13.19 |
 | 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
+| 32 | §5's acknowledgement piggybacked on submission | **7b** | The second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
+| 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
