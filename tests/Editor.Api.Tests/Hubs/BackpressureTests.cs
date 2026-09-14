@@ -64,6 +64,8 @@ public sealed class BackpressureTests
     {
         public long LiveReplicas => 0;
 
+        public long ActiveReplicas => 0;
+
         public long SilentReplicas => 0;
 
         public long RetiredReplicas => 0;

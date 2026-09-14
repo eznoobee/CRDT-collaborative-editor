@@ -74,10 +74,16 @@ public sealed class EditorMetrics : IDisposable
             description: "Replicas not yet retired, counted from the rows (§5).");
 
         _meter.CreateObservableGauge(
+            "editor.replicas.active",
+            () => state.ActiveReplicas,
+            unit: "{replica}",
+            description: "Live replicas seen recently — the denominator for silent (§5).");
+
+        _meter.CreateObservableGauge(
             "editor.replicas.silent",
             () => state.SilentReplicas,
             unit: "{replica}",
-            description: "Live replicas that have never said what they hold (§5).");
+            description: "Recently active replicas that have never said what they hold (§5).");
 
         _meter.CreateObservableGauge(
             "editor.replicas.retired.stored",

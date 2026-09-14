@@ -18,6 +18,31 @@ public sealed class StateReadingOptions
     /// background sweep anyway.
     /// </remarks>
     public TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How recently a replica must have been seen to count as active.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Without a window, "silent replicas" is a permanently red
+    /// signal.</strong> A replica stays live until <c>T_retire</c> — seven days
+    /// — so every abandoned session accumulates in the count, and an absolute
+    /// total is dominated by history rather than by anything happening now. The
+    /// first run of this gauge read 215 silent of 234 live, almost all of it
+    /// sessions from previous days.
+    /// </para><para>
+    /// That is row 8's first finding arriving in the fix for its second: a
+    /// signal that is always red has no diagnostic value, whatever it measures.
+    /// The window makes it a reading about the present — a replica seen in the
+    /// last few minutes that has never said what it holds is an anomaly; the
+    /// same replica a week later is waiting for retirement.
+    /// </para><para>
+    /// Fifteen minutes: three times §5's five-minute connection heartbeat, so a
+    /// live connection is always inside it and a closed one leaves within three
+    /// missed beats.
+    /// </para>
+    /// </remarks>
+    public TimeSpan ActiveWindow { get; set; } = TimeSpan.FromMinutes(15);
 }
 
 /// <summary>
@@ -32,6 +57,8 @@ public sealed class StateReadingOptions
 public interface IStateReadings
 {
     long LiveReplicas { get; }
+
+    long ActiveReplicas { get; }
 
     long SilentReplicas { get; }
 
@@ -78,7 +105,11 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
     private const string Replicas = """
         SELECT
             count(*) FILTER (WHERE retired_at IS NULL) AS live,
-            count(*) FILTER (WHERE retired_at IS NULL AND acknowledged = '{}'::jsonb) AS silent,
+            count(*) FILTER (WHERE retired_at IS NULL AND last_seen_at > $1) AS active,
+            count(*) FILTER (
+                WHERE retired_at IS NULL
+                  AND last_seen_at > $1
+                  AND acknowledged = '{}'::jsonb) AS silent,
             count(*) FILTER (WHERE retired_at IS NOT NULL) AS retired
         FROM document_replicas;
         """;
@@ -91,6 +122,7 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
     private readonly ILogger<StateReadings> _logger;
 
     private long _live;
+    private long _active;
     private long _silent;
     private long _retired;
     private long _snapshots;
@@ -116,7 +148,16 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
     public long LiveReplicas => Interlocked.Read(ref _live);
 
     /// <summary>
-    /// Live replicas whose acknowledged vector is empty.
+    /// Live replicas seen within <see cref="StateReadingOptions.ActiveWindow"/>.
+    /// </summary>
+    /// <remarks>
+    /// The denominator <see cref="SilentReplicas"/> needs. "Six silent" means
+    /// nothing without it; "six silent of six active" is a diagnosis.
+    /// </remarks>
+    public long ActiveReplicas => Interlocked.Read(ref _active);
+
+    /// <summary>
+    /// Recently active replicas whose acknowledged vector is empty.
     /// </summary>
     /// <remarks>
     /// The reading that would have caught row 8's break. A replica that has
@@ -140,13 +181,22 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
             .ConfigureAwait(false);
 
         await using (var command = new NpgsqlCommand(Replicas, connection))
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                Value = _time.GetUtcNow() - _options.ActiveWindow,
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 Interlocked.Exchange(ref _live, reader.GetInt64(0));
-                Interlocked.Exchange(ref _silent, reader.GetInt64(1));
-                Interlocked.Exchange(ref _retired, reader.GetInt64(2));
+                Interlocked.Exchange(ref _active, reader.GetInt64(1));
+                Interlocked.Exchange(ref _silent, reader.GetInt64(2));
+                Interlocked.Exchange(ref _retired, reader.GetInt64(3));
             }
         }
 
