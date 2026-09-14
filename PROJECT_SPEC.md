@@ -2466,6 +2466,7 @@ written, not done).
 | 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
 | 32 | §5's acknowledgement piggybacked on submission | **7b** | The second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
 | 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
+| 34 | Audit the convergence tests for §13.42's shape | **7b** | §13.42 was found in the one test guarding the only operation that destroys data, and the setup that produced it — compose on A, deliver to B, compare — is how every convergence test in this repository is naturally written. Twenty files carry such an assertion. One lead already: `ScaleOutTests`' rejoin case compares `kept.Normalised` to a `rejoined` replica that adopted a server snapshot wholesale, so what it proves is closer to "the snapshot round-trips" than to "two replicas independently agree". Each test needs the §13.42 question asked of it by hand — what property is under test, and could the checking party have got it from the party being checked — which is judgement per file rather than a grep, and more than an afternoon | §13.42, §13.19 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -5100,13 +5101,36 @@ passed with §5's rule 4 deleted from `Replica.Collect` — the rule whose entir
 purpose is to keep that comparison honest — and it was the count assertion beside
 it, not the comparison, that went red.
 
-The reason generalises past GC. **A comparison between two implementations, two
-replicas or two states is only a comparison while both sides decide
-independently.** The collected replica computed a right origin from its own view;
-the control was handed that answer and had nothing left to decide. Transparency
-was true by construction, so the test could not have failed, and it had exactly
-the shape §13.19 describes: a sound-looking assertion over an input that cannot
-disagree with it.
+The general form, stated carefully because this is the most important test in
+the project and it was asserting nothing:
+
+> **A test comparing two parties proves nothing if one party's answer was
+> derived from the other's.**
+
+The collected replica computed a right origin from its own view; the control was
+handed that answer and had nothing left to decide. Transparency was true by
+construction, so the test could not have failed, and it had exactly the shape
+§13.19 describes: a sound-looking assertion over an input that cannot disagree
+with it.
+
+**Convergence tests are structurally prone to this**, and that is the part worth
+carrying forward rather than the GC specifics. Handing state across is the
+*natural* way to set one up — compose on A, deliver to B, compare — and it is
+also how the property gets faked. The distinction is not "did A send B
+anything", because in a CRDT that is the whole mechanism; operations are the
+input and each replica must still place them itself. The distinction is
+narrower:
+
+> **Ask what property is under test, and then ask whether the checking party
+> could have obtained that property from the party being checked.** Delivering
+> an operation is fine. Delivering the *answer to the question being asked* is
+> not.
+
+In 7.3 the question was "do these two replicas compute the same right origin",
+and the operation handed across carried that right origin inside it. The repair
+is to make both sides compute independently and then exchange — which is also
+what makes the test resemble the situation it is supposed to model, since in
+production nobody hands anybody a pre-decided placement.
 
 The fix is to ask what the thing under test is *for*. A right origin exists to
 order an insert against a competing one, so the continuation has to be
@@ -5127,3 +5151,51 @@ running it, but by running the sabotage. Both of the last two entries were found
 that way. A test written to check a property and a test that can fail to check it
 look identical in a green run, and the sabotage is the only routine step that
 distinguishes them.
+
+### 13.43 A rule installs a habit only when it is mechanical; one phrased as care does not
+
+Three rules in this document have now been broken by the person who had just
+finished writing them.
+
+| Rule | Written in | Broken in | How it is phrased |
+|---|---|---|---|
+| Duration boundaries: read the clock, never estimate elapsed time (§13.38) | 6b | again in 7.7 — Stryker called "~15 minutes" when the clock said 6 | mechanical, but not *used* mechanically |
+| Sabotage from a committed tree (§12) | 6b.4 | 7.4, the very next task — `git checkout` took the uncommitted implementation with the sabotage | "commit first, or copy the file aside" |
+| §13.40's own subject — writing a rule does not install it | 7.1 | this entry | — |
+
+The pattern across all three is not carelessness, and treating it as carelessness
+is what guarantees the fourth. **A rule that names a thing to be careful about
+depends on the author remembering to be careful at the exact moment they are
+absorbed in something else** — which is precisely when they will not. A rule that
+names a *mechanical act*, tied to a moment that is already unavoidable, survives
+the same distraction.
+
+Compare the two that have held:
+
+- **"Derive the expected job set from `.github/workflows/`, never from the
+  report."** There is no moment at which the preflight can be run and this can be
+  skipped; the script does it. Held across every phase since.
+- **"Read the clock."** Held wherever it was written as `date -u` in a command,
+  and failed twice where it was left as a thing to remember.
+
+So the test for whether a §12 rule will hold is not how important it is. It is:
+**is there a moment at which someone would have to actively choose to comply?**
+If yes, it will eventually be skipped under pressure, and the fix is not to
+restate it more firmly but to move the compliance into something that runs
+anyway — a script, a gate, a step whose absence is visible.
+
+Two repairs from this entry, both concrete:
+
+1. **Commit before the first sabotage, not before the first revert.** The old
+   phrasing put the obligation at revert time, which is after the interesting
+   part; the new one attaches it to an act that already has a natural moment
+   (the tests going green).
+2. **The tell, when it fails anyway: two different sabotages producing identical
+   failure lists means doubt the tree.** A mechanical signature beats a
+   reminder to be careful, because it fires from the output rather than from
+   memory.
+
+This entry predicts which of §12's rules will survive: the sabotage practice
+itself and the preflight will, because both are scripts; the vacuity-risk
+statement and the three questions will need to be carried into the breakdown
+template, or they will be the next things skipped when a phase is busy.
