@@ -58,6 +58,19 @@ public static partial class AdminEndpoint
 
         builder.Services.AddSingleton<MetricsSnapshot>();
 
+        // Constructed at startup, not on the first scrape. A MeterListener sees
+        // measurements from the moment it starts, so a snapshot built lazily by
+        // the first request reports zero for everything that happened before
+        // anyone looked — which is every counter, in a service nobody scrapes
+        // until something is already wrong.
+        //
+        // This was found by reading the dashboards rather than by a test, and
+        // the test that should have caught it did not: it resolved the snapshot
+        // from the container and THEN submitted, so the listener was running for
+        // a reason that does not hold in the running server. §13.41 inside a
+        // test written to guard §13.15.
+        builder.Services.AddHostedService<MetricsSnapshotStarter>();
+
         var port = builder.Configuration.GetValue<int>($"{AdminOptions.Section}:Port");
         if (port != 0)
         {
@@ -105,4 +118,24 @@ public static partial class AdminEndpoint
             Message = "Admin readings on port {Port} (PROJECT_SPEC.md §10).")]
         public static partial void Listening(ILogger logger, int port);
     }
+}
+
+/// <summary>
+/// Starts the metric listener when the host starts, rather than when someone
+/// first asks for a reading.
+/// </summary>
+/// <remarks>
+/// A hosted service rather than an eager <c>GetRequiredService</c> call in
+/// <c>Program</c>, so the ordering is the framework's and not a line somebody
+/// can move. It does no work: constructing <see cref="MetricsSnapshot"/> is
+/// the work, because that is what subscribes.
+/// </remarks>
+internal sealed class MetricsSnapshotStarter : IHostedService
+{
+    public MetricsSnapshotStarter(MetricsSnapshot snapshot) =>
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

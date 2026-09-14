@@ -76,9 +76,13 @@ public sealed class AdminMetricsTests
         _fixture.RequireBoth();
         await using var factory = new EditorApiFactory(_fixture);
 
-        var snapshot = factory.Services.GetRequiredService<MetricsSnapshot>();
-        var before = Counter(snapshot.ToJson(), "editor.operations.applied");
-
+        // NOT resolved before the traffic, deliberately. The first version of
+        // this test fetched the snapshot from the container and then submitted,
+        // which started the MeterListener as a side effect — so it passed
+        // against a server where nothing constructs the snapshot until the
+        // first scrape, and every counter recorded before that scrape was
+        // invisible. The dashboards read zero for everything and it was reading
+        // them, not this test, that found it.
         var documentId = await DocumentSetup.DocumentAsync(factory, "metrics-read-owner");
         await DocumentSetup.GrantAsync(factory, documentId, "metrics-read", Role.Editor);
 
@@ -87,7 +91,11 @@ public sealed class AdminMetricsTests
             Assert.Null((await client.SubmitAsync(client.Writer.Type("four"))).Code);
         }
 
-        Assert.Equal(before + 4, Counter(snapshot.ToJson(), "editor.operations.applied"));
+        var snapshot = factory.Services.GetRequiredService<MetricsSnapshot>();
+
+        // Four, not "more than zero": the listener has to have been running for
+        // the whole submission, not to have caught the tail of it.
+        Assert.Equal(4, Counter(snapshot.ToJson(), "editor.operations.applied"));
     }
 
     [Fact]
