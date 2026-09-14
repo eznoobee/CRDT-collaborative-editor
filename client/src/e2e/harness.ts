@@ -84,7 +84,13 @@ export async function startSystem(): Promise<System> {
   const spaRoot = build();
 
   const oidc = await startOidc();
-  const api = await startApi(oidc, log, { spaRoot });
+
+  // §8's measurements pass 'Release' and record it (§8's build rule); the
+  // correctness suites leave it alone and get Debug, unchanged.
+  const api = await startApi(oidc, log, {
+    spaRoot,
+    configuration: process.env.EDITOR_E2E_CONFIGURATION === 'Release' ? 'Release' : 'Debug',
+  });
 
   // Registered exactly, as §7 requires: one URI, matched literally. The issuer
   // refuses anything else outright rather than redirecting to it.
