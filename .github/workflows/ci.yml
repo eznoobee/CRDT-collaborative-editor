@@ -315,6 +315,20 @@ jobs:
       - name: Deployment conformance
         run: ./scripts/deployment.sh
 
+  breakdown:
+    name: §12's required fields in every breakdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # §13.43: the vacuity-risk statement and §12's three questions were
+      # honoured by hand for four phases and were the things most likely to be
+      # skipped when a phase ran long, because nothing mechanical forced them.
+      # This is the thing that forces them. It also self-tests against a
+      # deliberately malformed fixture, so a gate that stopped rejecting would
+      # fail rather than go quiet.
+      - name: Breakdown fields
+        run: ./scripts/check-breakdown.sh
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

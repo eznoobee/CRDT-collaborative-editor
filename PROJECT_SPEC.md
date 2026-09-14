@@ -1772,6 +1772,29 @@ measurement point is not a falsifiable claim.
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
 | Document load, **browser**, 100k live characters + 500k tombstones | reported, no threshold — see below |
 
+**A measurement is not done until something has been deliberately broken and the
+measurement said which thing** (7b.0). This is §13.22's rule generalised from
+dashboards to every number in §8. A threshold nobody has seen fail is a
+threshold nobody has shown to be attached to anything: it passes on a harness
+that measures the wrong segment, on a generator that saturates before the server
+does, and on a sample too small for the percentile to mean what it says. Each
+target therefore records what was broken to make it fail and what the
+measurement then reported.
+
+Three ways a performance number looks right and is not, all of them seen or
+narrowly missed in this project:
+
+1. **The wrong segment.** 3b.1's near-miss: a length measured on the payload
+   rather than the frame showed two protocols as identical, because the
+   inflation being measured lived in the frame. Each target's endpoints are
+   named above; the harness must assert it instruments that segment.
+2. **The generator is the bottleneck.** If the load harness saturates first, the
+   number describes the harness. The generator's own utilisation is reported
+   beside every result, or the result is not one.
+3. **Too few samples for the percentile.** A p99 over 50 requests is the worst
+   of 50. **The sample count is part of the reported result**; a percentile
+   without one is decoration.
+
 **Every performance number is reported with the build that produced it**, and a
 number without one is not a result. At minimum: the runtime configuration
 (`Debug`/`Release` for .NET, the resolved `NODE_ENV` and whether minification
@@ -2389,6 +2412,47 @@ same requirement every hand-written trace carries.
   latency histogram, active connections, GC reclaimed elements, snapshot age,
   retired replicas, resync-required responses.
 - Traces spanning receive → validate → persist → broadcast.
+
+**The metric list is a list of names that must exist and must move.** "The
+metric exists" is satisfied by a counter registered and never incremented, which
+is §13.15's shape and has been hit twice here already. Each name above needs a
+test that makes it move; a counter whose only states are zero and non-zero needs
+the pair — a case where it moves and a case where it does not — or "non-zero"
+is indistinguishable from "always non-zero".
+
+**The correlation id is per connection, not per request**, and the distinction
+is invisible to any single-request test. It is asserted by following one
+connection across several operations and requiring the same id, and across two
+connections and requiring different ones.
+
+**§13.32 applies to the metric list itself.** A metric keyed on submission
+covers writers and nobody else, so presence, catch-up and §5's acknowledgement
+timer must each be represented — otherwise the dashboards show a document being
+read as a document nobody is using, which is the same blind spot that let one
+viewer hold the stability frontier still for a whole phase.
+
+**Dashboards are judged by a diagnosis, and the diagnosis follows a procedure
+written before the break.** §13.22 rewrote "dashboards exist" into "the
+dashboards alone say which target broke and on which instance", and 7b adds the
+part that makes it a real constraint rather than a gesture. Whoever breaks a
+target and whoever reads the dashboard are, here, the same agent — holding the
+code just changed and the reasoning about where it would show. **A seed makes
+the selection mechanical without making the searcher ignorant of the search
+space**, so two further things are required:
+
+1. **The reading order is written before the break**: given a target violation,
+   which dashboard is consulted first and what each answer rules out. It is then
+   followed mechanically rather than reasoned freshly. If the procedure reaches
+   the right subsystem, the dashboards did the work; departing from it means
+   they did not, and the report says so.
+2. **The seed picks from a list written before any break is implemented, and
+   that list includes breaks expected to be undiagnosable.** A set of only
+   diagnosable failures is a set constructed to pass. The known-invisible entry
+   is what demonstrates the dashboards have edges, and the honest result reads
+   "the seed picked the one I expected to be invisible, and it was."
+
+This remains **weaker than having a second person diagnose it**, and the report
+says so rather than claiming the stronger result.
 - `/health/live` and `/health/ready`; readiness checks Postgres and Redis.
 - **A deployment smoke test asserts a request that reads a row**, never only
   that a process answers. `/health/live` returning 200 means the process is
@@ -2700,6 +2764,29 @@ the base64 inflation being measured lives in the frame and not in the payload.
 That measurement would have looked correct, produced a plausible number, and
 decided the protocol wrongly. Nothing about the resulting code would have looked
 wrong afterwards.
+
+**The required fields are checked, not remembered (7b.0).** `docs/breakdown-template.md`
+defines them and `scripts/check-breakdown.sh` enforces them from the preflight
+and from CI: every task section must carry *Done when*, *Vacuity risk*, and
+§12's three questions, and "Not applicable" must be followed by a reason,
+because an unexplained n/a is a required field decaying into a box to tick.
+**A breakdown missing a field is malformed and fails; it is not merely
+incomplete, which is a thing nobody notices.**
+
+§13.43 is why this is a gate. The vacuity-risk statement had been honoured by
+hand since Phase 3b and the three questions since Phase 7, and both were exactly
+the things predicted to go first when a phase ran long. The prediction was
+confirmed immediately and at the author's own expense: run against the Phase 7b
+breakdown — written one message earlier, by someone with the three questions
+explicitly in mind — the new checker reported **42 missing fields across 12
+tasks.** The questions had been answered where they felt relevant and silently
+omitted everywhere else, which is precisely the failure mode, and no amount of
+intending to do better would have surfaced it.
+
+The gate self-tests. A deliberately malformed fixture lives at
+`tests/fixtures/breakdown/malformed-breakdown.md`, the no-argument run checks
+that the fixture is *rejected*, and a checker that stopped rejecting fails
+rather than going quiet — §13.19 one level up from the tests it polices.
 
 A second thing this format surfaces: **a task whose verification needs
 infrastructure that does not exist yet is written, not done.** The breakdown says
