@@ -123,7 +123,7 @@ public sealed class SnapshotGarbageCollector : ISnapshotGarbageCollector
         // uses. The identity matters only for operations this replica would
         // author, and collection authors none.
         var (replica, serverSeq) = await _store
-            .LoadForCollectionAsync(
+            .LoadAtHeadAsync(
                 documentId, ReplicaIdConversion.FromGuid(documentId), cancellationToken)
             .ConfigureAwait(false);
 

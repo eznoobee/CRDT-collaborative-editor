@@ -22,16 +22,27 @@ public readonly record struct SnapshotPolicy(int OperationsPerSnapshot)
     public static SnapshotPolicy Default => new(500);
 
     /// <summary>
-    /// Whether a snapshot is due, given the sequence before and after a batch.
+    /// Whether a document is due a snapshot, given where its latest snapshot
+    /// sits and where its log has reached.
     /// </summary>
     /// <remarks>
-    /// Crossing a multiple rather than reaching one exactly: batches move the
-    /// sequence by more than one, so an equality test would step over the
-    /// threshold and never fire.
+    /// <para>
+    /// <strong>A gap, not a crossing.</strong> This asked, until 7b.3, whether a
+    /// single batch had stepped over a multiple of N — the right question for an
+    /// inline caller that sees every batch, and the wrong one for the background
+    /// sweep §8 requires, which sees documents. The gap form is also the
+    /// self-healing one: a crossing missed to a restart or a lost notification
+    /// left a document unsnapshotted for another N operations, whereas a gap
+    /// only widens until something closes it.
+    /// </para><para>
+    /// <c>&gt;=</c> rather than <c>&gt;</c>: N operations since the last
+    /// snapshot is the interval §6 names, so the Nth is when it is due and not
+    /// the N+1th.
+    /// </para>
     /// </remarks>
-    public bool IsDue(long previousServerSeq, long currentServerSeq) =>
+    public bool IsDue(long snapshotServerSeq, long headServerSeq) =>
         OperationsPerSnapshot > 0
-        && previousServerSeq / OperationsPerSnapshot != currentServerSeq / OperationsPerSnapshot;
+        && headServerSeq - snapshotServerSeq >= OperationsPerSnapshot;
 }
 
 /// <summary>Loads and snapshots documents (PROJECT_SPEC.md §6).</summary>
@@ -102,10 +113,16 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
     }
 
     /// <summary>
-    /// Rebuilds a document for collection, answering the sequence it reached.
+    /// Rebuilds a document and answers the sequence the replay reached.
     /// </summary>
     /// <remarks>
     /// <para>
+    /// The sequence is the reason this exists alongside <see cref="LoadAsync"/>:
+    /// both of its callers write the rebuilt state back as a snapshot, and a
+    /// snapshot stamped at any sequence other than the one its state actually
+    /// contains silently drops every operation in between. Looking the head up
+    /// in a second query would be that bug with extra steps.
+    /// </para><para>
     /// <strong>Collection runs against the full replay, never against a stored
     /// snapshot in place.</strong> <see cref="LoadAsync"/> applies every
     /// operation after the latest snapshot, so an element collected out of that
@@ -117,16 +134,18 @@ public sealed class DocumentStore(NpgsqlDataSource dataSource)
     /// </para><para>
     /// Collecting the replayed state and writing it back at the sequence the
     /// replay reached moves that boundary to the head, where the rules do
-    /// apply. The sequence is returned rather than looked up again because the
-    /// two must be the same number: a snapshot stamped later than the state it
-    /// contains silently drops every operation in between.
+    /// apply.
+    /// </para><para>
+    /// §6's periodic snapshot has no such constraint — it stores the state as
+    /// it is — but wants the same two answers, so it uses this rather than a
+    /// second method that would drift from it.
     /// </para><para>
     /// Repeatable read for the same reason. The snapshot and the operations
     /// after it are two queries, and a snapshot written between them by the
     /// periodic policy would otherwise have its operations replayed twice.
     /// </para>
     /// </remarks>
-    public async Task<(Replica Replica, long ServerSeq)> LoadForCollectionAsync(
+    public async Task<(Replica Replica, long ServerSeq)> LoadAtHeadAsync(
         Guid documentId, ReplicaId asReplica, CancellationToken cancellationToken = default)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)

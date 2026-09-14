@@ -159,6 +159,33 @@ public static class PersistenceExtensions
         services.AddSingleton<TombstoneCollector>();
         services.AddHostedService(provider => provider.GetRequiredService<TombstoneCollector>());
 
+        // §6's periodic snapshot. Register row 28: the policy and the writer
+        // were built and nothing called them, so these three lines are the
+        // subsystem — everything below them already existed.
+        services.AddOptions<SnapshotOptions>()
+            .BindConfiguration(SnapshotOptions.Section)
+            .Validate(
+                options => options.BatchSize > 0,
+                "A snapshot sweep with an empty batch examines no documents and reports success.")
+            .Validate(
+                options => options.OperationsPerSnapshot >= 0,
+                "A negative snapshot interval is due on every document forever.")
+            .ValidateOnStart();
+
+        // Registered by Type because SnapshotPolicy is a record struct and the
+        // generic overload wants a reference type. Kept a struct deliberately:
+        // §6's interval is a number with a rule attached, and the rule is the
+        // only reason it is not an int.
+        services.AddSingleton(
+            typeof(SnapshotPolicy),
+            provider => new SnapshotPolicy(
+                provider.GetRequiredService<IOptions<SnapshotOptions>>().Value.OperationsPerSnapshot));
+
+        services.AddScoped<IPeriodicSnapshotter, PeriodicSnapshotter>();
+
+        services.AddSingleton<SnapshotSweeper>();
+        services.AddHostedService(provider => provider.GetRequiredService<SnapshotSweeper>());
+
         return services;
     }
 

@@ -66,7 +66,16 @@ export interface Transport {
   /** Opens a connection, asking to resume `replicaId` if given (§7). */
   connect(replicaId: string | null): Promise<Session>;
 
-  submit(operations: Uint8Array): Promise<SubmitOutcome>;
+  /**
+   * Submits a batch, carrying what this replica holds (§5's second report
+   * path).
+   *
+   * @param known - Per replica id, the next sequence this client expects.
+   * Attached to a message the client was sending anyway, which is the whole
+   * saving: the standalone acknowledgement below costs a round trip that a
+   * client mid-edit has already paid for.
+   */
+  submit(operations: Uint8Array, known: Record<string, number>): Promise<SubmitOutcome>;
 
   catchUp(known: Record<string, number>, forceSnapshot: boolean): Promise<CatchUpOutcome>;
 
@@ -149,6 +158,29 @@ export class SyncController {
   private readonly schedule: (run: () => void, delayMs: number) => void;
   private readonly acknowledgeEveryMs: number;
   private acknowledging = false;
+
+  /**
+   * The last vector this connection told the server about, encoded.
+   *
+   * @remarks
+   * <p>
+   * What makes row 32's saving real: the timer's job is to keep the frontier
+   * moving, and a report identical to the last one moves nothing. A client
+   * mid-edit reports on every submission, so its tick has nothing left to say.
+   * </p><p>
+   * A flag saying "a submission happened since the last tick" would have done
+   * the same job and been a race: whether the drain's microtask ran before the
+   * tick decided the outcome, so the timer's behaviour depended on scheduling
+   * order rather than on anything true. Comparing the content has no such
+   * ordering: whichever path reports first, the other finds nothing new.
+   * </p><p>
+   * Safe to suppress because the frontier is a minimum over what replicas have
+   * <i>said</i> and nothing expires it — not saying the same thing twice costs
+   * nothing. What must not be suppressed is a report after a reconnect, which
+   * is why this resets on every connection.
+   * </p>
+   */
+  private lastReported: string | null = null;
   private readonly listeners = new Set<() => void>();
 
   private outbox: Uint8Array[] = [];
@@ -338,6 +370,11 @@ export class SyncController {
     // first submission again, which restores this immediately.
     this.readOnlyState = false;
 
+    // Cleared per connection. The suppression below is about not repeating
+    // what this connection already said; a new connection has said nothing,
+    // and a reconnect after a resync may be a different replica entirely.
+    this.lastReported = null;
+
     await this.reconcile(refused);
 
     this.setState('live');
@@ -371,6 +408,34 @@ export class SyncController {
    * an unhandled rejection in a browser tab that is otherwise working.
    * </p>
    */
+  /** What this replica holds, next-expected, in the shape the wire uses. */
+  private known(): Record<string, number> {
+    const known: Record<string, number> = {};
+    for (const [replica, next] of this.sessionState?.versionVector ?? []) {
+      known[replica] = Number(next);
+    }
+
+    return known;
+  }
+
+  /**
+   * Records a report, answering whether it said anything the last one did not.
+   */
+  private reported(known: Record<string, number>): boolean {
+    // Sorted, so two reports of the same vector encode the same way whatever
+    // order the map happened to enumerate in.
+    const encoded = JSON.stringify(
+      Object.keys(known).sort().map((replica) => [replica, known[replica]]),
+    );
+
+    if (encoded === this.lastReported) {
+      return false;
+    }
+
+    this.lastReported = encoded;
+    return true;
+  }
+
   private beginAcknowledging(): void {
     if (this.acknowledging) {
       return;
@@ -387,15 +452,18 @@ export class SyncController {
     }
 
     if (this.current === 'live' && this.sessionState !== null) {
-      const known: Record<string, number> = {};
-      for (const [replica, next] of this.sessionState.versionVector) {
-        known[replica] = Number(next);
-      }
+      const known = this.known();
 
-      try {
-        await this.transport.acknowledge(known);
-      } catch {
-        // Advisory. The next tick reports a superset of this one.
+      // Skipped when the last report said the same thing — which, for a client
+      // that is submitting, is what its own submissions already said (row 32).
+      if (this.reported(known)) {
+        try {
+          await this.transport.acknowledge(known);
+        } catch {
+          // Advisory, and unreported: the next tick sees this vector as new
+          // again and retries it.
+          this.lastReported = null;
+        }
       }
     }
 
@@ -474,7 +542,13 @@ export class SyncController {
 
         let outcome: SubmitOutcome;
         try {
-          outcome = await this.transport.submit(batch);
+          const reporting = this.known();
+          outcome = await this.transport.submit(batch, reporting);
+
+          // Recorded only once the call returned. A submission that threw did
+          // not reach the server, and marking it reported would leave the
+          // timer with nothing to say about a report nobody received.
+          this.reported(reporting);
         } catch {
           // The connection went away mid-submission. The batch stays at the
           // head of the queue: dropping it here would lose work the server

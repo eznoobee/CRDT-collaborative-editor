@@ -27,10 +27,14 @@ public sealed class EditorMetrics : IDisposable
 
     private readonly Meter _meter;
 
-    public EditorMetrics(IMeterFactory factory, Editor.Api.Hubs.DocumentConnections connections)
+    public EditorMetrics(
+        IMeterFactory factory,
+        Editor.Api.Hubs.DocumentConnections connections,
+        Editor.Api.Documents.SnapshotSweeper snapshots)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(connections);
+        ArgumentNullException.ThrowIfNull(snapshots);
 
         _meter = factory.Create(MeterName);
 
@@ -43,6 +47,18 @@ public sealed class EditorMetrics : IDisposable
             () => connections.Held().Count,
             unit: "{connection}",
             description: "Connections this instance is holding.");
+
+        // §10's snapshot age. Absent until 7b.3 for register row 28's reason:
+        // nothing in the running server took a periodic snapshot, so the only
+        // snapshots that existed were the collector's, and a gauge over those
+        // would have reported the age of something that is not what §10 means.
+        // Now that the sweep exists, this is the number that says whether it is
+        // keeping up.
+        _meter.CreateObservableGauge(
+            "editor.snapshot.age",
+            () => snapshots.WorstSnapshotAge.TotalSeconds,
+            unit: "s",
+            description: "Oldest latest-snapshot across the documents the last sweep examined.");
 
         OperationsReceived = _meter.CreateCounter<long>(
             "editor.operations.received",
@@ -146,17 +162,5 @@ public sealed class EditorMetrics : IDisposable
     /// </remarks>
     public UpDownCounter<long> OutboundQueueDepth { get; }
 
-    /// <summary>
-    /// §10's "snapshot age" is not here, and the reason is register row 28.
-    /// </summary>
-    /// <remarks>
-    /// Nothing in the running server takes a periodic snapshot — `SnapshotPolicy`
-    /// and `SaveSnapshotAsync` are implemented and called only from tests — so
-    /// the only snapshots that exist are the collector's, written when it
-    /// collects. A gauge over those would report the age of something that is
-    /// not the thing §10 means, and a gauge reporting "no snapshot" forever
-    /// would be read as a broken exporter rather than as a missing subsystem.
-    /// It lands with row 28, which is where the subject arrives.
-    /// </remarks>
     public void Dispose() => _meter.Dispose();
 }

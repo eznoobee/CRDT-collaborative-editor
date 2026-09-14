@@ -196,7 +196,7 @@ export class SignalRTransport implements Transport {
     await this.require().invoke('AcknowledgeAsync', known);
   }
 
-  async submit(operations: Uint8Array): Promise<SubmitOutcome> {
+  async submit(operations: Uint8Array, known: Record<string, number>): Promise<SubmitOutcome> {
     const connection = this.require();
     if (this.assigned === null) {
       throw new Error('Not connected.');
@@ -206,6 +206,8 @@ export class SignalRTransport implements Transport {
       DocumentId: this.options.documentId,
       ReplicaId: this.assigned,
       Operations: operations,
+      // §5's second report path, on a message that was going anyway (row 32).
+      Known: known,
     });
 
     return { code: result.Code, retryAfterMs: result.RetryAfterMs };

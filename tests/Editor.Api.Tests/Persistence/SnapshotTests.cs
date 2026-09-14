@@ -32,18 +32,26 @@ public sealed class SnapshotTests(PostgresFixture fixture)
     [InlineData(0, 499, false)]
     [InlineData(0, 500, true)]
     [InlineData(500, 999, false)]
-    [InlineData(499, 501, true)]
-    public void Snapshot_policy_fires_on_crossing_a_multiple(long before, long after, bool due)
+    [InlineData(500, 1000, true)]
+    // The case the crossing form got wrong, and the reason 7b.3 changed it: a
+    // batch that stepped over a multiple used to fire, however little of the
+    // interval had actually elapsed. Two operations past 499 is not 500
+    // operations of work.
+    [InlineData(499, 501, false)]
+    // And the case it also got wrong in the other direction. A document whose
+    // snapshot was missed — a restart between the crossing and the write —
+    // stayed unsnapshotted until the next multiple. A gap only widens.
+    [InlineData(0, 1_200, true)]
+    public void Snapshot_is_due_when_the_log_has_run_N_past_the_snapshot(
+        long snapshot, long head, bool due)
     {
-        // Batches move the sequence by more than one, so an equality test would
-        // step over the threshold and never fire.
-        Assert.Equal(due, SnapshotPolicy.Default.IsDue(before, after));
+        Assert.Equal(due, SnapshotPolicy.Default.IsDue(snapshot, head));
 
         // new() and default bypass a primary constructor's defaults on a record
         // struct, so an unconfigured policy must read as "disabled" rather than
         // pretending to be the §6 default.
         Assert.Equal(0, new SnapshotPolicy().OperationsPerSnapshot);
-        Assert.False(new SnapshotPolicy().IsDue(before, after));
+        Assert.False(new SnapshotPolicy().IsDue(snapshot, head));
     }
 
     [Fact]
@@ -156,7 +164,7 @@ public sealed class SnapshotTests(PostgresFixture fixture)
 
         var uncollected = source.AllIds.Count;
 
-        var collected = await store.LoadForCollectionAsync(
+        var collected = await store.LoadAtHeadAsync(
             documentId, Replica(9), TestContext.Current.CancellationToken);
 
         Assert.True(collected.Replica.Collect(source.VersionVector) > 0, "nothing was collectable");

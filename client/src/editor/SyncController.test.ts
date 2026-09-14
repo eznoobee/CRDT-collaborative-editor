@@ -61,8 +61,12 @@ class FakeTransport implements Transport {
     return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
   }
 
-  submit(operations: Uint8Array): Promise<SubmitOutcome> {
+  /** The version vector carried by each submission, in order (§5, row 32). */
+  readonly reported: Record<string, number>[] = [];
+
+  submit(operations: Uint8Array, known: Record<string, number>): Promise<SubmitOutcome> {
     this.submitted.push(operations);
+    this.reported.push(known);
     const answer = this.submitResults.length > 1
       ? this.submitResults.shift()!
       : this.submitResults[0]!;
@@ -91,6 +95,22 @@ class FakeTransport implements Transport {
   /** Drops the connection, as a network would. */
   drop(): void {
     this.closed?.();
+  }
+}
+
+/**
+ * Lets the controller's own promises finish.
+ *
+ * @remarks
+ * The drain runs without being awaited — typing must not wait for a socket —
+ * so a test that asserts about a submission immediately after an edit is
+ * asserting against work that has not started. Draining the microtask queue
+ * here rather than in each test, because "how many awaits does it take" is not
+ * something a test should be encoding.
+ */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 8; turn++) {
+    await Promise.resolve();
   }
 }
 
@@ -264,6 +284,90 @@ describe("§5's acknowledgement", () => {
 
     expect(transport.acknowledged).toHaveLength(2);
     expect(Object.values(transport.acknowledged[1]!)).toEqual([2]);
+  });
+
+  it('carries what this replica holds on every submission', async () => {
+    // ROW 32. §5 names three ways the server learns what a replica holds, and
+    // this is the second: attached to a message the client was sending anyway.
+    // The vacuity risk is that a field added to the wire and never read breaks
+    // nothing — so what is asserted is the content, and the server-side test
+    // asserts the frontier moves from a submission with no other path open.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+
+    // Edited and then queued, which is the order the product uses: the session
+    // applies locally and hands the operations to enqueue. A test that only
+    // edited would queue nothing, because the session here is built with a
+    // no-op change callback.
+    sync.enqueue(encodeOperations(sync.session!.edit('hello')));
+    await settle();
+
+    expect(transport.submitted).toHaveLength(1);
+
+    // Five code points, and the vector says so. A client reports what it
+    // holds including the batch it is sending: it applied those operations
+    // locally the moment they were typed, which is the whole point of the
+    // outbox.
+    expect(Object.values(transport.reported[0]!)).toEqual([5]);
+  });
+
+  it('does not repeat on the timer what a submission already reported', async () => {
+    // The saving row 32 is after. Without this the client sends the same
+    // vector twice — once on the batch, once on the tick — and the second
+    // message moves a frontier that is already where it says.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+    sync.enqueue(encodeOperations(sync.session!.edit('hello')));
+    await settle();
+
+    expect(transport.submitted).toHaveLength(1);
+
+    await harness.ackTick();
+
+    expect(transport.acknowledged).toHaveLength(0);
+
+    // Still nothing on the next tick either, because the vector has not moved.
+    await harness.ackTick();
+
+    expect(transport.acknowledged).toHaveLength(0);
+
+    // And the reports start again the moment there is something new to say:
+    // the failure in the other direction is a client that stops reporting and
+    // freezes the frontier at whatever it last said.
+    sync.enqueue(encodeOperations(sync.session!.edit('hello there')));
+    await settle();
+
+    expect(transport.submitted).toHaveLength(2);
+    expect(Object.values(transport.reported.at(-1)!)).toEqual([11]);
+  });
+
+  it('still reports on the timer for a client that only receives', async () => {
+    // §13.32, and the reason row 32 is an optimisation rather than a fix. A
+    // report keyed on submission covers writers and nobody else; this replica
+    // submits nothing and its acknowledgement is the only thing keeping the
+    // frontier moving for the document it is watching.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    const { sync } = harness;
+
+    await sync.start();
+
+    const remote = new Replica(PEER);
+    const operations = [...'remote'].map((value, index) => remote.insert(index, value));
+    transport.broadcast?.(encodeOperations(operations));
+    await settle();
+
+    await harness.ackTick();
+
+    expect(transport.submitted).toHaveLength(0);
+    expect(transport.acknowledged).toHaveLength(1);
+    expect(Object.values(transport.acknowledged[0]!)).toEqual([6]);
   });
 
   it('stops when the controller stops', async () => {

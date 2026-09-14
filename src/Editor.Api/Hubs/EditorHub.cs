@@ -342,6 +342,17 @@ public sealed partial class EditorHub : Hub
         _metrics.PropagationLatency.Record(
             System.Diagnostics.Stopwatch.GetElapsedTime(arrived).TotalMilliseconds);
 
+        // §5's piggyback (row 32), deliberately after the latency record. It is
+        // a database write, and putting it inside the segment §8's p99 target
+        // measures would charge the target for a cost that has nothing to do
+        // with propagation. The caller still waits for it — the saving row 32
+        // is after is a round trip, not a write.
+        if (batch.Known is { Count: > 0 })
+        {
+            await RecordAcknowledgementAsync(binding, batch.Known, AcknowledgedBySubmit)
+                .ConfigureAwait(false);
+        }
+
         return SubmitResult.Ok(operations.Count);
     }
 
@@ -394,6 +405,9 @@ public sealed partial class EditorHub : Hub
 
     /// <summary>The acknowledgement piggybacked on a catch-up.</summary>
     private const string AcknowledgedByCatchUp = "catchup";
+
+    /// <summary>The acknowledgement piggybacked on a submission (§5, row 32).</summary>
+    private const string AcknowledgedBySubmit = "submit";
 
     /// <summary>Writes an acknowledgement through a scoped context.</summary>
     /// <param name="binding">Whose connection, and which replica, is reporting.</param>

@@ -187,12 +187,44 @@ public sealed class DocumentClient : IAsyncDisposable
     }
 
     /// <summary>Submits a batch; defaults to typing one more character.</summary>
-    public Task<SubmitResult> SubmitAsync(byte[]? operations = null) =>
+    /// <param name="operations">The batch, or one more character.</param>
+    /// <param name="known">
+    /// §5's acknowledgement piggybacked on the submission (row 32). Omitted by
+    /// default so that every existing test keeps submitting the way a client
+    /// that does not report did — the piggyback has to be a thing a test opts
+    /// into, or "the frontier moved" stops distinguishing which path moved it.
+    /// </param>
+    public Task<SubmitResult> SubmitAsync(
+        byte[]? operations = null, Dictionary<Guid, long>? known = null) =>
         Connection.InvokeAsync<SubmitResult>(
             "SubmitAsync",
             new OperationBatchMessage(
-                Negotiated.DocumentId, Negotiated.ReplicaId, operations ?? Writer.Type("a")),
+                Negotiated.DocumentId, Negotiated.ReplicaId, operations ?? Writer.Type("a"), known),
             TestContext.Current.CancellationToken);
+
+    /// <summary>Submits, carrying what this client actually holds.</summary>
+    /// <remarks>
+    /// <see cref="Replica"/> alone is not it. This client encodes through
+    /// <see cref="Writer"/> and only applies what comes back, so its replica
+    /// holds nothing it authored — whereas a real client applies an operation
+    /// the instant it is typed and queues it afterwards, which is why
+    /// <c>SyncController</c>'s vector includes its own unsent work. Reporting
+    /// <c>Replica</c> on its own would send an empty vector for a client that
+    /// has only ever typed, and the server drops those: the test would pass
+    /// against a server that ignored the field entirely.
+    /// </remarks>
+    public Task<SubmitResult> SubmitReportingAsync(byte[]? operations = null)
+    {
+        var known = Replica.VersionVector.ToDictionary(
+            entry => ReplicaIdConversion.ToGuid(entry.Key),
+            entry => (long)entry.Value);
+
+        // Evaluated after the batch was encoded, so this counts the operations
+        // being sent — which the client does hold.
+        known[Negotiated.ReplicaId] = (long)Writer.NextSeq;
+
+        return SubmitAsync(operations, known);
+    }
 
     /// <summary>
     /// Tells the server what this client holds, the way a real client's timer

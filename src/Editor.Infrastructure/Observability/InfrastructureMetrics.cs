@@ -37,6 +37,12 @@ public sealed class InfrastructureMetrics
             "editor.gc.elements_collected",
             unit: "{element}",
             description: "Tombstoned elements removed from stored snapshots by §5 collection.");
+
+
+        SnapshotsWritten = meter.CreateCounter<long>(
+            "editor.snapshots.written",
+            unit: "{snapshot}",
+            description: "§6's periodic snapshots taken by the background sweep.");
     }
 
     /// <summary>
@@ -48,4 +54,15 @@ public sealed class InfrastructureMetrics
     /// uncollected one read identically and this counter is the difference.
     /// </remarks>
     public Counter<long> ElementsCollected { get; }
+
+    /// <summary>
+    /// §6's periodic snapshots written.
+    /// </summary>
+    /// <remarks>
+    /// The pair for §10's snapshot-age gauge. Age alone cannot distinguish "the
+    /// sweep is keeping up" from "the sweep died and every document happens to
+    /// have been snapshotted recently by the collector"; a write count at zero
+    /// while age climbs says which.
+    /// </remarks>
+    public Counter<long> SnapshotsWritten { get; }
 }
