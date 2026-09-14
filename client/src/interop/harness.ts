@@ -765,6 +765,19 @@ export interface ApiOptions {
    */
   readonly configuration?: 'Debug' | 'Release';
 
+  /**
+   * An explicit assembly to run, instead of one of this repo's build outputs.
+   *
+   * @remarks
+   * Row 8 needs two instances of the same service where one carries a
+   * deliberate break, and the break must not be a switch inside the product —
+   * a fault-injection hook shipped so a test can use it is a permanent weakness
+   * bought to make an exercise easier, which is the trade §7 refuses elsewhere.
+   * So the break is applied to the source, built, and the two processes are
+   * started from two directories.
+   */
+  readonly dllPath?: string;
+
   /** Extra configuration for the server process. */
   readonly env?: Readonly<Record<string, string>>;
 }
@@ -782,11 +795,12 @@ export async function startApi(
   }
 
   const configuration = options.configuration ?? 'Debug';
-  const dll = join(REPO, `src/Editor.Api/bin/${configuration}/net10.0/Editor.Api.dll`);
+  const dll = options.dllPath
+    ?? join(REPO, `src/Editor.Api/bin/${configuration}/net10.0/Editor.Api.dll`);
   const started = Date.now();
 
   const child: ChildProcess = spawn('dotnet', [dll], {
-    cwd: join(REPO, 'src/Editor.Api'),
+    cwd: options.dllPath === undefined ? join(REPO, 'src/Editor.Api') : resolve(options.dllPath, '..'),
     env: {
       ...process.env,
       // Port 0: the kernel picks, Kestrel announces, and nothing here guesses.
