@@ -378,12 +378,26 @@ public sealed partial class EditorHub : Hub
         // did not have and changes nothing they could not already change by
         // holding their socket open. The membership sweep is what closes that
         // socket (§7).
-        await RecordAcknowledgementAsync(binding, known).ConfigureAwait(false);
+        await RecordAcknowledgementAsync(binding, known, AcknowledgedByTimer).ConfigureAwait(false);
     }
 
+    /// <summary>§5's periodic acknowledgement, from the client's own timer.</summary>
+    private const string AcknowledgedByTimer = "timer";
+
+    /// <summary>The acknowledgement piggybacked on a catch-up.</summary>
+    private const string AcknowledgedByCatchUp = "catchup";
+
     /// <summary>Writes an acknowledgement through a scoped context.</summary>
+    /// <param name="binding">Whose connection, and which replica, is reporting.</param>
+    /// <param name="known">The version vector the client says it holds, next-expected.</param>
+    /// <param name="via">
+    /// What prompted it. Carried into the metric rather than derived there,
+    /// because the two callers are the whole diagnostic value: a client whose
+    /// timer has stopped still catches up once per connection, so an untagged
+    /// count stays healthy while the frontier stops moving.
+    /// </param>
     private async Task RecordAcknowledgementAsync(
-        ConnectionBinding binding, Dictionary<Guid, long> known)
+        ConnectionBinding binding, Dictionary<Guid, long> known, string via)
     {
         if (known.Count == 0)
         {
@@ -417,6 +431,11 @@ public sealed partial class EditorHub : Hub
         await frontier
             .AcknowledgeAsync(binding.DocumentId, binding.ReplicaId, known, CancellationToken.None)
             .ConfigureAwait(false);
+
+        // After the write, not before: a count that moves for an acknowledgement
+        // that failed to store reports a frontier advancing on evidence the
+        // database does not have.
+        _metrics.Acknowledgements.Add(1, new KeyValuePair<string, object?>("via", via));
     }
 
     /// <summary>
@@ -474,11 +493,16 @@ public sealed partial class EditorHub : Hub
         // what it holds, and recording it costs one write it was already
         // paying for. Not sufficient on its own — a viewer catches up once —
         // which is what AcknowledgeAsync exists for.
-        await RecordAcknowledgementAsync(binding, known).ConfigureAwait(false);
+        await RecordAcknowledgementAsync(binding, known, AcknowledgedByCatchUp).ConfigureAwait(false);
 
         var caught = await _catchUp
             .ReadAsync(binding.DocumentId, vector, forceSnapshot, Context.ConnectionAborted)
             .ConfigureAwait(false);
+
+        _metrics.CatchUps.Add(
+            1,
+            new KeyValuePair<string, object?>(
+                "source", caught.Snapshot is null ? "log" : "snapshot"));
 
         return new CatchUpResult(null, caught.Snapshot, caught.Operations, caught.ServerSeq);
     }

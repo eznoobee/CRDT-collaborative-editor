@@ -147,6 +147,82 @@ public sealed class EditorMetricsTests
     }
 
     [Fact]
+    public async Task A_viewer_who_only_reads_moves_the_catchup_counter()
+    {
+        // §10 names presence, catch-up and §5's acknowledgement timer as three
+        // things that must each be represented, and §13.32 is why: this
+        // principal submits nothing, so every submission-keyed instrument in
+        // the file above reads zero for them. If only the gauge moved, a
+        // document with ten readers and no writer would look idle.
+        _fixture.RequireBoth();
+        using var metrics = new MetricCollector(EditorMetrics.MeterName);
+        await using var factory = new EditorApiFactory(_fixture);
+
+        var documentId = await DocumentSetup.DocumentAsync(factory, "metrics-reader-owner");
+        await DocumentSetup.GrantAsync(factory, documentId, "metrics-reader", Role.Viewer);
+
+        await using var viewer = await DocumentClient.JoinAsync(factory, "metrics-reader", documentId);
+        Assert.Null((await viewer.CatchUpAsync()).Code);
+
+        Assert.Equal(1, metrics.Total("editor.catchup.requests"));
+
+        // Nothing was submitted, and the submission-keyed instruments say so —
+        // which is the point: these two are the only evidence this person
+        // exists, beyond the gauge.
+        Assert.Equal(0, metrics.Total("editor.operations.received"));
+    }
+
+    [Fact]
+    public async Task The_acknowledgement_counter_separates_the_timer_from_the_piggyback()
+    {
+        // THE PAIR THAT MATTERS HERE. A client whose acknowledgement timer has
+        // stopped still catches up once per connection, so an untagged
+        // acknowledgement count stays healthy while the stability frontier
+        // stops moving — the exact failure that held it still for a whole
+        // phase, reported by the dashboard as normal.
+        _fixture.RequireBoth();
+        using var metrics = new MetricCollector(EditorMetrics.MeterName);
+        await using var factory = new EditorApiFactory(_fixture);
+
+        var documentId = await DocumentSetup.DocumentAsync(factory, "metrics-ack-owner");
+        await DocumentSetup.GrantAsync(factory, documentId, "metrics-ack-writer", Role.Editor);
+        await DocumentSetup.GrantAsync(factory, documentId, "metrics-ack", Role.Viewer);
+
+        await using (var writer = await DocumentClient.JoinAsync(factory, "metrics-ack-writer", documentId))
+        {
+            Assert.Null((await writer.SubmitAsync(writer.Writer.Type("x"))).Code);
+        }
+
+        await using var viewer = await DocumentClient.JoinAsync(factory, "metrics-ack", documentId);
+
+        // A client catching up for the first time holds nothing, so its version
+        // vector is empty and the acknowledgement is dropped before the
+        // frontier ever sees it. That is right — an empty vector reports no
+        // state and storing it would be storing a claim nobody made — and it is
+        // asserted rather than worked around, because it is the reason §5's
+        // piggyback is "not sufficient on its own".
+        var first = await viewer.CatchUpAsync();
+        Assert.Null(first.Code);
+        viewer.ApplyCatchUp(first);
+
+        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "catchup"));
+
+        // Now it holds something, so the piggyback carries a real vector.
+        var second = await viewer.CatchUpAsync();
+        Assert.Null(second.Code);
+
+        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "catchup"));
+        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "timer"));
+
+        // Then the timer's own report, which is the one that keeps arriving
+        // from a reader who never touches the document again.
+        await viewer.AcknowledgeAsync();
+
+        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "timer"));
+        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "catchup"));
+    }
+
+    [Fact]
     public async Task Collecting_tombstones_moves_the_reclaimed_counter()
     {
         _fixture.RequireBoth();

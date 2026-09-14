@@ -72,6 +72,20 @@ public sealed class EditorMetrics : IDisposable
             unit: "{replica}",
             description: "Replicas retired after T_retire of inactivity (§5).");
 
+        // §10 requires presence, catch-up and §5's acknowledgement timer to each
+        // be represented, and §13.32 is why: the gauge above covers presence,
+        // but a viewer who never submits is otherwise represented by nothing
+        // that moves. These two are the reader's traffic.
+        CatchUps = _meter.CreateCounter<long>(
+            "editor.catchup.requests",
+            unit: "{request}",
+            description: "Catch-up reads, tagged with whether a snapshot was served.");
+
+        Acknowledgements = _meter.CreateCounter<long>(
+            "editor.acknowledgements",
+            unit: "{acknowledgement}",
+            description: "§5 acknowledgements written, tagged with what prompted them.");
+
         PropagationLatency = _meter.CreateHistogram<double>(
             "editor.propagation.latency",
             unit: "ms",
@@ -92,6 +106,22 @@ public sealed class EditorMetrics : IDisposable
     public Counter<long> ResyncRequired { get; }
 
     public Counter<long> ReplicasRetired { get; }
+
+    /// <summary>Catch-up reads, tagged <c>source</c>: snapshot or log.</summary>
+    public Counter<long> CatchUps { get; }
+
+    /// <summary>
+    /// §5 acknowledgements written, tagged <c>via</c>: timer or catchup.
+    /// </summary>
+    /// <remarks>
+    /// <strong>The tag is the point.</strong> An untagged count is satisfied by
+    /// the catch-up piggyback alone, and a client whose acknowledgement timer
+    /// has stopped still catches up once per connection — so the count stays
+    /// healthy while the stability frontier stops moving, which is precisely the
+    /// failure that held it still for a whole phase. Split by what prompted it,
+    /// "timer at zero" is visible.
+    /// </remarks>
+    public Counter<long> Acknowledgements { get; }
 
     public Histogram<double> PropagationLatency { get; }
 
