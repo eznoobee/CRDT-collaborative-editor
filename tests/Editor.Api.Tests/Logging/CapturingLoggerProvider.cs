@@ -18,8 +18,24 @@ public sealed class CapturingLoggerProvider : ILoggerProvider, ISupportExternalS
     private readonly ConcurrentQueue<string> _records = new();
     private IExternalScopeProvider? _scopes;
 
+    private readonly ConcurrentQueue<LogLine> _lines = new();
+
     /// <summary>Everything written, in every rendering.</summary>
     public IReadOnlyCollection<string> Records => _records.ToArray();
+
+    /// <summary>
+    /// One entry per log call, with the scope values that were open when it was
+    /// written.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Records"/> flattens scopes into records of their own, which is
+    /// right for the redaction sentinel — that asks whether a secret reached the
+    /// sink by ANY route — and useless for anything that has to know which line
+    /// carried which scope. A correlation-id test built on the flattened form
+    /// would compare ids without knowing where they came from, and would pass
+    /// against an implementation that put every id on every line.
+    /// </remarks>
+    public IReadOnlyList<LogLine> Lines => [.. _lines];
 
     public ILogger CreateLogger(string categoryName) => new Sink(this, categoryName);
 
@@ -28,6 +44,8 @@ public sealed class CapturingLoggerProvider : ILoggerProvider, ISupportExternalS
     public void Dispose() => GC.SuppressFinalize(this);
 
     private void Record(string text) => _records.Enqueue(text);
+
+    private void Record(LogLine line) => _lines.Enqueue(line);
 
     private sealed class Sink : ILogger
     {
@@ -54,6 +72,24 @@ public sealed class CapturingLoggerProvider : ILoggerProvider, ISupportExternalS
             Func<TState, Exception?, string> formatter)
         {
             ArgumentNullException.ThrowIfNull(formatter);
+
+            // Captured per line, with whatever scopes were open at the moment
+            // it was written.
+            var scopes = new Dictionary<string, string>(StringComparer.Ordinal);
+            _owner._scopes?.ForEachScope(
+                static (scope, into) =>
+                {
+                    if (scope is IEnumerable<KeyValuePair<string, object?>> values)
+                    {
+                        foreach (var value in values)
+                        {
+                            into[value.Key] = value.Value?.ToString() ?? string.Empty;
+                        }
+                    }
+                },
+                scopes);
+
+            _owner.Record(new LogLine(_category, formatter(state, exception), scopes));
 
             _owner.Record($"{_category}|message|{formatter(state, exception)}");
 
@@ -98,3 +134,10 @@ public sealed class CapturingLoggerProvider : ILoggerProvider, ISupportExternalS
         }
     }
 }
+
+/// <summary>One log call, and the scopes that were open when it happened.</summary>
+/// <param name="Category">The logger's category.</param>
+/// <param name="Message">The formatted message.</param>
+/// <param name="Scopes">Scope key to value, flattened across nested scopes.</param>
+public sealed record LogLine(
+    string Category, string Message, IReadOnlyDictionary<string, string> Scopes);

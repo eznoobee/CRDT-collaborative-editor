@@ -59,6 +59,13 @@ if (args.Contains("--migrate"))
 }
 
 // First in the pipeline, before anything reads the scheme or the client address.
+// §10's correlation id, first in the pipeline. Everything downstream logs
+// inside its scope — including the refusals, which are the requests an operator
+// most wants to gather. Placed here rather than beside authorization because a
+// correlation id that covers only the handlers misses every line written by the
+// middleware that refused before reaching one.
+app.UseCorrelationId();
+
 app.UseForwardedHeaders();
 
 // Immediately after, and before anything that can produce a response. §7's

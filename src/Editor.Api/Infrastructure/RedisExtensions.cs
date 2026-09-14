@@ -172,7 +172,12 @@ public static class RedisExtensions
             provider.GetRequiredService<TimeProvider>()));
         services.AddSingleton<DocumentBackplane>();
 
-        services.AddSignalR()
+        // §10's correlation id, as a filter so there is no method for anyone to
+        // forget to call and so connect and disconnect are covered too.
+        services.AddSingleton<Editor.Api.Logging.CorrelationHubFilter>();
+
+        services.AddSignalR(options =>
+                options.AddFilter<Editor.Api.Logging.CorrelationHubFilter>())
             // Framing only (§6, §13.13a). The payload stays an opaque byte
             // string in §6's format; MessagePack's object model is not used and
             // must not be — a second encoding with its own canonical-form rules
