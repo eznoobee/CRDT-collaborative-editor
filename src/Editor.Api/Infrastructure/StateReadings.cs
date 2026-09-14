@@ -65,6 +65,20 @@ public interface IStateReadings
     long RetiredReplicas { get; }
 
     long StoredSnapshots { get; }
+
+    /// <summary>
+    /// How long ago these were read, in seconds.
+    /// </summary>
+    /// <remarks>
+    /// <strong>Part of the reading, not a detail.</strong> These are refreshed
+    /// on a schedule rather than per scrape, so every one of them is up to one
+    /// interval old — and a gauge that reports the past as the present is the
+    /// same class of problem as a counter that reports a write that did not
+    /// happen. The first run after the window was added read zero live replicas
+    /// while twelve existed, because the only reading so far had been taken at
+    /// startup against an empty database. Nothing about the numbers said so.
+    /// </remarks>
+    double ReadingAgeSeconds { get; }
 }
 
 /// <summary>
@@ -126,6 +140,7 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
     private long _silent;
     private long _retired;
     private long _snapshots;
+    private long _readAtUnixMs;
 
     public StateReadings(
         NpgsqlDataSource dataSource,
@@ -174,6 +189,22 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
     /// <summary>Snapshot rows stored.</summary>
     public long StoredSnapshots => Interlocked.Read(ref _snapshots);
 
+    /// <summary>How long ago the readings above were taken.</summary>
+    public double ReadingAgeSeconds
+    {
+        get
+        {
+            var readAt = Interlocked.Read(ref _readAtUnixMs);
+
+            // Negative would be meaningless and -1 is not a duration, so a
+            // reading that has never happened reports its age as the process's
+            // whole uptime: old enough that nobody mistakes it for current.
+            return readAt == 0
+                ? _time.GetUtcNow().ToUnixTimeMilliseconds() / 1000.0
+                : (_time.GetUtcNow().ToUnixTimeMilliseconds() - readAt) / 1000.0;
+        }
+    }
+
     /// <summary>Reads once, outside the schedule.</summary>
     public async Task ReadAsync(CancellationToken cancellationToken)
     {
@@ -204,6 +235,8 @@ public sealed partial class StateReadings : BackgroundService, IStateReadings
         Interlocked.Exchange(
             ref _snapshots,
             (long)(await snapshots.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0L));
+
+        Interlocked.Exchange(ref _readAtUnixMs, _time.GetUtcNow().ToUnixTimeMilliseconds());
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

@@ -71,6 +71,8 @@ public sealed class BackpressureTests
         public long RetiredReplicas => 0;
 
         public long StoredSnapshots => 0;
+
+        public double ReadingAgeSeconds => 0;
     }
 
     [Fact]

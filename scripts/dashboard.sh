@@ -113,6 +113,7 @@ row("outbound queue depth", [counter(s, "editor.outbound.queue_depth") for s in 
 
 view("4 · §5 STABILITY FRONTIER — COUNTED FROM THE ROWS",
      "State-derived (§13.44). Identical on every instance by construction: these detect, they do not localise.")
+row("READING AGE (s) — stale above this", [round(gauge(s, "editor.state.reading_age")) for s in snaps])
 row("live replicas", [gauge(s, "editor.replicas.live") for s in snaps])
 row("  of those, active recently", [gauge(s, "editor.replicas.active") for s in snaps])
 row("  of those, SILENT (never reported)", [gauge(s, "editor.replicas.silent") for s in snaps])

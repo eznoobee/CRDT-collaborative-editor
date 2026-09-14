@@ -28,6 +28,19 @@ describe('row 8 — two instances, one broken', () => {
   /** Clients per instance. Equal, so a difference is not a load artefact. */
   const CLIENTS = 6;
 
+  /**
+   * How often the instances refresh their state-derived readings.
+   *
+   * @remarks
+   * Shorter than the product default, because this exercise finishes inside one
+   * default interval and the dashboards would show the reading taken at startup
+   * against an empty database — all zeros, which reads exactly like a frontier
+   * nobody has touched. The lag is real and is a property of the design; the
+   * dashboard reports the reading's age beside the numbers so it is visible
+   * rather than inferred.
+   */
+  const READING_INTERVAL = '00:00:03';
+
   async function join(api: Api, oidc: Oidc, subject: string, documentId: string) {
     const negotiated = await fetch(`${api.baseUrl}/documents/${documentId}/negotiate`, {
       method: 'POST',
@@ -77,12 +90,20 @@ describe('row 8 — two instances, one broken', () => {
 
     const alpha = await startApi(oidc, alphaLog, {
       dllPath: alphaDll,
-      env: { Admin__Port: String(ALPHA_ADMIN), Instance__Id: 'alpha' },
+      env: {
+        Admin__Port: String(ALPHA_ADMIN),
+        Instance__Id: 'alpha',
+        StateReadings__Interval: READING_INTERVAL,
+      },
     });
 
     const beta = await startApi(oidc, betaLog, {
       dllPath: betaDll,
-      env: { Admin__Port: String(BETA_ADMIN), Instance__Id: 'beta' },
+      env: {
+        Admin__Port: String(BETA_ADMIN),
+        Instance__Id: 'beta',
+        StateReadings__Interval: READING_INTERVAL,
+      },
     });
 
     // Asserted, not assumed. Two instances that answer on one address are the
@@ -137,6 +158,11 @@ describe('row 8 — two instances, one broken', () => {
         await connection.invoke('AcknowledgeAsync', finalVector);
         await connection.invoke('CatchUpAsync', finalVector, false);
       }
+
+      // Long enough for a reading to land after the load. The state-derived
+      // gauges are refreshed on a schedule, so reading them the instant the
+      // last client finishes shows the state before it started.
+      await new Promise((done) => setTimeout(done, 6_000));
 
       // Held open while the dashboards are read. The connection gauge is a live
       // count, and an instance whose clients have all gone home reads zero for

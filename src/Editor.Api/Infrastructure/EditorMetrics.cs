@@ -68,6 +68,12 @@ public sealed class EditorMetrics : IDisposable
         // every instance by construction — one database — so they detect and do
         // not localise. See StateReadings and docs/section-10-audit.md.
         _meter.CreateObservableGauge(
+            "editor.state.reading_age",
+            () => state.ReadingAgeSeconds,
+            unit: "s",
+            description: "How old the state-derived readings below are (§13.44).");
+
+        _meter.CreateObservableGauge(
             "editor.replicas.live",
             () => state.LiveReplicas,
             unit: "{replica}",
