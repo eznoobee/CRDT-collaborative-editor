@@ -678,6 +678,19 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
 /** One running instance of the published API. */
 export interface Api {
   readonly baseUrl: string;
+
+  /**
+   * The server process, so its own resource use can be read.
+   *
+   * @remarks
+   * §8's connection target is "1,000 concurrent connections per instance at
+   * < 2 GB RSS", and RSS names a process. A harness that measured its own would
+   * be reporting the load generator's memory beside the server's and calling
+   * the sum the instance — which is the whole reason this target cannot be
+   * measured in process with the clients.
+   */
+  readonly pid: number;
+
   close(): Promise<void>;
 }
 
@@ -740,6 +753,20 @@ function listeningOn(log: string[], deadlineMs: number): Promise<string> {
 export interface ApiOptions {
   /** Directory of a built client to serve from this origin (§9). */
   readonly spaRoot?: string;
+
+  /**
+   * Which build to run.
+   *
+   * @remarks
+   * Debug by default, because that is what the correctness harnesses want and
+   * changing it under them would be a silent change to what they exercise. §8's
+   * measurements pass 'Release' explicitly and record it: a performance number
+   * taken against a Debug build is not a number about the product.
+   */
+  readonly configuration?: 'Debug' | 'Release';
+
+  /** Extra configuration for the server process. */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 export async function startApi(
@@ -754,7 +781,8 @@ export async function startApi(
     throw new Error('EDITOR_TEST_POSTGRES and EDITOR_TEST_REDIS must be set.');
   }
 
-  const dll = join(REPO, 'src/Editor.Api/bin/Debug/net10.0/Editor.Api.dll');
+  const configuration = options.configuration ?? 'Debug';
+  const dll = join(REPO, `src/Editor.Api/bin/${configuration}/net10.0/Editor.Api.dll`);
   const started = Date.now();
 
   const child: ChildProcess = spawn('dotnet', [dll], {
@@ -777,6 +805,7 @@ export async function startApi(
       // The one category kept at Information, because the address it prints is
       // how this harness learns where to connect.
       'Logging__LogLevel__Microsoft.Hosting.Lifetime': 'Information',
+      ...options.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -810,6 +839,7 @@ export async function startApi(
 
   return {
     baseUrl,
+    pid: child.pid ?? 0,
     close: () =>
       new Promise<void>((done) => {
         if (child.exitCode !== null) {

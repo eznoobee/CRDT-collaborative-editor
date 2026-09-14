@@ -15,7 +15,8 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:walk": "vitest run --config vitest.walk.config.ts",
     "test:deployment": "vitest run --config vitest.deployment.config.ts",
-    "test:conformance": "vitest run --config vitest.conformance.config.ts"
+    "test:conformance": "vitest run --config vitest.conformance.config.ts",
+    "test:load": "vitest run --config vitest.load.config.ts"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.11",
