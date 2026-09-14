@@ -118,3 +118,80 @@ metric surface, found by using it.
      twelve connections on alpha and none on beta: **a two-instance stack that
      was one instance twice**, which is indistinguishable from an instance-local
      break at a glance.
+
+
+---
+
+# After the findings were acted on
+
+Both findings were fixed and the exercise re-run against the **same break**, on a
+database of its own so the reading is about one run rather than about every run
+this repository has ever done.
+
+## Finding 2 — the reading that catches it
+
+```
+── 4 · §5 STABILITY FRONTIER — COUNTED FROM THE ROWS ──
+   State-derived. Identical on every instance by construction: these detect, they do not localise.
+
+  READING AGE (s) — stale above this        1        3
+  live replicas                            12       12
+    of those, active recently              12       12
+    of those, SILENT (never reported)       6        6     ← the break
+
+── 4b · §5 REPORT TRAFFIC — COUNTED AT THE HUB ──
+  acknowledgements · via=catchup             6        6
+  acknowledgements · via=submit             48       48
+  acknowledgements · via=timer               6        6     ← still identical
+```
+
+**Six silent of twelve active.** The break is now visible, and view 4b is still
+identical on both instances — which is the point: the counter never measured the
+write and has been renamed to stop claiming it did.
+
+**Identical on both instances, deliberately.** One database, so the derived
+reading cannot say which instance stopped writing. *State-derived readings
+detect; per-instance counters localise.* The break remains **detected but not
+localised**, and that is a property of the arrangement rather than a gap left
+open.
+
+## Two more of the same family, found by running it
+
+Neither came from review. Both came from looking at the numbers.
+
+1. **The first version of `silent` was permanently red** — 215 of 234, because a
+   replica stays live until `T_retire` and every abandoned session accumulates.
+   That is finding 1 arriving inside the fix for finding 2. Scoped to replicas
+   seen within three heartbeats, with an active count beside it as the
+   denominator.
+2. **The first clean-database run read zero live replicas while twelve
+   existed** — the only reading taken so far was at startup against an empty
+   database, and nothing about the numbers said so. The dashboards now report
+   the reading's age beside the readings, because a gauge that reports the past
+   as the present is the same class of problem as a counter reporting a write
+   that did not happen.
+
+## Finding 1 — the procedure change
+
+Step 1 now branches on whether the instances **differ**, not on whether either
+exceeds a threshold. Both-outside-target-and-equal notes the standing condition
+and continues to step 2 rather than jumping to step 5: a reading identical
+everywhere rules out nothing instance-local. Reordering the steps would not have
+fixed this — a permanently red first discriminator hijacks every draw, not the
+one that happened to be made.
+
+## The shared log buffer, at its real weight
+
+Recorded above as a harness defect. It is worse than that. A two-instance stack
+that is one instance twice puts all the load on one process, and **that is
+indistinguishable at a glance from an instance-local break**: alpha busy, beta
+idle. The diagnosis would have named alpha, would have been right, and would
+have been right for entirely the wrong reason — and the procedure would have
+looked vindicated by it. The runner now asserts the two base URLs differ.
+
+## The honest limit, unchanged
+
+Still weaker than a second person. Fixing what the exercise found does not make
+the exercise stronger evidence about whether a reader without the breaker's
+knowledge would have reached the same place. **That sentence is at the strength
+the evidence supports and is not to be upgraded by a later phase report.**

@@ -2520,7 +2520,7 @@ written, not done).
 | 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **MEASURED (7b.4); two missed, one qualified** | Connections passed with a sevenfold margin (285 MiB of 2 GB). Document load passes at p50 (432 ms) and misses at the tail (max 1,917 ms). The two latency targets are missed, and they are one finding seen twice: §6's 50 ms batching window sits inside the segment §8's 25 ms target measures — the two cannot both hold — and inside `SyncController.drain`'s serial send loop, which caps a client below eight characters a second under twenty-editor load, so 54% of a person's typing never left the browser while the UI said `live`. Recorded rather than retuned, per §8. Numbers, provenance and the deliberate breaks are in `docs/phase-8-measurements.md`; the decisions the two misses need are open | §8 |
 | 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **7b** | Nothing of it exists today beyond `/health/live` | §10 |
 | 7 | `/health/ready` probing Postgres and Redis | **7b** | An endpoint returning healthy without checking anything is the hardcoded return §12 forbids, so it stays absent rather than lying | §10 |
-| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **EXERCISED (7b.5); the dashboards did not localise it** | §10's instruments had no exporter at all, so the first half of 7b.5 was building one. The exercise then ran as specified — list and procedure committed before any break existed, the break drawn from that commit's own hash — and **failed to find it**, without departing from the procedure. Two findings, both recorded in `docs/row-8-outcome.md`. First, a chronic miss hijacks the reading order: step 1 routed to "shared cause" because §8's 25 ms target is missed on every submission everywhere (row 5), so the three views where the break was visible were never read — a dashboard whose first discriminator is permanently red has no first discriminator. Second, and worse, **the break was invisible even in the view built for it**: §10's acknowledgement counter sits after the frontier write and counts method completions, not writes, so it read identically on the broken and the control instance while the broken one recorded nothing. A counter adjacent to an effect is not a measurement of the effect. Both remain open | §11, §13.22 |
+| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **EXERCISED (7b.5); both findings acted on, and it detects but still does not localise** | §10's instruments had no exporter at all, so the first half of 7b.5 was building one. The exercise then ran as specified — list and procedure committed before any break existed, the break drawn from that commit's own hash — and **failed to find it**, without departing from the procedure. Two findings, both recorded in `docs/row-8-outcome.md`. First, a chronic miss hijacks the reading order: step 1 routed to "shared cause" because §8's 25 ms target is missed on every submission everywhere (row 5), so the three views where the break was visible were never read — a dashboard whose first discriminator is permanently red has no first discriminator. Second, and worse, **the break was invisible even in the view built for it**: §10's acknowledgement counter sits after the frontier write and counts method completions, not writes, so it read identically on the broken and the control instance while the broken one recorded nothing. A counter adjacent to an effect is not a measurement of the effect — §13.44, with the audit of every §10 instrument against it in `docs/section-10-audit.md`. Both were then fixed and the exercise re-run against the same break: `editor.replicas.silent` now reads **6 of 12 active** and the break is detected, while remaining **identical on both instances**, because one database means a derived reading cannot say which. State-derived readings detect; per-instance counters localise. Step 1 now branches on whether the instances differ rather than on a threshold. Two more of the same family surfaced in the fix — a silent count that was permanently red until windowed, and a scheduled reading that reported the past as the present until its age was reported beside it. The honest limit is unchanged and is not to be upgraded: still weaker than a second person | §11, §13.22, §13.44 |
 | 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
 | 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
 | 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b — CLOSED** | A slot per replica in a Redis sorted set, taken at `negotiate` above the resumption branch — beside the replica cap, which is where it belongs by symmetry, every reloaded tab goes uncounted | §7 |
@@ -2546,6 +2546,7 @@ written, not done).
 | 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
 | 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
 | 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
+| 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
 | 34 | Audit the convergence tests for §13.42's shape | **7b** | §13.42 was found in the one test guarding the only operation that destroys data, and the setup that produced it — compose on A, deliver to B, compare — is how every convergence test in this repository is naturally written. Twenty files carry such an assertion. One lead already: `ScaleOutTests`' rejoin case compares `kept.Normalised` to a `rejoined` replica that adopted a server snapshot wholesale, so what it proves is closer to "the snapshot round-trips" than to "two replicas independently agree". Each test needs the §13.42 question asked of it by hand — what property is under test, and could the checking party have got it from the party being checked — which is judgement per file rather than a grep, and more than an afternoon | §13.42, §13.19 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
@@ -2751,6 +2752,22 @@ every time.
 driven by a timer, a hosted service, or a background sweep, at least one test
 must exercise it with **nobody calling it**: arrange the state, move the clock,
 and require the mechanism's own counter to move on its own.
+
+**4. Does this start when the host starts, or when someone first asks?**
+(§13.44.) For anything with a lifecycle — a listener, a subscription, a cache, a
+reader, a background sweep — a component constructed lazily by its first caller
+observes nothing that happened before that call. 7b.5's metric listener
+subscribed when the DI container first resolved it, which was the first scrape,
+so every counter recorded before anyone looked read zero: the dashboards were
+blank in a service nobody scrapes until something is already wrong.
+
+The test written to guard exactly that passed, because it resolved the component
+from the container and *then* generated the traffic — which started the listener
+as a side effect. **That is question 2 nested inside a test written for
+question 2**: the test invoked the mechanism and so proved the mechanism works,
+not that anything invokes it. The check is mechanical: for any such component,
+does a test exercise it **without resolving it first**, and does the startup path
+construct it rather than the request path?
 
 **3. In this comparison, does each side decide for itself?** (§13.42.) For any
 test that asserts two things agree — two implementations, two replicas, two
@@ -5302,3 +5319,46 @@ This entry predicts which of §12's rules will survive: the sabotage practice
 itself and the preflight will, because both are scripts; the vacuity-risk
 statement and the three questions will need to be carried into the breakdown
 template, or they will be the next things skipped when a phase is busy.
+
+### 13.44 A counter next to a write measures that control reached the line after it
+
+Row 8 broke one instance by deleting the stability frontier's write and left the
+`editor.acknowledgements` increment beside it standing. The counter read
+**identically** on the broken instance and the healthy one — 48 submissions, 6
+catch-ups, 6 timer reports on each — while one of them wrote nothing at all. An
+operator would have read a healthy frontier off a frozen one.
+
+The instrument was placed deliberately, *after* the write, and the reasoning was
+written down at the time: a count that moves for an acknowledgement that failed
+to store reports a frontier advancing on evidence the database does not have.
+That reasoning covers a write that **throws**. It says nothing about a write that
+**is not there**.
+
+**Relocating the increment buys one fix and keeps the class.** It is correct
+against today's code and wrong again the first time a branch, an early return or
+a retry is inserted between the two statements. **A reading derived from state
+cannot decouple from what it reports, because it is what it reports** — "how many
+recently-active replicas have never said what they hold" is answered by the rows,
+and there is no statement to delete.
+
+Three consequences, all of them found by *running* the dashboards rather than by
+reviewing them:
+
+1. **State-derived readings detect; per-instance counters localise.** Every
+   instance reads one database, so a derived gauge is identical everywhere by
+   construction. It says a thing is wrong and cannot say where. §10 needs both
+   kinds and row 8 asks for both halves.
+2. **A derived reading needs a window.** Without one, "silent replicas"
+   accumulates every abandoned session until `T_retire` and is permanently red —
+   which is §13.22's problem arriving inside the fix for this one, and a signal
+   that is always red has no diagnostic value whatever it measures.
+3. **A scheduled reading needs its age reported beside it.** The first run on a
+   clean database read zero live replicas while twelve existed, because the only
+   reading so far had been taken at startup. A gauge that reports the past as the
+   present is this same entry wearing different clothes.
+
+Not everything can be derived, and the honest counter-example is in §10 already:
+a connection dropped for backpressure is closed and gone, no row records it, and
+the count is the only evidence — which §13.15 names outright. It has exactly this
+decoupling property and no remedy. `docs/section-10-audit.md` carries the audit
+of every §10 instrument against this entry.
