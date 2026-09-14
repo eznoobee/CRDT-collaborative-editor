@@ -57,6 +57,28 @@ describe('the walk: cold start to the first step that cannot be taken', () => {
     })).rejects.toThrow();
   }, 60_000);
 
+  it('step 1b — readiness reports both dependencies, by name', async () => {
+    // §10, register row 7. The stack reaching this point already proves the
+    // probe works: the proxy waits on the api container's healthcheck, which
+    // polls /health/ready, so a probe that reported unhealthy would have left
+    // nothing listening for step 1 to talk to. That is the mechanical half.
+    //
+    // This is the readable half — that the endpoint says WHICH dependencies it
+    // checked rather than only that it is content. An aggregate "Healthy" is
+    // what a probe returns when it checks nothing at all (§13.28), and the
+    // names are what make the answer actionable at 3am (§13.13).
+    const response = await fetch(`${walk.baseUrl}/health/ready`);
+    expect(response.status).toBe(200);
+
+    const report = await response.json() as {
+      status: string;
+      checks: { name: string; status: string }[];
+    };
+
+    expect(report.status).toBe('Healthy');
+    expect(report.checks.map((check) => check.name).sort()).toEqual(['postgres', 'redis']);
+  }, 60_000);
+
   it('step 2 — the schema is there, applied by the deployment', async () => {
     // Not /health/live, which is the defect this phase exists to correct
     // (§13.28): it answers 200 from a process with an empty database behind it.
