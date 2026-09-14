@@ -63,18 +63,31 @@ describe('row 8 — two instances, one broken', () => {
     expect(alphaDll, 'ROW8_ALPHA_DLL must point at the broken build').not.toBe('');
     expect(betaDll, 'ROW8_BETA_DLL must point at the clean build').not.toBe('');
 
-    const log: string[] = [];
     const oidc = await startOidc();
 
-    const alpha = await startApi(oidc, log, {
+    // A log buffer each. startApi learns its own address by scanning the buffer
+    // for the line Kestrel prints, so two instances sharing one buffer both
+    // find the FIRST address in it — and the second instance is handed the
+    // first one's URL. The run that found this reported twelve connections on
+    // alpha and none on beta: a two-instance stack that was one instance twice,
+    // which would have made every comparison below meaningless while looking
+    // exactly like the break.
+    const alphaLog: string[] = [];
+    const betaLog: string[] = [];
+
+    const alpha = await startApi(oidc, alphaLog, {
       dllPath: alphaDll,
       env: { Admin__Port: String(ALPHA_ADMIN), Instance__Id: 'alpha' },
     });
 
-    const beta = await startApi(oidc, log, {
+    const beta = await startApi(oidc, betaLog, {
       dllPath: betaDll,
       env: { Admin__Port: String(BETA_ADMIN), Instance__Id: 'beta' },
     });
+
+    // Asserted, not assumed. Two instances that answer on one address are the
+    // failure this exercise cannot survive, and it is silent.
+    expect(alpha.baseUrl, 'the two instances answered on one address').not.toBe(beta.baseUrl);
 
     const connections: HubConnection[] = [];
     try {
