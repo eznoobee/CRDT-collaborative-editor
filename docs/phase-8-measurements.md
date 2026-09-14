@@ -51,6 +51,22 @@ throughput to 786 batches/s.
 The **p50 alone is more than twice the p99 target**, so this is not a tail
 problem and no amount of tail work reaches it.
 
+**What was broken, and what the measurement said.** §8: *a measurement is not
+done until something has been deliberately broken and the measurement said which
+thing.* The pair for this target is a 40 ms delay placed inside the segment and
+the same delay placed outside it:
+
+| | overall p50 | `editor.broadcast` p50 |
+|---|---|---|
+| unbroken | 66.6 ms | 2.21 ms |
+| +40 ms **inside** the segment | **105.0 ms** | **43.6 ms** |
+| +40 ms **outside** it, after the latency record | 64.0 ms | 1.65 ms |
+
+The first shows the number moves and the trace says which stage. **The second is
+the stronger one:** it is what distinguishes this harness from one that happens
+to be timing the whole hub call, which is 3b.1's near-miss — a length measured on
+the payload rather than the frame — in the place it is easiest to repeat.
+
 **What is not attributed:** the tails. They move between stages across load
 shapes, and the generator shares the server's process, so scheduling delay
 cannot be excluded. Settling that needs the out-of-process harness target 3 now

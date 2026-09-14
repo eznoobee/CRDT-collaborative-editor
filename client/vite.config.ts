@@ -20,6 +20,12 @@ export default defineConfig({
       'src/interop/**',
       'src/e2e/**',
       'src/walk/**',
+
+      // §8's measurements, which start a server, a browser and a thousand
+      // sockets and take twenty minutes. `scripts/load.sh` runs them; nothing
+      // else should, and a measurement that ran beside the ordinary suite
+      // would be measuring the ordinary suite.
+      'src/load/**',
       // §9's corpus needs the C# runner to have materialised the generated
       // traces first, so it is not self-contained and does not belong in the
       // default run. `npm run test:conformance`, via scripts/conformance.sh.
