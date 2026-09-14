@@ -58,7 +58,6 @@ describe("§8's connection target", () => {
   const report: string[] = [];
   const say = (line: string) => {
     report.push(line);
-    // eslint-disable-next-line no-console
     console.log(line);
   };
 
