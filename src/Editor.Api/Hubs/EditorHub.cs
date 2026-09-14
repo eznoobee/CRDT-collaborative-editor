@@ -184,6 +184,14 @@ public sealed partial class EditorHub : Hub
         // answer it for exactly the submissions that succeeded.
         using var submit = EditorTracing.StartSubmit();
 
+        // §10 puts the correlation id on every log line AND every span, and the
+        // second half is what makes them one record: without it, a trace
+        // showing a slow persist and the log lines from that connection are two
+        // artefacts nobody can join. The hub's correlation id is the connection
+        // id (Correlation.HubPath), so this is the same value the filter scopes
+        // its lines with rather than a second identifier.
+        submit?.SetTag(Logging.Correlation.Key, Context.ConnectionId);
+
         if (!TryGetBinding(out var binding))
         {
             Reject(HubErrors.Unauthenticated);

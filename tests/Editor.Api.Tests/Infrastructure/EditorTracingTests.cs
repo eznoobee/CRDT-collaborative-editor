@@ -76,6 +76,15 @@ public sealed class EditorTracingTests
         Assert.True(
             submit.Duration >= trace.Only(EditorTracing.Persist).Duration,
             "the submission span was shorter than a stage inside it");
+
+        // §10 requires the correlation id on every span as well as every log
+        // line, and that second half is what makes them one record: a trace
+        // showing a slow persist and the log lines from that connection are two
+        // artefacts nobody can join without it. It is the connection's id,
+        // which is what the hub filter scopes its lines with.
+        Assert.Equal(
+            client.Connection.ConnectionId,
+            submit.GetTagItem(Editor.Api.Logging.Correlation.Key));
     }
 
     [Fact]
