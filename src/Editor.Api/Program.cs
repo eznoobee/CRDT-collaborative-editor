@@ -3,6 +3,7 @@ using Editor.Api.Documents;
 using Editor.Api.Hubs;
 using Editor.Api.Infrastructure;
 using Editor.Api.Logging;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 
@@ -34,6 +35,10 @@ builder.Services.AddEditorRedis(builder.Configuration);
 
 // Postgres, and §7's two-tier role lookup on top of it.
 builder.Services.AddEditorPersistence(builder.Configuration);
+
+// §10's readiness, after both dependencies are registered because it probes
+// through the application's own connections rather than opening its own.
+builder.Services.AddEditorReadiness();
 
 var app = builder.Build();
 
@@ -69,13 +74,25 @@ app.UseConnectTicketGate("/hub/editor");
 app.UseAuthentication();
 app.UseAuthorization();
 
-// PROJECT_SPEC.md §10 requires /health/live and /health/ready.
-// Only liveness exists. Readiness must probe Postgres and Redis and report
-// what it found; both are now wired up, so what is missing is the probe and
-// its tests, which belong with the rest of §10's observability work in
-// Phase 7. An endpoint that returned healthy without checking anything would
-// be the hardcoded return §12 forbids, so it stays absent until then.
+// PROJECT_SPEC.md §10's two probes, and they answer different questions.
+//
+// Liveness says the process is running, which is what it says and all it should
+// say (§13.28). It must NOT touch Postgres or Redis: an orchestrator restarts
+// what fails liveness, so a liveness probe that failed on a Redis blip would
+// roll the fleet over a dependency outage that the application is built to ride
+// out (§10's reason for AbortOnConnectFail = false).
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+
+// Readiness says this instance can serve, and names the dependency when it
+// cannot. Anonymous, like liveness: an orchestrator has no token, and the body
+// carries dependency names and failure messages rather than anything about a
+// document (§10 forbids PII, content, tokens and tickets in what is logged or
+// exposed, and this is held to the same line).
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains(Readiness.Ready),
+    ResponseWriter = Readiness.WriteAsync,
+});
 
 // What the browser reads before it can log in (§7). Anonymous by necessity.
 app.MapClientConfiguration();

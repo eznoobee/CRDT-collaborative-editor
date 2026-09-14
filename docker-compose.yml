@@ -111,6 +111,24 @@ services:
     expose:
       - "8080"
 
+    # §10's readiness, polled by the thing that has a consequence. Without a
+    # healthcheck here the endpoint would be correct and invoked by nothing
+    # (§13.41); with it, and with the proxy waiting on it below, a readiness
+    # probe that stops working stops the stack from coming up.
+    #
+    # Readiness rather than liveness, deliberately: liveness says the process is
+    # running, which is true of a process that cannot reach Postgres, and
+    # serving from that instance is the failure this is meant to prevent.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      # Long enough for the runtime to start and the first probe to reach both
+      # dependencies. A short one reports a starting instance as failed and the
+      # stack never converges.
+      start_period: 40s
+
     depends_on:
       # Not "has run" — has SUCCEEDED. A failed migration leaves the stack down
       # rather than up and serving against an empty schema (§13.28).
@@ -131,8 +149,11 @@ services:
       - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/cert.pem:ro
       - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/key.pem:ro
     depends_on:
+      # service_healthy, not service_started. The proxy fronting an instance
+      # that cannot reach Postgres is a stack that answers requests and fails
+      # them, which is the state readiness exists to keep traffic out of.
       api:
-        condition: service_started
+        condition: service_healthy
 
     # No healthcheck, deliberately. The obvious one — fetch the API through the
     # proxy from inside the proxy — needs a TLS-capable client in an image whose

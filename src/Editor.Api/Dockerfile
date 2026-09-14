@@ -73,6 +73,20 @@ COPY --from=client /client/dist ./wwwroot
 # would serve the API alone and look healthy (§13.28).
 ENV Spa__RootPath=/app/wwwroot
 
+# An HTTP client, for the one thing that needs one: the container healthcheck
+# that polls §10's /health/ready.
+#
+# The cost is real and worth naming — a runtime image with curl in it hands an
+# attacker with code execution an HTTP client — so this is not a convenience.
+# Without it the readiness probe is polled by nothing, which is §13.41 exactly:
+# an endpoint that is correct and unreachable. The compose file makes the proxy
+# wait on that healthcheck, so a readiness probe that stopped working stops the
+# stack from coming up rather than going quiet.
+#
+# Installed before USER app, so the layer is root-owned and the application
+# still runs unprivileged.
+RUN apt-get update     && apt-get install -y --no-install-recommends curl     && rm -rf /var/lib/apt/lists/*
+
 # Runs as the non-root 'app' user provided by the base image.
 USER app
 EXPOSE 8080
