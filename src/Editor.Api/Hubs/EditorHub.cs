@@ -178,6 +178,12 @@ public sealed partial class EditorHub : Hub
     {
         ArgumentNullException.ThrowIfNull(batch);
 
+        // Opened before the first check that can refuse, so a submission that
+        // is rejected still produces a trace. "Where did it stop" is the
+        // question a trace is for, and a root started after the §7 checks would
+        // answer it for exactly the submissions that succeeded.
+        using var submit = EditorTracing.StartSubmit();
+
         if (!TryGetBinding(out var binding))
         {
             Reject(HubErrors.Unauthenticated);
@@ -229,9 +235,13 @@ public sealed partial class EditorHub : Hub
         var replicaId = ReplicaIdConversion.FromGuid(binding.ReplicaId);
         var arrived = System.Diagnostics.Stopwatch.GetTimestamp();
 
-        var validated = await _validator
-            .ValidateAsync(binding.DocumentId, replicaId, batch.Operations, Context.ConnectionAborted)
-            .ConfigureAwait(false);
+        IngestResult validated;
+        using (EditorTracing.StartStage(EditorTracing.Validate))
+        {
+            validated = await _validator
+                .ValidateAsync(binding.DocumentId, replicaId, batch.Operations, Context.ConnectionAborted)
+                .ConfigureAwait(false);
+        }
 
         if (validated.Rejection is not null)
         {
@@ -268,7 +278,11 @@ public sealed partial class EditorHub : Hub
             return SubmitResult.Throttled(IngestRejection.RateLimited, budget.RetryAfter);
         }
 
-        var appended = await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
+        AppendResult appended;
+        using (EditorTracing.StartStage(EditorTracing.Persist))
+        {
+            appended = await _log.SubmitAsync(binding.DocumentId, operations).ConfigureAwait(false);
+        }
 
         // Only after the append. Advancing the expected sequence for a batch
         // that failed to write would reject the client's retry of the very
@@ -287,7 +301,9 @@ public sealed partial class EditorHub : Hub
         var message = new OperationBroadcast(
             binding.DocumentId, batch.Operations, appended.HighestServerSeq);
 
-        await _broadcaster.FanOutAsync(
+        using (EditorTracing.StartStage(EditorTracing.Broadcast))
+        {
+            await _broadcaster.FanOutAsync(
             _connections.Others(binding.DocumentId, Context.ConnectionId),
             (connection, token) => Clients.Client(connection).SendAsync(Broadcast, message, token),
             connection =>
@@ -300,13 +316,14 @@ public sealed partial class EditorHub : Hub
                 _connections.Abort(binding.DocumentId, connection);
                 return Task.CompletedTask;
             },
-            Context.ConnectionAborted).ConfigureAwait(false);
+                Context.ConnectionAborted).ConfigureAwait(false);
 
-        // And then the instances this one cannot see. §8 forbids sticky
-        // sessions, so the other people editing this document are routinely
-        // connected somewhere else; the fan-out above reaches only the
-        // connections this process happens to hold.
-        await _backplane.PublishAsync(message).ConfigureAwait(false);
+            // And then the instances this one cannot see. §8 forbids sticky
+            // sessions, so the other people editing this document are routinely
+            // connected somewhere else; the fan-out above reaches only the
+            // connections this process happens to hold.
+            await _backplane.PublishAsync(message).ConfigureAwait(false);
+        }
 
         _metrics.OperationsApplied.Add(operations.Count);
 
@@ -481,6 +498,7 @@ public sealed partial class EditorHub : Hub
     private void Reject(string code)
     {
         _metrics.OperationsRejected.Add(1, new KeyValuePair<string, object?>("code", code));
+        System.Diagnostics.Activity.Current.Rejected(code);
 
         if (code == IngestRejection.ResyncRequired)
         {
