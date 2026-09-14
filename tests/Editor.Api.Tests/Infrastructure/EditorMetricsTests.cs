@@ -186,8 +186,14 @@ public sealed class EditorMetricsTests
     }
 
     [Fact]
-    public async Task Retiring_a_replica_moves_the_retired_counter()
+    public async Task Retiring_replicas_counts_the_replicas_and_not_the_sweep()
     {
+        // Two replicas, and a second sweep that finds nothing. One replica is
+        // not enough to state the claim: with a single retirement, "counts each
+        // replica" and "increments once per sweep" produce the same number, so
+        // the test would pass against a counter that reports a steady retirement
+        // rate on a system retiring nothing — the same shape as the GC pair
+        // below it.
         _fixture.RequireBoth();
         using var metrics = new MetricCollector(EditorMetrics.MeterName);
         var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider(
@@ -197,28 +203,33 @@ public sealed class EditorMetricsTests
             _fixture, configure: services => services.AddSingleton<TimeProvider>(clock));
 
         var documentId = await DocumentSetup.DocumentAsync(factory, "metrics-retire-owner");
-        await DocumentSetup.GrantAsync(factory, documentId, "metrics-retire", Role.Editor);
+        await DocumentSetup.GrantAsync(factory, documentId, "metrics-retire-a", Role.Editor);
+        await DocumentSetup.GrantAsync(factory, documentId, "metrics-retire-b", Role.Editor);
 
-        await using (var client = await DocumentClient.JoinAsync(factory, "metrics-retire", documentId))
+        foreach (var who in new[] { "metrics-retire-a", "metrics-retire-b" })
         {
+            await using var client = await DocumentClient.JoinAsync(factory, who, documentId);
             Assert.Null((await client.CatchUpAsync()).Code);
         }
 
         clock.Advance(TimeSpan.FromDays(8));
-        var retired = await factory.Services.GetRequiredService<ReplicaRetirement>()
-            .RetireAsync(TestContext.Current.CancellationToken);
 
-        if (retired == 0)
-        {
-            // The hosted sweep races this one on the same clock; if it got
-            // there first the counter still moved, which is what matters.
-            Assert.True(
-                metrics.Total("editor.replicas.retired") > 0,
-                "no replica was retired by either sweep, so this proves nothing");
-            return;
-        }
+        var retirement = factory.Services.GetRequiredService<ReplicaRetirement>();
+        await retirement.RetireAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(retired, metrics.Total("editor.replicas.retired"));
+        // Not compared against this sweep's return value: the hosted sweep runs
+        // on the same clock and may have taken some of the work, so the return
+        // value is this call's share rather than the total. The total is the
+        // claim.
+        var swept = metrics.Total("editor.replicas.retired");
+        Assert.True(
+            swept >= 2,
+            $"two replicas went inactive and the counter moved by {swept}");
+
+        // The other half. A counter incremented per sweep rather than per
+        // replica moves again here, where there is nothing left to retire.
+        Assert.Equal(0, await retirement.RetireAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(swept, metrics.Total("editor.replicas.retired"));
     }
 
     [Fact]
