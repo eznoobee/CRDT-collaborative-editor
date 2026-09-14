@@ -63,6 +63,18 @@ public sealed class MetricCollector : IDisposable
     public int Count(string instrument) =>
         _measurements.Count(m => m.Instrument == instrument);
 
+    /// <summary>
+    /// Every value recorded against one instrument, in the order they arrived.
+    /// </summary>
+    /// <remarks>
+    /// For a histogram, where the distribution is the point: §8's percentiles
+    /// cannot be recovered from a sum and a count. Arrival order is what lets a
+    /// caller drop a warm-up prefix by count rather than by clearing the
+    /// collector, which would race a sample still in flight.
+    /// </remarks>
+    public IReadOnlyList<double> Samples(string instrument) =>
+        [.. _measurements.Where(m => m.Instrument == instrument).Select(m => m.Value)];
+
     /// <summary>The most recent value observed for an instrument.</summary>
     public double Latest(string instrument) =>
         _measurements.Where(m => m.Instrument == instrument).Select(m => m.Value).LastOrDefault();
