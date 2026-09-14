@@ -57,7 +57,7 @@ public static class EditorTracing
     /// where the code has a sequence.
     /// </remarks>
     public static Activity? StartStage(string name) =>
-        Source.StartActivity(name, ActivityKind.Internal, default(ActivityContext));
+        Source.StartActivity(name, ActivityKind.Internal);
 
     /// <summary>Marks the submission as stopped by a §7 rejection code.</summary>
     public static void Rejected(this Activity? activity, string code) =>
