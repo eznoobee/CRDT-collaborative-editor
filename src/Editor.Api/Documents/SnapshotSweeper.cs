@@ -31,6 +31,21 @@ public sealed class SnapshotOptions
 }
 
 /// <summary>
+/// How stale the oldest snapshot the last sweep saw is (§10).
+/// </summary>
+/// <remarks>
+/// An interface rather than a dependency on the sweeper itself, because
+/// <see cref="Editor.Api.Infrastructure.EditorMetrics"/> needs one number and
+/// taking the whole hosted service to get it made the metrics unconstructible
+/// without a scope factory, an options binding and a logger. A gauge's source
+/// should be a value.
+/// </remarks>
+public interface ISnapshotAge
+{
+    TimeSpan WorstSnapshotAge { get; }
+}
+
+/// <summary>
 /// Runs §6's periodic snapshot, which until 7b.3 nothing did (register row 28).
 /// </summary>
 /// <remarks>
@@ -48,7 +63,7 @@ public sealed class SnapshotOptions
 /// <see cref="DocumentStore.SaveSnapshotAsync"/>.
 /// </para>
 /// </remarks>
-public sealed partial class SnapshotSweeper : BackgroundService
+public sealed partial class SnapshotSweeper : BackgroundService, ISnapshotAge
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly SnapshotOptions _options;

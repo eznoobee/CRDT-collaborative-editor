@@ -30,7 +30,7 @@ public sealed class EditorMetrics : IDisposable
     public EditorMetrics(
         IMeterFactory factory,
         Editor.Api.Hubs.DocumentConnections connections,
-        Editor.Api.Documents.SnapshotSweeper snapshots)
+        Editor.Api.Documents.ISnapshotAge snapshots)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(connections);
@@ -102,6 +102,17 @@ public sealed class EditorMetrics : IDisposable
             unit: "{acknowledgement}",
             description: "§5 acknowledgements written, tagged with what prompted them.");
 
+        // §8's backpressure drop, which until 7b.5 was counted on
+        // DocumentBroadcaster and readable nowhere. §13.15 names this exact
+        // instrument as the one that matters: dropping a slow client and never
+        // dropping one produce the same document, so the count is the only
+        // thing that tells them apart — and a count nobody can read tells them
+        // apart for nobody.
+        BackpressureDrops = _meter.CreateCounter<long>(
+            "editor.backpressure.drops",
+            unit: "{connection}",
+            description: "Connections closed for not keeping up with the fan-out (§8).");
+
         PropagationLatency = _meter.CreateHistogram<double>(
             "editor.propagation.latency",
             unit: "ms",
@@ -122,6 +133,15 @@ public sealed class EditorMetrics : IDisposable
     public Counter<long> ResyncRequired { get; }
 
     public Counter<long> ReplicasRetired { get; }
+
+    /// <summary>
+    /// Connections dropped for backpressure (§8).
+    /// </summary>
+    /// <remarks>
+    /// A rate above zero is a network or a client problem that is otherwise
+    /// invisible until someone complains their editor keeps reconnecting.
+    /// </remarks>
+    public Counter<long> BackpressureDrops { get; }
 
     /// <summary>Catch-up reads, tagged <c>source</c>: snapshot or log.</summary>
     public Counter<long> CatchUps { get; }

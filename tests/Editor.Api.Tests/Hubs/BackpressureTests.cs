@@ -1,4 +1,8 @@
+using System.Diagnostics.Metrics;
+using Editor.Api.Documents;
 using Editor.Api.Hubs;
+using Editor.Api.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Editor.Api.Tests.Hubs;
@@ -28,7 +32,32 @@ public sealed class BackpressureTests
     private static DocumentBroadcaster Broadcaster(FakeTimeProvider time, TimeSpan? sendTimeout = null) =>
         new(
             new BackpressureOptions { SendTimeout = sendTimeout ?? TimeSpan.FromSeconds(5) },
-            time);
+            time,
+            Metrics());
+
+    /// <summary>
+    /// Real instruments over a throwaway meter, not a stub.
+    /// </summary>
+    /// <remarks>
+    /// §10's drop counter is incremented in the same statement as the field
+    /// these tests assert on. A stub would let the two drift apart in exactly
+    /// the place §13.15 says the count is the only evidence there is.
+    /// </remarks>
+    private static EditorMetrics Metrics()
+    {
+        var services = new ServiceCollection();
+        services.AddMetrics();
+
+        return new EditorMetrics(
+            services.BuildServiceProvider().GetRequiredService<IMeterFactory>(),
+            new DocumentConnections(),
+            new NoSnapshots());
+    }
+
+    private sealed class NoSnapshots : ISnapshotAge
+    {
+        public TimeSpan WorstSnapshotAge => TimeSpan.Zero;
+    }
 
     [Fact]
     public async Task A_connection_that_never_drains_does_not_hold_up_the_others()

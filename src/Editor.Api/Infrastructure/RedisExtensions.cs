@@ -169,7 +169,8 @@ public static class RedisExtensions
         services.AddSingleton<DocumentConnections>();
         services.AddSingleton(provider => new DocumentBroadcaster(
             provider.GetRequiredService<IOptions<BackpressureOptions>>().Value,
-            provider.GetRequiredService<TimeProvider>()));
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<EditorMetrics>()));
         services.AddSingleton<DocumentBackplane>();
 
         // §10's correlation id, as a filter so there is no method for anyone to

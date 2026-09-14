@@ -184,6 +184,7 @@ public static class PersistenceExtensions
         services.AddScoped<IPeriodicSnapshotter, PeriodicSnapshotter>();
 
         services.AddSingleton<SnapshotSweeper>();
+        services.AddSingleton<ISnapshotAge>(provider => provider.GetRequiredService<SnapshotSweeper>());
         services.AddHostedService(provider => provider.GetRequiredService<SnapshotSweeper>());
 
         return services;

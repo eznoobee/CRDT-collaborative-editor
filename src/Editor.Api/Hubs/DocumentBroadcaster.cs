@@ -54,15 +54,21 @@ public sealed class DocumentBroadcaster
 {
     private readonly BackpressureOptions _options;
     private readonly TimeProvider _time;
+    private readonly Editor.Api.Infrastructure.EditorMetrics _metrics;
     private long _dropped;
 
-    public DocumentBroadcaster(BackpressureOptions options, TimeProvider time)
+    public DocumentBroadcaster(
+        BackpressureOptions options,
+        TimeProvider time,
+        Editor.Api.Infrastructure.EditorMetrics metrics)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(time);
+        ArgumentNullException.ThrowIfNull(metrics);
 
         _options = options;
         _time = time;
+        _metrics = metrics;
     }
 
     /// <summary>
@@ -73,6 +79,12 @@ public sealed class DocumentBroadcaster
     /// document, so the count is the only thing that distinguishes them. A rate
     /// above zero is a network or a client problem that is otherwise invisible
     /// until someone complains their editor keeps reconnecting.
+    /// <para>
+    /// Kept beside the §10 instrument rather than replaced by it: this one is
+    /// what the tests assert against in process, and the instrument is what an
+    /// operator reads. They move together, in the same statement, because a
+    /// field and a counter that can disagree are two facts about one event.
+    /// </para>
     /// </remarks>
     public long DroppedForBackpressure => Interlocked.Read(ref _dropped);
 
@@ -149,6 +161,7 @@ public sealed class DocumentBroadcaster
             foreach (var connection in dropped)
             {
                 Interlocked.Increment(ref _dropped);
+                _metrics.BackpressureDrops.Add(1);
                 await close(connection).ConfigureAwait(false);
             }
 

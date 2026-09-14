@@ -24,6 +24,9 @@ builder.Services.AddSecretRedaction();
 // header — trusted from the configured networks and nowhere else.
 builder.Services.AddProxyForwarding(builder.Configuration);
 
+// §10's readings, on a listener of its own that §4's proxy does not forward to.
+builder.AddAdminListener();
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddEditorAuthentication(builder.Configuration);
 builder.Services.AddSecurityHeaders(builder.Configuration);
@@ -89,6 +92,10 @@ app.UseAuthorization();
 // roll the fleet over a dependency outage that the application is built to ride
 // out (§10's reason for AbortOnConnectFail = false).
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+
+// §10's instruments, readable. Bound to the admin port and 404 on every other,
+// which HealthEndpointTests asserts rather than assumes.
+app.MapAdminMetrics();
 
 // Readiness says this instance can serve, and names the dependency when it
 // cannot. Anonymous, like liveness: an orchestrator has no token, and the body
