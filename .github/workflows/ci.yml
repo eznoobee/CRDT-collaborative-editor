@@ -329,6 +329,19 @@ jobs:
       - name: Breakdown fields
         run: ./scripts/check-breakdown.sh
 
+  sabotage:
+    name: §12's sabotage harness reverts what it changed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The harness reverts with 'git checkout -- .', so a revert that quietly
+      # stops working leaves a sabotage in the tree and the next commit carries
+      # it — which has now happened. The self-test proves the revert restores
+      # tracked files, restores untracked files, and removes files the sabotage
+      # created, in a throwaway repository.
+      - name: Sabotage harness self-test
+        run: ./scripts/sabotage.sh --self-test
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

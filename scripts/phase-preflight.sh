@@ -250,6 +250,7 @@ run_gate() {
 run_gate "workflows" ./scripts/check-workflows.sh
 run_gate "format" dotnet format --verify-no-changes
 run_gate "breakdown" ./scripts/check-breakdown.sh
+run_gate "sabotage" ./scripts/sabotage.sh --self-test
 run_gate "tests" ./scripts/run-tests.sh
 run_gate "client" ./scripts/client-gates.sh
 run_gate "conformance" ./scripts/conformance.sh
