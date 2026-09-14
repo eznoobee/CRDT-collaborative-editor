@@ -1,4 +1,5 @@
 using Crdt.Core;
+using Editor.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 
 namespace Editor.Infrastructure.Persistence;
@@ -43,22 +44,26 @@ public sealed class SnapshotGarbageCollector : ISnapshotGarbageCollector
     private readonly DocumentStore _store;
     private readonly IStabilityFrontier _frontier;
     private readonly TimeProvider _time;
+    private readonly InfrastructureMetrics _metrics;
 
     public SnapshotGarbageCollector(
         EditorDbContext context,
         DocumentStore store,
         IStabilityFrontier frontier,
-        TimeProvider time)
+        TimeProvider time,
+        InfrastructureMetrics metrics)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(frontier);
         ArgumentNullException.ThrowIfNull(time);
+        ArgumentNullException.ThrowIfNull(metrics);
 
         _context = context;
         _store = store;
         _frontier = frontier;
         _time = time;
+        _metrics = metrics;
     }
 
     public async Task<int> CollectAsync(int documents, CancellationToken cancellationToken)
@@ -139,6 +144,11 @@ public sealed class SnapshotGarbageCollector : ISnapshotGarbageCollector
         await _store
             .SaveCollectedSnapshotAsync(documentId, replica, serverSeq, cancellationToken)
             .ConfigureAwait(false);
+
+        // Counted here, after the write, rather than by the caller: the count
+        // and the bytes move together or the count is a lie, and a metric on
+        // the hosted service would miss every other caller.
+        _metrics.ElementsCollected.Add(collected);
 
         return collected;
     }

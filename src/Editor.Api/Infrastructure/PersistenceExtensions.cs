@@ -135,6 +135,13 @@ public static class PersistenceExtensions
         services.AddSingleton<ReplicaRetirement>();
         services.AddHostedService(provider => provider.GetRequiredService<ReplicaRetirement>());
 
+        // §10's instruments. A singleton because a Meter is one per process and
+        // the instruments are its children; IMeterFactory is what the hosting
+        // layer provides for exactly this.
+        services.AddMetrics();
+        services.AddSingleton<EditorMetrics>();
+        services.AddSingleton<Editor.Infrastructure.Observability.InfrastructureMetrics>();
+
         services.AddSingleton<ReplicaHeartbeat>();
         services.AddHostedService(provider => provider.GetRequiredService<ReplicaHeartbeat>());
 

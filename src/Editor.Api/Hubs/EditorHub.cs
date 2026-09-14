@@ -1,4 +1,5 @@
 using Crdt.Core;
+using Editor.Api.Infrastructure;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
 using Editor.Infrastructure.Ingest;
@@ -36,6 +37,7 @@ public sealed partial class EditorHub : Hub
     private readonly DocumentIngestState _state;
     private readonly OperationLogBatcher _log;
     private readonly ILogger<EditorHub> _logger;
+    private readonly EditorMetrics _metrics;
 
     public EditorHub(
         CatchUpReader catchUp,
@@ -51,9 +53,11 @@ public sealed partial class EditorHub : Hub
         IOperationRateLimiter rateLimits,
         DocumentIngestState state,
         OperationLogBatcher log,
-        ILogger<EditorHub> logger)
+        ILogger<EditorHub> logger,
+        EditorMetrics metrics)
     {
         ArgumentNullException.ThrowIfNull(catchUp);
+        ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(backplane);
         ArgumentNullException.ThrowIfNull(claims);
         ArgumentNullException.ThrowIfNull(broadcaster);
@@ -82,6 +86,7 @@ public sealed partial class EditorHub : Hub
         _state = state;
         _log = log;
         _logger = logger;
+        _metrics = metrics;
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -175,6 +180,7 @@ public sealed partial class EditorHub : Hub
 
         if (!TryGetBinding(out var binding))
         {
+            Reject(HubErrors.Unauthenticated);
             return SubmitResult.Rejected(HubErrors.Unauthenticated);
         }
 
@@ -185,6 +191,7 @@ public sealed partial class EditorHub : Hub
         {
             // not_found, not forbidden: the caller may have no idea whether
             // that document exists, and this answer must not tell them.
+            Reject(HubErrors.NotFound);
             return SubmitResult.Rejected(HubErrors.NotFound);
         }
 
@@ -193,6 +200,7 @@ public sealed partial class EditorHub : Hub
         // replica would converge on the forgery.
         if (batch.ReplicaId != binding.ReplicaId)
         {
+            Reject(HubErrors.Forbidden);
             return SubmitResult.Rejected(HubErrors.Forbidden);
         }
 
@@ -205,6 +213,7 @@ public sealed partial class EditorHub : Hub
 
         if (role is null)
         {
+            Reject(HubErrors.NotFound);
             return SubmitResult.Rejected(HubErrors.NotFound);
         }
 
@@ -213,20 +222,30 @@ public sealed partial class EditorHub : Hub
             // §7: rejected and logged. The document id is safe to log — the
             // caller can see the document — and the ticket is not here at all.
             Log.ViewerWriteRejected(_logger, binding.DocumentId, binding.ReplicaId);
+            Reject(HubErrors.Forbidden);
             return SubmitResult.Rejected(HubErrors.Forbidden);
         }
 
         var replicaId = ReplicaIdConversion.FromGuid(binding.ReplicaId);
+        var arrived = System.Diagnostics.Stopwatch.GetTimestamp();
+
         var validated = await _validator
             .ValidateAsync(binding.DocumentId, replicaId, batch.Operations, Context.ConnectionAborted)
             .ConfigureAwait(false);
 
         if (validated.Rejection is not null)
         {
+            Reject(validated.Rejection);
             return SubmitResult.Rejected(validated.Rejection);
         }
 
         var operations = validated.Operations!;
+
+        // Counted after validation, where the expanded operation count exists:
+        // a run arrives as one encoded operation and becomes many (3.6), and a
+        // received count taken before expansion would under-report exactly the
+        // traffic §7's limits exist for.
+        _metrics.OperationsReceived.Add(operations.Count);
         if (operations.Count == 0)
         {
             return SubmitResult.Ok(0);
@@ -245,6 +264,7 @@ public sealed partial class EditorHub : Hub
         if (!budget.Allowed)
         {
             Log.RateLimited(_logger, binding.DocumentId, operations.Count);
+            Reject(IngestRejection.RateLimited);
             return SubmitResult.Throttled(IngestRejection.RateLimited, budget.RetryAfter);
         }
 
@@ -287,6 +307,15 @@ public sealed partial class EditorHub : Hub
         // connected somewhere else; the fan-out above reaches only the
         // connections this process happens to hold.
         await _backplane.PublishAsync(message).ConfigureAwait(false);
+
+        _metrics.OperationsApplied.Add(operations.Count);
+
+        // §8's segment: arrival to broadcast enqueue, which is the span the
+        // p99 target names. Measured here rather than around the whole method
+        // so that a change to what happens after enqueue cannot silently move
+        // the number the target is judged against (3b.1's lesson).
+        _metrics.PropagationLatency.Record(
+            System.Diagnostics.Stopwatch.GetElapsedTime(arrived).TotalMilliseconds);
 
         return SubmitResult.Ok(operations.Count);
     }
@@ -435,6 +464,28 @@ public sealed partial class EditorHub : Hub
             .ConfigureAwait(false);
 
         return new CatchUpResult(null, caught.Snapshot, caught.Operations, caught.ServerSeq);
+    }
+
+    /// <summary>
+    /// Records a refusal against §10's counters, tagged with its code.
+    /// </summary>
+    /// <remarks>
+    /// One call site per refusal rather than a wrapper around the method,
+    /// because the codes are the point: an untagged rejection count tells an
+    /// operator that something is being refused and nothing about what, which
+    /// is the difference between a dashboard that diagnoses and one that exists
+    /// (§13.22). <c>resync_required</c> also gets its own counter — §9 makes it
+    /// the one refusal that destroys a user's unsent work, so its rate is not a
+    /// row in a breakdown, it is a thing to alert on.
+    /// </remarks>
+    private void Reject(string code)
+    {
+        _metrics.OperationsRejected.Add(1, new KeyValuePair<string, object?>("code", code));
+
+        if (code == IngestRejection.ResyncRequired)
+        {
+            _metrics.ResyncRequired.Add(1);
+        }
     }
 
     /// <summary>The SignalR group carrying one document's broadcasts.</summary>

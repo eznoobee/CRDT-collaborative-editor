@@ -1,3 +1,4 @@
+using Editor.Api.Infrastructure;
 using Editor.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -81,23 +82,27 @@ public sealed partial class ReplicaRetirement : BackgroundService
     private readonly TimeProvider _time;
     private readonly ILogger<ReplicaRetirement> _logger;
     private long _retired;
+    private readonly EditorMetrics _metrics;
     private long _sweeps;
 
     public ReplicaRetirement(
         IServiceScopeFactory scopes,
         IOptions<ReplicaRetirementOptions> options,
         TimeProvider time,
-        ILogger<ReplicaRetirement> logger)
+        ILogger<ReplicaRetirement> logger,
+        EditorMetrics metrics)
     {
         ArgumentNullException.ThrowIfNull(scopes);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(metrics);
 
         _scopes = scopes;
         _options = options.Value;
         _time = time;
         _logger = logger;
+        _metrics = metrics;
     }
 
     /// <summary>Replicas this instance has retired since it started.</summary>
@@ -166,6 +171,7 @@ public sealed partial class ReplicaRetirement : BackgroundService
         if (retired > 0)
         {
             Interlocked.Add(ref _retired, retired);
+            _metrics.ReplicasRetired.Add(retired);
             Log.Retired(_logger, retired, cutoff);
         }
 
