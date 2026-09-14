@@ -51,12 +51,24 @@ public sealed class BackpressureTests
         return new EditorMetrics(
             services.BuildServiceProvider().GetRequiredService<IMeterFactory>(),
             new DocumentConnections(),
-            new NoSnapshots());
+            new NoSnapshots(),
+            new NoState());
     }
 
     private sealed class NoSnapshots : ISnapshotAge
     {
         public TimeSpan WorstSnapshotAge => TimeSpan.Zero;
+    }
+
+    private sealed class NoState : IStateReadings
+    {
+        public long LiveReplicas => 0;
+
+        public long SilentReplicas => 0;
+
+        public long RetiredReplicas => 0;
+
+        public long StoredSnapshots => 0;
     }
 
     [Fact]

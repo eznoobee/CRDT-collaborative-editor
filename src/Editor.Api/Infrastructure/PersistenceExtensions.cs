@@ -139,6 +139,21 @@ public static class PersistenceExtensions
         // the instruments are its children; IMeterFactory is what the hosting
         // layer provides for exactly this.
         services.AddMetrics();
+
+        // §10's state-derived readings, before the metrics that report them:
+        // row 8 found that a counter beside a write is not a measurement of the
+        // write, and these are counted from the rows instead.
+        services.AddOptions<StateReadingOptions>()
+            .BindConfiguration(StateReadingOptions.Section)
+            .Validate(
+                options => options.Interval > TimeSpan.Zero,
+                "A state-reading interval of zero would query on every tick forever.")
+            .ValidateOnStart();
+
+        services.AddSingleton<StateReadings>();
+        services.AddSingleton<IStateReadings>(provider => provider.GetRequiredService<StateReadings>());
+        services.AddHostedService(provider => provider.GetRequiredService<StateReadings>());
+
         services.AddSingleton<EditorMetrics>();
         services.AddSingleton<Editor.Infrastructure.Observability.InfrastructureMetrics>();
 

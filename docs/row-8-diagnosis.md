@@ -25,7 +25,11 @@ the search space. Two things narrow the gap:
    *expected invisible* are what show the dashboards have edges.
 
 **This remains weaker than a second person doing the diagnosis.** Nothing below
-changes that, and the report does not claim otherwise.
+changes that, and the report does not claim otherwise. That sentence is stated
+at exactly the strength the evidence supports and **is not to be upgraded by a
+later phase report**: following a procedure mechanically establishes that the
+reasoning did not fill in for the dashboards on this run. It does not establish
+that a reader without the breaker's knowledge would have reached the same place.
 
 ## The stack
 
@@ -64,15 +68,29 @@ connection count is zero while the other's is not, that instance is the subject
 and no further view is needed for *which instance*. Otherwise both are serving
 and the difference is behavioural, not availability.
 
-**Step 1 — is a §8 target actually being missed?** Read view 1. Compare
+**Step 1 — do the instances DIFFER on a §8 target?** Read view 1. Compare
 `over 25 ms` between instances as a share of observations.
-- Both low → no latency target is being missed; the reported violation is not
-  this one. Go to step 2.
-- One instance high → that instance is the subject for a latency target. **The
-  procedure stops here for *which target* and *which instance*, and cannot go
-  further: no view breaks the segment into stages.** Record that.
-- Both high → the cause is shared (database, Redis, or the load itself) and not
-  instance-local. Go to step 5.
+
+> **Revised after the first run (7b.5). The original branched on a threshold —
+> "both high → shared cause → step 5" — and a permanently red signal then
+> captures every diagnosis there will ever be.** §8's 25 ms target is missed on
+> every submission everywhere (register row 5), so the first run routed straight
+> past the three views where the break was visible, and would have done so for
+> any break drawn, not just that one. **A step comparing two instances branches
+> on whether they differ, not on whether either exceeds a threshold**: "both
+> high" and "both high in the same way" are different readings and only the
+> second is uninformative.
+
+- **They differ** → the instance that is worse is the subject for a latency
+  target. **The procedure stops here for *which target* and *which instance*,
+  and cannot go further: no view breaks the segment into stages.** Record that.
+- **They agree, and both are within target** → no latency target is being
+  missed. Go to step 2.
+- **They agree, and both are outside target** → this is a shared condition, and
+  a shared condition that is the same on both instances is **not evidence about
+  this incident** — it may be a standing miss that predates it. Note it and **go
+  to step 2**. Do not treat it as the answer, and do not jump to step 5: a
+  reading identical everywhere rules out nothing instance-local.
 
 **Step 2 — is work being refused?** Read view 2. Compare the `rejected · code`
 rows between instances.
@@ -86,15 +104,24 @@ rows between instances.
 one instance and not the other name the fan-out on that instance. Stop.
 Otherwise go to step 4.
 
-**Step 4 — is §5's machinery moving?** Read view 4.
-- `acknowledgements · timer` at zero while `submit` or `catchup` are non-zero →
-  the client timer path, which is the known blind spot §13.32 records.
-- `elements collected` and `replicas retired` at zero on both while
-  acknowledgements are non-zero → the frontier is not advancing.
-- A count present on one instance and absent on the other is **suggestive only**:
-  these are background sweeps over a shared database, and which instance wins a
-  batch is arbitrary. Do not stop here on that basis alone; record it and go to
-  step 5.
+**Step 4 — is §5's machinery moving?** Read view 4 (counted from the rows)
+before view 4b (counted at the hub). The order matters: 4 says whether anything
+was written, 4b says only how many requests arrived.
+- **`silent` non-zero and rising with traffic → the frontier is not being
+  written.** Stop for *what*. This reading is identical on every instance by
+  construction — one database — so it **cannot** say which instance, and the
+  procedure records "detected, not localised" rather than guessing.
+- `acknowledgements · timer` at zero in 4b while `submit` or `catchup` are
+  non-zero → the client timer path, which is the known blind spot §13.32
+  records.
+- A 4b count present on one instance and absent on the other, with `silent`
+  flat, is request routing rather than a fault.
+- `elements collected` and `replicas retired` at zero on both while `silent` is
+  zero → the frontier is being written and collection is still not running; go
+  to step 5.
+- A background-sweep count present on one instance and absent on the other is
+  **suggestive only**: which instance wins a batch is arbitrary. Do not stop on
+  that alone.
 
 **Step 5 — is the document store keeping up?** Read view 5. Snapshot age rising
 with `snapshots written` flat means the sweep is not running anywhere; both flat

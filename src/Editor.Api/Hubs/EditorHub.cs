@@ -457,7 +457,7 @@ public sealed partial class EditorHub : Hub
         // After the write, not before: a count that moves for an acknowledgement
         // that failed to store reports a frontier advancing on evidence the
         // database does not have.
-        _metrics.Acknowledgements.Add(1, new KeyValuePair<string, object?>("via", via));
+        _metrics.AcknowledgementsReceived.Add(1, new KeyValuePair<string, object?>("via", via));
     }
 
     /// <summary>

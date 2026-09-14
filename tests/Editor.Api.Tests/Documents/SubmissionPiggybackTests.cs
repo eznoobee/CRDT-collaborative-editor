@@ -103,9 +103,9 @@ public sealed class SubmissionPiggybackTests
         await using var client = await DocumentClient.JoinAsync(factory, "piggy-metric", documentId);
         Assert.Null((await client.SubmitReportingAsync(client.Writer.Type("ab"))).Code);
 
-        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "submit"));
-        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "timer"));
-        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "catchup"));
+        Assert.Equal(1, metrics.Total("editor.acknowledgements.received", "via", "submit"));
+        Assert.Equal(0, metrics.Total("editor.acknowledgements.received", "via", "timer"));
+        Assert.Equal(0, metrics.Total("editor.acknowledgements.received", "via", "catchup"));
     }
 
     [Fact]

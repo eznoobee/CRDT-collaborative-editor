@@ -30,11 +30,13 @@ public sealed class EditorMetrics : IDisposable
     public EditorMetrics(
         IMeterFactory factory,
         Editor.Api.Hubs.DocumentConnections connections,
-        Editor.Api.Documents.ISnapshotAge snapshots)
+        Editor.Api.Documents.ISnapshotAge snapshots,
+        IStateReadings state)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(connections);
         ArgumentNullException.ThrowIfNull(snapshots);
+        ArgumentNullException.ThrowIfNull(state);
 
         _meter = factory.Create(MeterName);
 
@@ -59,6 +61,35 @@ public sealed class EditorMetrics : IDisposable
             () => snapshots.WorstSnapshotAge.TotalSeconds,
             unit: "s",
             description: "Oldest latest-snapshot across the documents the last sweep examined.");
+
+        // §10's state-derived readings. Row 8's finding in its general form:
+        // a counter beside a write measures that control reached the line after
+        // it, and these measure the rows themselves. They are identical on
+        // every instance by construction — one database — so they detect and do
+        // not localise. See StateReadings and docs/section-10-audit.md.
+        _meter.CreateObservableGauge(
+            "editor.replicas.live",
+            () => state.LiveReplicas,
+            unit: "{replica}",
+            description: "Replicas not yet retired, counted from the rows (§5).");
+
+        _meter.CreateObservableGauge(
+            "editor.replicas.silent",
+            () => state.SilentReplicas,
+            unit: "{replica}",
+            description: "Live replicas that have never said what they hold (§5).");
+
+        _meter.CreateObservableGauge(
+            "editor.replicas.retired.stored",
+            () => state.RetiredReplicas,
+            unit: "{replica}",
+            description: "Replicas carrying a retirement timestamp, counted from the rows (§5).");
+
+        _meter.CreateObservableGauge(
+            "editor.snapshots.stored",
+            () => state.StoredSnapshots,
+            unit: "{snapshot}",
+            description: "Snapshot rows stored, counted from the rows (§6).");
 
         OperationsReceived = _meter.CreateCounter<long>(
             "editor.operations.received",
@@ -97,10 +128,15 @@ public sealed class EditorMetrics : IDisposable
             unit: "{request}",
             description: "Catch-up reads, tagged with whether a snapshot was served.");
 
-        Acknowledgements = _meter.CreateCounter<long>(
-            "editor.acknowledgements",
-            unit: "{acknowledgement}",
-            description: "§5 acknowledgements written, tagged with what prompted them.");
+        // RENAMED, and the name is the fix. It counts acknowledgement REQUESTS
+        // reaching the end of the hub method — which is a legitimate question,
+        // and is not the question the old name answered. Row 8 broke the write
+        // and this counter did not move, because it never measured the write.
+        // What does is editor.replicas.silent, above.
+        AcknowledgementsReceived = _meter.CreateCounter<long>(
+            "editor.acknowledgements.received",
+            unit: "{request}",
+            description: "§5 acknowledgement requests handled, tagged with what prompted them.");
 
         // §8's backpressure drop, which until 7b.5 was counted on
         // DocumentBroadcaster and readable nowhere. §13.15 names this exact
@@ -147,17 +183,26 @@ public sealed class EditorMetrics : IDisposable
     public Counter<long> CatchUps { get; }
 
     /// <summary>
-    /// §5 acknowledgements written, tagged <c>via</c>: timer or catchup.
+    /// §5 acknowledgement <em>requests</em> handled, tagged <c>via</c>: timer,
+    /// catchup or submit.
     /// </summary>
     /// <remarks>
-    /// <strong>The tag is the point.</strong> An untagged count is satisfied by
-    /// the catch-up piggyback alone, and a client whose acknowledgement timer
-    /// has stopped still catches up once per connection — so the count stays
-    /// healthy while the stability frontier stops moving, which is precisely the
-    /// failure that held it still for a whole phase. Split by what prompted it,
-    /// "timer at zero" is visible.
+    /// <para>
+    /// <strong>Requests, not writes, and the name says so since 7b.5.</strong>
+    /// Row 8 removed the frontier write and left this increment standing: it
+    /// read identically on the broken instance and the healthy one. It was
+    /// never a measurement of the write — it measures that the hub method got
+    /// to its last line — and under the old name <c>editor.acknowledgements</c>
+    /// it claimed otherwise on every dashboard.
+    /// </para><para>
+    /// Kept, because request volume by source is a real question: a client whose
+    /// timer has stopped still catches up once per connection, so
+    /// <c>via=timer</c> at zero with traffic is a client-side fault this is the
+    /// only view of. For "did the frontier actually move", read
+    /// <c>editor.replicas.silent</c>, which is counted from the rows.
+    /// </para>
     /// </remarks>
-    public Counter<long> Acknowledgements { get; }
+    public Counter<long> AcknowledgementsReceived { get; }
 
     public Histogram<double> PropagationLatency { get; }
 

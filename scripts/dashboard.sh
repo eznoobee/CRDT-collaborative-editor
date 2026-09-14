@@ -111,17 +111,25 @@ view("3 · FAN-OUT", "§8's backpressure. A drop is a client told to reconnect."
 row("backpressure drops", [counter(s, "editor.backpressure.drops") for s in snaps])
 row("outbound queue depth", [counter(s, "editor.outbound.queue_depth") for s in snaps])
 
-view("4 · §5 STABILITY FRONTIER", "The three report paths. 'timer' at zero with traffic is the known blind spot.")
-vias = sorted({v for s in snaps for v in tagged(s, "editor.acknowledgements")})
+view("4 · §5 STABILITY FRONTIER — COUNTED FROM THE ROWS",
+     "State-derived (§13.44). Identical on every instance by construction: these detect, they do not localise.")
+row("live replicas", [gauge(s, "editor.replicas.live") for s in snaps])
+row("  of those, SILENT (never reported)", [gauge(s, "editor.replicas.silent") for s in snaps])
+row("retired replicas (stored)", [gauge(s, "editor.replicas.retired.stored") for s in snaps])
+
+view("4b · §5 REPORT TRAFFIC — COUNTED AT THE HUB",
+     "Request volume by source, per instance. NOT a measure of whether anything was written (7b.5).")
+vias = sorted({v for s in snaps for v in tagged(s, "editor.acknowledgements.received")})
 if not vias:
     row("acknowledgements", ["none"] * len(snaps))
 for via in vias:
-    row(f"acknowledgements · {via}", [tagged(s, "editor.acknowledgements").get(via, 0) for s in snaps])
-row("replicas retired", [counter(s, "editor.replicas.retired") for s in snaps])
-row("elements collected", [counter(s, "editor.gc.elements_collected") for s in snaps])
+    row(f"acknowledgements · {via}", [tagged(s, "editor.acknowledgements.received").get(via, 0) for s in snaps])
+row("replicas retired (this instance)", [counter(s, "editor.replicas.retired") for s in snaps])
+row("elements collected (this instance)", [counter(s, "editor.gc.elements_collected") for s in snaps])
 
 view("5 · §6 SNAPSHOTS", "Target: document load < 500 ms, which this is what defends.")
-row("snapshots written", [counter(s, "editor.snapshots.written") for s in snaps])
+row("snapshots stored (from the rows)", [gauge(s, "editor.snapshots.stored") for s in snaps])
+row("snapshots written (this instance)", [counter(s, "editor.snapshots.written") for s in snaps])
 row("oldest snapshot age (s)", [round(gauge(s, "editor.snapshot.age")) for s in snaps])
 sources = sorted({c for s in snaps for c in tagged(s, "editor.catchup.requests")})
 for source in sources:

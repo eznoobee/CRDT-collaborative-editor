@@ -205,21 +205,21 @@ public sealed class EditorMetricsTests
         Assert.Null(first.Code);
         viewer.ApplyCatchUp(first);
 
-        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "catchup"));
+        Assert.Equal(0, metrics.Total("editor.acknowledgements.received", "via", "catchup"));
 
         // Now it holds something, so the piggyback carries a real vector.
         var second = await viewer.CatchUpAsync();
         Assert.Null(second.Code);
 
-        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "catchup"));
-        Assert.Equal(0, metrics.Total("editor.acknowledgements", "via", "timer"));
+        Assert.Equal(1, metrics.Total("editor.acknowledgements.received", "via", "catchup"));
+        Assert.Equal(0, metrics.Total("editor.acknowledgements.received", "via", "timer"));
 
         // Then the timer's own report, which is the one that keeps arriving
         // from a reader who never touches the document again.
         await viewer.AcknowledgeAsync();
 
-        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "timer"));
-        Assert.Equal(1, metrics.Total("editor.acknowledgements", "via", "catchup"));
+        Assert.Equal(1, metrics.Total("editor.acknowledgements.received", "via", "timer"));
+        Assert.Equal(1, metrics.Total("editor.acknowledgements.received", "via", "catchup"));
     }
 
     [Fact]
