@@ -140,12 +140,13 @@ public sealed class SnapshotTests(PostgresFixture fixture)
         // put DIFFERENT state at that sequence. Skipping it leaves the
         // collector's count describing bytes that were never written.
         //
-        // Reachable only from here today: nothing in the running server calls
-        // SaveSnapshotAsync at all, so §6's every-500-operations policy never
-        // fires and the conflict cannot arise through the product. That is
-        // recorded as a gap rather than a reason to leave the contract
-        // untested, because the collector's write is currently the ONLY
-        // snapshot the product ever stores.
+        // Reachable through the product since 7b.3 and not before it: until the
+        // sweep existed, nothing in the running server called SaveSnapshotAsync
+        // at all, §6's every-500-operations policy never fired, and this
+        // conflict could not arise. The contract was tested here anyway, which
+        // is why closing register row 28 did not need it written — but it does
+        // mean this assertion spent four phases describing a collision between
+        // one writer and a writer that did not exist.
         var documentId = PostgresFixture.NewDocumentId();
         var writer = new OperationLogWriter(fixture.DataSource);
         var store = new DocumentStore(fixture.DataSource);

@@ -649,16 +649,32 @@ does not occur in use. 7b measures against realistic edit traces or it measures
 nothing; whether the payload of a placeholder tombstone can be dropped while its
 position is kept is a 7b question, on evidence.
 
-#### Nothing writes a periodic snapshot
+#### The periodic snapshot, and why it is a sweep
 
-§6 says a snapshot is taken every 500 operations. `SnapshotPolicy` and
-`DocumentStore.SaveSnapshotAsync` exist and are correct; **nothing in the running
-server calls either.** They are reachable only from tests, so a document is
-always rebuilt by full replay of its log, and the collector's own write is
-currently the only snapshot the product ever stores. This is a §13.40 instance
-at the level of a whole subsystem — the policy was specified, implemented, and
-never installed — and it is carried as a register row rather than fixed here,
-because wiring it changes the load characteristics §8 is measured against.
+§6 says a snapshot is taken every 500 operations. For four phases
+`SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` existed, were correct,
+and were reachable only from tests: **nothing in the running server called
+either**, so every document was rebuilt by full replay of its log and the
+collector's own write was the only snapshot the product stored. A policy
+specified, implemented, and never installed — §13.40 at the scale of a
+subsystem, and register row 28.
+
+7b.3 installed it as a **background sweep**, because §8 puts snapshot
+compaction in a background service and is right to: a snapshot is a full replay
+plus a write, and taking one on whichever submission happens to cross the
+threshold puts it inside the segment §8's p99 target measures.
+
+That changes what "every 500 operations" means in code. *Did this batch step
+over a multiple of N* is the right question for a caller that sees every batch
+and the wrong one for a sweep that sees documents, so the predicate is **how far
+the log has run past the latest snapshot**. It is also the self-healing form: a
+crossing missed — to a restart, or to a sweep that failed — left a document
+unsnapshotted for another N operations, whereas a gap only widens until
+something closes it.
+
+The sweep is ranked by that gap rather than rotated round-robin, because unlike
+collection there is a correct order here: the document furthest behind is the
+one whose load costs most, and §8's document-load target is what this defends.
 
 `T_retire` therefore also bounds offline editing. See §9.
 
@@ -2524,11 +2540,11 @@ written, not done).
 | 25 | The seeded-documents rule enforced on the C# harness too | **7b** | Found by 6b.2's guard audit: the grep covers `client/src`, and `EditorApiFactory` still writes document rows directly in eleven call sites. The rule is right and its scope is half of it | §12, §13.36 |
 | 27 | A largest-legitimate-use test for every configured limit | **7 and 7b** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration. **Split deliberately: `T_retire` and the GC watermark belong to Phase 7**, because they are new numbers introduced there and §13.37 says their own tests will pass at any value — and a `T_retire` that retires a replica whose owner is at lunch is data loss, not a tuning complaint. The other thirteen are 7b | §13.37, §12 |
 | 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **7b** | Found by building 6b.7's requirement map, which is what the map is for. There is no test file for `client/src/auth/pkce.ts` or `tokenSource.ts` at all: rows 4, 5, 7 and 9 rest entirely on `app.e2e.test.ts`, which signs in for real but would still sign in if the code challenge stopped being sent. Owned by Phase 7 rather than folded into 6b, which was scoped before the map existed | §7, §12 |
-| 28 | §6's periodic snapshot is never taken | **7b** | Found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause cannot arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` are implemented and correct, and nothing in `src/` calls either: every document is rebuilt by full replay of its log, and the collector's write is the only snapshot the product stores. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
+| 28 | §6's periodic snapshot is never taken | **CLOSED (7b.3)** | Installed as a background sweep, and installing it changed the predicate: "did this batch step over a multiple of N" is the right question for a caller that sees every batch and the wrong one for a sweep that sees documents, so `IsDue` now asks how far the log has run past the latest snapshot — which is also the self-healing form, since a crossing missed to a restart left a document unsnapshotted for another N operations. Unblocks §10's snapshot-age gauge, absent until now for this row's reason. Originally found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause could not arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` were implemented and correct, and nothing in `src/` called either: every document was rebuilt by full replay of its log, and the collector's write was the only snapshot the product stored. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
 | 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
 | 30 | `resync_required` has no reachable path until the log is truncated | **7b** | Found in 7.4 while writing the emitter. §5's collection shrinks the snapshot and never the log, and the frontier is clamped to the log — so an id below the frontier from a known author is always present, and the condition cannot arise from any client action. The rule is implemented, narrow, and pinned by sabotage, and every test of it constructs the frontier directly because nothing else can. The end-to-end test belongs with log truncation, and is a row rather than a good intention | §5, §9, §13.19 |
 | 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
-| 32 | §5's acknowledgement piggybacked on submission | **7b** | The second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
+| 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
 | 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
 | 34 | Audit the convergence tests for §13.42's shape | **7b** | §13.42 was found in the one test guarding the only operation that destroys data, and the setup that produced it — compose on A, deliver to B, compare — is how every convergence test in this repository is naturally written. Twenty files carry such an assertion. One lead already: `ScaleOutTests`' rejoin case compares `kept.Normalised` to a `rejoined` replica that adopted a server snapshot wholesale, so what it proves is closer to "the snapshot round-trips" than to "two replicas independently agree". Each test needs the §13.42 question asked of it by hand — what property is under test, and could the checking party have got it from the party being checked — which is judgement per file rather than a grep, and more than an afternoon | §13.42, §13.19 |
 
