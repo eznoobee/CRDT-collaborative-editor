@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -123,6 +125,140 @@ public sealed class LogRedactionSentinelTests
                 outer,
                 static (state, _) => $"Submitting to {state[0].Value} failed");
         }
+    }
+
+    /// <summary>
+    /// Every routed endpoint, taken from the application's own route table.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>Enumerated from the source, not from the tests that exist</strong>
+    /// — register row 24, and §12's first question applied to a sentinel. A
+    /// sentinel is keyed on traffic, so the endpoints nobody drives are exactly
+    /// the ones that leak, and a hand-written list of paths is a list of the
+    /// paths somebody remembered. Reading <see cref="EndpointDataSource"/> means
+    /// a route added later is covered the day it is added, or this test fails
+    /// for having found a route it cannot address.
+    /// </para><para>
+    /// The hub is excluded because it is not a routed request in this sense and
+    /// is already covered by the connection paths above; everything else the
+    /// application maps is driven.
+    /// </para>
+    /// </remarks>
+    private static List<(HttpMethod Method, string Path)> RoutedEndpoints(
+        IServiceProvider services)
+    {
+        var routes = new List<(HttpMethod Method, string Path)>();
+
+        foreach (var endpoint in services.GetRequiredService<EndpointDataSource>().Endpoints)
+        {
+            if (endpoint is not RouteEndpoint route)
+            {
+                continue;
+            }
+
+            var template = route.RoutePattern.RawText ?? string.Empty;
+            if (template.Contains("/hub/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // Route parameters become a value of the right shape. A guid
+            // constraint that receives "x" is a 404 before the handler runs,
+            // and a 404 before the handler runs is an endpoint not exercised.
+            var path = System.Text.RegularExpressions.Regex.Replace(
+                template,
+                @"\{[^}]*\}",
+                match => match.Value.Contains(":guid", StringComparison.Ordinal)
+                    ? Guid.CreateVersion7().ToString()
+                    : "sentinel-segment");
+
+            var methods = endpoint.Metadata
+                .GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()?.HttpMethods
+                ?? ["GET"];
+
+            foreach (var method in methods)
+            {
+                routes.Add((new HttpMethod(method), "/" + path.TrimStart('/')));
+            }
+        }
+
+        return routes;
+    }
+
+    [Fact]
+    public async Task No_sink_receives_the_sentinel_from_any_routed_endpoint()
+    {
+        // REGISTER ROW 24. The sentinel travelled a hub connection and none of
+        // the REST endpoints Phase 6 added, so a token or ticket logged by the
+        // document API was invisible to it. Found by 6b.2's guard audit — a
+        // test to write rather than a guard to repair.
+        var (factory, sink) = Host();
+        List<(HttpMethod Method, string Path)> routes;
+
+        using (factory)
+        {
+            using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+            {
+                AllowAutoRedirect = false,
+            });
+
+            routes = RoutedEndpoints(factory.Services);
+
+            // The guard on the enumeration. An empty or tiny route table would
+            // make everything below pass by driving nothing, which is this
+            // test's own §13.19 shape.
+            Assert.True(
+                routes.Count >= 8,
+                $"only {routes.Count} routed endpoints were found; the route table is not being read");
+
+            foreach (var (method, path) in routes)
+            {
+                using var request = new HttpRequestMessage(
+                    method,
+                    new Uri($"{path}?access_token={Sentinel}&ticket={Sentinel}", UriKind.Relative));
+
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Sentinel);
+                request.Headers.Add("X-Connect-Ticket", Sentinel);
+
+                if (method != HttpMethod.Get && method != HttpMethod.Delete)
+                {
+                    request.Content = JsonContent.Create(new { title = Sentinel });
+                }
+
+                try
+                {
+                    using var response = await client.SendAsync(
+                        request, TestContext.Current.CancellationToken);
+                    _ = response.StatusCode;
+                }
+                catch (Exception)
+                {
+                    // Every one of these fails: the issuer is unreachable and so
+                    // is Postgres. That is the point — a failing request logs
+                    // more than a succeeding one, and the failure paths are
+                    // where a credential is quoted back.
+                }
+            }
+        }
+
+        var records = sink.Records;
+
+        // The §13.19 guard the breakdown names: this proves nothing if the
+        // sentinel never reached a line the test inspects. Something must have
+        // been logged about these requests.
+        Assert.NotEmpty(records);
+        Assert.Contains(records, record => record.Contains("access_token", StringComparison.Ordinal));
+
+        var leaked = records
+            .Where(record => record.Contains(Sentinel, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Assert.True(
+            leaked.Count == 0,
+            $"§7 forbids a credential reaching any sink. {routes.Count} routed endpoint(s) were "
+            + $"driven and {leaked.Count} record(s) carried the sentinel:\n  "
+            + string.Join("\n  ", leaked.Take(10)));
     }
 
     [Fact]
