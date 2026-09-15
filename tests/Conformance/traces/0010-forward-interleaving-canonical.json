@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "name": "forward-interleaving-canonical",
+  "description": "One replica inserts 'a' then 'b' left to right; another concurrently inserts 'x' at the same position. The canonical forward anomaly.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" },
+    { "index": 1, "id": "00000000-0000-0000-0000-000000000002" }
+  ],
+  "ops": [
+    { "op": "insert", "replica": 0, "index": 0, "value": "a" },
+    { "op": "insert", "replica": 0, "index": 1, "value": "b" },
+    { "op": "insert", "replica": 1, "index": 0, "value": "x" },
+    { "op": "sync" }
+  ],
+  "expected": {
+    "oneOf": ["abx", "xab"],
+    "forbidden": ["axb"],
+    "rationale": "Forward non-interleaving: 'ab' must stay contiguous. 'axb' is the anomaly defined in arXiv A.1 preamble; Table 1 proves Fugue avoids it (forward, one replica)."
+  }
+}

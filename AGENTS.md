@@ -66,9 +66,12 @@ misreading would agree with itself.
 - **`ElementId` ordering is load-bearing.** It breaks sibling ties, so a
   C#/TypeScript disagreement reorders user text. Compare the pair
   `(ReplicaId, Seq)`: the replica's 16 bytes in RFC 4122 big-endian order, then
-  `Seq`. Never `Guid.CompareTo`, never string forms, never Postgres `uuid`
-  collation. Comparing `ReplicaId` alone happens to give the same answer — the
-  authors' reference implementation does that — but §5 follows the paper. (§5)
+  `Seq`. Keep the comparator hand-written — not because `Guid.CompareTo` is
+  wrong (on .NET 10 it agrees; §13.8 records that the old claim to the contrary
+  was false) but because nothing guarantees it will, and TypeScript has no
+  `Guid` to agree with. Never string forms, never Postgres `uuid` collation.
+  Comparing `ReplicaId` alone happens to give the same answer — the authors'
+  reference implementation does that — but §5 follows the paper. (§5)
 - **There is no Lamport clock, on purpose.** Nothing in the comparator is a
   causal clock: the tie-break compares identities, which is why a dense
   per-replica counter suffices where RGA needed a Lamport timestamp. `Seq`
@@ -99,6 +102,26 @@ Enforced twice, because neither alone is enough: reflection over compiled
 assemblies catches a forbidden package that is actually used, and parsing the
 project files catches a declared reference the compiler elided because nothing
 used it. Both live in `tests/Crdt.Core.Tests/ArchitectureTests.cs`.
+
+## What Phase 1 learned the hard way
+
+Four things were wrong and were only found by running something, not by reading:
+
+- **Definition 4 is over the full element order, tombstones included.** Checking
+  it against the visible order is systematically wrong the moment anything is
+  deleted, because a tombstoned origin simply vanishes from the analysis.
+- **Left origin comes from the visible order; right origin from the order
+  including tombstones.** That asymmetry is the paper's (Algorithm 1 lines 23-24,
+  arXiv §5.1). Taking both from one list silently redefines the property.
+- **Causal stability does not license collecting a tombstone.** It means everyone
+  saw the delete, not that nobody will reference the element — right origins can
+  name tombstones. See §5's four collection conditions.
+- **Backward run contiguity has no replica-count threshold.** §13.6 records the
+  measurement that disproved the one this project used to assert.
+
+A near-100% pass rate on an observed property usually means the generator is not
+reaching the interesting shape. That is how the false boundary above survived
+its first measurement.
 
 ## Running things
 
@@ -131,6 +154,32 @@ curl http://localhost:8080/health/live
   by a runner that quietly lost its daemon. The switch is the `CI` environment
   variable.
 - **`dotnet format --verify-no-changes` runs in CI.** Run it before pushing.
+- **There are two test stacks, on purpose.**
+
+  | Project | Framework | Runner | Invoked by |
+  |---|---|---|---|
+  | `Crdt.Core.Tests` | xunit **v2** | VSTest | `dotnet test` |
+  | `Editor.Api.Tests` | xunit.v3 | Microsoft.Testing.Platform | `dotnet run` |
+  | `Conformance` | xunit.v3 | Microsoft.Testing.Platform | `dotnet run` |
+
+  `Crdt.Core.Tests` is the odd one out because Stryker drives VSTest and cannot
+  run Microsoft.Testing.Platform (stryker-net#3094). Mutation score is the only
+  check on `Crdt.Core` that is not self-referential — the conformance harness
+  compares two implementations written from one paper, the invariants are ours,
+  and the generator has already been caught measuring itself — so the runner
+  follows the tool.
+
+  `scripts/run-tests.sh` dispatches on whether a project references `xunit.v3`.
+  **`global.json` deliberately pins no test runner**: pinning one forbids mixing
+  the two, and the mix is the point.
+
+  **Revert condition:** when stryker-net#3094 is resolved, move
+  `Crdt.Core.Tests` back to xunit.v3, restore the runner pin in `global.json`,
+  and simplify `scripts/run-tests.sh` to a single invocation.
+- **`CRDT_PROPERTY_CASES` lowers the per-property case count.** It exists for
+  mutation runs, which execute the suite once per mutant. The full 10,000-case
+  gate runs unconditionally in CI, so the override cannot weaken what the build
+  enforces.
 - **TypeScript is pinned to 5.x** even though 7.x exists (§3). Do not bump a
   pinned dependency without asking.
 

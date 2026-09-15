@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Runs the .NET test suite.
 #
-# Why not `dotnet test`: on .NET 10 the SDK routes `dotnet test` through
-# Microsoft.Testing.Platform, and its bridge does not discover tests in
-# xunit.v3 4.0.0 projects — every project reports "Zero tests ran" (exit code 5)
-# while the same assemblies run correctly when executed directly. `dotnet run`
-# invokes xunit's in-process runner, reports real results, and propagates exit
-# codes (verified: 0 when passing, 1 when failing).
+# Two runners, because two test stacks (see AGENTS.md):
 #
-# Revisit when either package updates; see AGENTS.md.
+#   xunit.v3 / Microsoft.Testing.Platform  -> `dotnet run`
+#     On .NET 10 the SDK routes `dotnet test` through MTP, and its bridge does
+#     not discover tests in xunit.v3 4.0.0 projects — every project reports
+#     "Zero tests ran". `dotnet run` invokes xunit's in-process runner directly
+#     and propagates exit codes.
+#
+#   xunit v2 / VSTest                      -> `dotnet test`
+#     Crdt.Core.Tests only, so that Stryker can drive it (stryker-net#3094).
+#
+# global.json deliberately does NOT pin a test runner: doing so forbids mixing
+# the two, and the mix is the point.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -24,8 +29,10 @@ for proj in tests/*/; do
 
   echo
   echo "==> $name"
-  if ! dotnet run --project "$csproj" --no-build; then
-    failed+=("$name")
+  if grep -q 'Include="xunit.v3"' "$csproj"; then
+    dotnet run --project "$csproj" --no-build || failed+=("$name")
+  else
+    dotnet test "$csproj" --no-build --nologo || failed+=("$name")
   fi
 done
 

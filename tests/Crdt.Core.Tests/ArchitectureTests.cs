@@ -67,7 +67,7 @@ public sealed class ArchitectureTests
     [Fact]
     public void CrdtCore_uses_nothing_outside_the_BCL()
     {
-        var offenders = typeof(AssemblyMarker).Assembly
+        var offenders = typeof(ReplicaId).Assembly
             .GetReferencedAssemblies()
             .Where(a => !IsBcl(a))
             .Select(a => a.Name)

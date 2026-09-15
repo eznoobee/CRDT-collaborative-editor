@@ -1,10 +1,13 @@
 {
   "v": 1,
   "name": "empty-document",
-  "description": "A document with no operations renders as the empty string. The trivial base case: it pins the trace envelope and the empty-traversal behaviour of both implementations.",
+  "description": "A document with no operations renders as the empty string.",
+  "replicas": [
+    { "index": 0, "id": "00000000-0000-0000-0000-000000000001" }
+  ],
   "ops": [],
   "expected": {
     "text": "",
-    "versionVector": {}
+    "rationale": "Base case: the traversal of a tree containing only the root sentinel is empty (TPDS Alg 1, lines 12-20)."
   }
 }
