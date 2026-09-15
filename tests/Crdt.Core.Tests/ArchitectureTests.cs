@@ -82,7 +82,7 @@ public sealed class ArchitectureTests
     [Fact]
     public void EditorDomain_uses_no_infrastructure()
     {
-        var offenders = typeof(Editor.Domain.AssemblyMarker).Assembly
+        var offenders = typeof(Editor.Domain.Document).Assembly
             .GetReferencedAssemblies()
             .Select(a => a.Name)
             .Where(n => n is not null

@@ -249,6 +249,39 @@ public sealed class InvariantTests(ITestOutputHelper output)
             + "behaving correctly. Definition 4 above is what is enforced.");
     }
 
+    [Fact]
+    public void Snapshot_round_trip_preserves_the_document()
+    {
+        // Not one of the eight, but it guards the same surface: §6 restores a
+        // document from a snapshot plus the operations after it, so an export
+        // that loses structure would silently produce a replica that orders
+        // later operations differently from one that replayed the whole log.
+        PropertyRunner.Check("snapshot round trip", (_, result) =>
+        {
+            var original = result.Replicas[0];
+            var restored = Replica.Import(
+                original.Id, original.Export(), original.VersionVector);
+
+            Assert.Equal(original.Text, restored.Text);
+            Assert.Equal(original.AllIds, restored.AllIds);
+            Assert.Equal(original.VisibleIds, restored.VisibleIds);
+            Assert.Equal(
+                original.VersionVector.OrderBy(e => e.Key).ToArray(),
+                restored.VersionVector.OrderBy(e => e.Key).ToArray());
+
+            // A restored replica must accept later operations identically.
+            if (result.Replicas.Count > 1)
+            {
+                var op = result.Replicas[1].Insert(
+                    result.Replicas[1].Values.Count, new System.Text.Rune('q'));
+                original.Apply(op);
+                restored.Apply(op);
+
+                Assert.Equal(original.Text, restored.Text);
+            }
+        });
+    }
+
     private static Replica Rebuild(IEnumerable<Operation> operations, int observerId)
     {
         var replica = new Replica(ReplicaIds.Numbered(observerId));

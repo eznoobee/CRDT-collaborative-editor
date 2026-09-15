@@ -16,6 +16,9 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Crdt.Core/Crdt.Core.csproj" />
+    <!-- The wire encoding lives in Infrastructure because Crdt.Core is BCL-only
+         (§4); §6 requires the corpus to exercise it. -->
+    <ProjectReference Include="../../src/Editor.Infrastructure/Editor.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>
