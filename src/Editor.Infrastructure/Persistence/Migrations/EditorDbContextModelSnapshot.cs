@@ -238,9 +238,9 @@ namespace Editor.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
 
-                    b.Property<string>("State")
+                    b.Property<byte[]>("State")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("bytea")
                         .HasColumnName("state");
 
                     b.Property<string>("VersionVector")

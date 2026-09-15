@@ -30,3 +30,6 @@ dist/
 *.swp
 .DS_Store
 dist-types/
+
+# Browser metric harness dependencies (PROJECT_SPEC.md §8); the lockfile is kept.
+tests/browser/node_modules/

@@ -1,0 +1,14 @@
+{
+  "name": "crdt-browser-metrics",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "PROJECT_SPEC.md §8: the browser half of the document-load measurement. Test-only.",
+  "scripts": {
+    "measure": "node measure.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.62.1"
+  }
+}

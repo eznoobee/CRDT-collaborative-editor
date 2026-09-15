@@ -25,15 +25,33 @@ namespace Crdt.Core.Tests.Simulation;
 /// typing a run at the same position before any delivery — are what invariant 8
 /// is about, and would essentially never arise from uniform random edits.
 /// </para>
+/// <para>
+/// Size is a dimension of its own (<see cref="ScenarioScale"/>), drawn first so
+/// it is recorded on the scenario and reported on failure. Before Phase 2.5 the
+/// magnitudes were literals and every case built a few dozen elements; §13.10
+/// records what that cost.
+/// </para>
 /// </remarks>
 public static class ScenarioGenerator
 {
     private const string Alphabet = "abcdefghijklmnopqrstuvwxyz";
 
-    /// <summary>Generates one scenario.</summary>
-    public static Scenario Generate(int seed)
+    /// <summary>Generates one scenario, drawing its scale from the seed.</summary>
+    public static Scenario Generate(int seed) => Generate(seed, scale: null);
+
+    /// <summary>
+    /// Generates one scenario at a given scale, or at a drawn one when
+    /// <paramref name="scale"/> is null.
+    /// </summary>
+    /// <remarks>
+    /// The explicit overload exists so a size can be demanded rather than waited
+    /// for: "run this property at large scale" is a thing a test should be able
+    /// to say without generating two hundred and fifty cases hoping for one.
+    /// </remarks>
+    public static Scenario Generate(int seed, ScenarioScale? scale)
     {
         var rng = new Random(seed);
+        var drawn = scale ?? ScenarioScale.Draw(rng);
         var replicaCount = rng.Next(2, 5);
         var ids = Enumerable.Range(1, replicaCount).Select(ReplicaIds.Numbered).ToArray();
         var live = ids.Select(id => new Replica(id)).ToArray();
@@ -49,7 +67,7 @@ public static class ScenarioGenerator
 
         // A short shared prefix so concurrent edits have somewhere to land other
         // than an empty document.
-        var prefixLength = rng.Next(0, 4);
+        var prefixLength = rng.Next(0, drawn.MaxPrefix);
         for (var i = 0; i < prefixLength; i++)
         {
             Emit(new InsertStep(0, i, Letter(rng)));
@@ -60,13 +78,13 @@ public static class ScenarioGenerator
             Emit(new SyncStep());
         }
 
-        var rounds = rng.Next(1, 4);
+        var rounds = rng.Next(1, drawn.MaxRounds);
         for (var round = 0; round < rounds; round++)
         {
             var choice = rng.Next(100);
             if (choice < 45)
             {
-                sessions.Add(AppendRunSession(rng, live, steps, Emit, replicaCount));
+                sessions.Add(AppendRunSession(rng, live, steps, Emit, replicaCount, drawn));
             }
             else if (choice < 75 && replicaCount >= 3)
             {
@@ -78,7 +96,7 @@ public static class ScenarioGenerator
             }
             else
             {
-                AppendRandomEdits(rng, live, Emit, replicaCount);
+                AppendRandomEdits(rng, live, Emit, replicaCount, drawn);
             }
 
             // Partial delivery some of the time, so replicas diverge before the
@@ -97,7 +115,7 @@ public static class ScenarioGenerator
         }
 
         Emit(new SyncStep());
-        return new Scenario(seed, ids, steps, sessions);
+        return new Scenario(seed, drawn, ids, steps, sessions);
     }
 
     /// <summary>
@@ -109,7 +127,8 @@ public static class ScenarioGenerator
         Replica[] live,
         List<ScenarioStep> steps,
         Func<ScenarioStep, Operation?> emit,
-        int replicaCount)
+        int replicaCount,
+        ScenarioScale scale)
     {
         var concurrency = Math.Min(replicaCount, rng.Next(2, 4));
         var participants = Enumerable.Range(0, replicaCount)
@@ -125,7 +144,7 @@ public static class ScenarioGenerator
         var runs = new List<Run>(concurrency);
         foreach (var replica in participants)
         {
-            var length = rng.Next(2, 5);
+            var length = rng.Next(scale.MinRunLength, scale.MaxRunLength);
             var direction = rng.Next(2) == 0 ? RunDirection.Forward : RunDirection.Backward;
             var text = new StringBuilder(length);
             var indices = new List<int>(length);
@@ -239,9 +258,13 @@ public static class ScenarioGenerator
     }
 
     private static void AppendRandomEdits(
-        Random rng, Replica[] live, Func<ScenarioStep, Operation?> emit, int replicaCount)
+        Random rng,
+        Replica[] live,
+        Func<ScenarioStep, Operation?> emit,
+        int replicaCount,
+        ScenarioScale scale)
     {
-        var count = rng.Next(1, 6);
+        var count = rng.Next(1, scale.MaxEditsPerRound);
         for (var i = 0; i < count; i++)
         {
             var replica = rng.Next(replicaCount);

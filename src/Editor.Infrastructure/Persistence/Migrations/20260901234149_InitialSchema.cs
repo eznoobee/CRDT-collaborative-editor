@@ -143,7 +143,7 @@ namespace Editor.Infrastructure.Persistence.Migrations
                 {
                     document_id = table.Column<Guid>(type: "uuid", nullable: false),
                     server_seq = table.Column<long>(type: "bigint", nullable: false),
-                    state = table.Column<string>(type: "text", nullable: false),
+                    state = table.Column<byte[]>(type: "bytea", nullable: false),
                     version_vector = table.Column<string>(type: "text", nullable: false),
                     created_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
                 },

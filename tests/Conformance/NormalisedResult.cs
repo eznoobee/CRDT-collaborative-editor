@@ -37,6 +37,8 @@ public static class NormalisedResult
             sb.Append("      \"name\": ").Append(NormalisedJson.Quote(result.Name)).Append(",\n");
             NormalisedJson.AppendMap(sb, 3, "replicaTexts", result.ReplicaTexts);
             sb.Append(",\n");
+            sb.Append("      \"snapshot\": ").Append(NormalisedJson.Quote(result.Snapshot))
+              .Append(",\n");
             sb.Append("      \"text\": ").Append(NormalisedJson.Quote(result.Text)).Append(",\n");
             NormalisedJson.AppendMap(sb, 3, "versionVector", result.VersionVector);
             sb.Append('\n');
@@ -44,7 +46,7 @@ public static class NormalisedResult
         }
 
         sb.Append("  ],\n");
-        sb.Append("  \"v\": 1\n");
+        sb.Append("  \"v\": 2\n");
         sb.Append("}\n");
         return sb.ToString();
     }
