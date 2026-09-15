@@ -1,3 +1,4 @@
+using System.Text;
 using Crdt.Core;
 
 namespace Editor.Infrastructure.Serialization;
@@ -34,47 +35,84 @@ public static class OperationBinary
             BinaryFormat.WriteReplicaId(bytes, id);
         }
 
-        BinaryFormat.WriteVarint(bytes, (ulong)operations.Count);
+        // Records, not operations: a run of n elements is one record. Written
+        // into a buffer first, because the record count is only known once the
+        // grouping is done.
+        var records = new List<byte>(operations.Count * 8);
+        var recordCount = 0;
 
         ElementId? previousInsert = null;
-        foreach (var operation in operations)
+        for (var i = 0; i < operations.Count;)
         {
-            switch (operation)
+            switch (operations[i])
             {
                 case InsertOperation insert:
-                    WriteInsert(bytes, insert, index, previousInsert);
-                    previousInsert = insert.Id;
-                    break;
+                    {
+                        // Maximal by construction. §6 forbids both a run that
+                        // could have been longer and a lone insert that could
+                        // have joined one, so the encoder takes the longest run
+                        // available and never has a choice to make — which is
+                        // what keeps canonical form a property of the encoder
+                        // rather than a rule it has to be checked against.
+                        var length = RunLength(operations, i);
+                        if (length >= 2)
+                        {
+                            WriteRun(records, operations, i, length, index, previousInsert);
+                            previousInsert = new ElementId(
+                                insert.Id.Replica, insert.Id.Seq + (ulong)(length - 1));
+                            i += length;
+                        }
+                        else
+                        {
+                            WriteInsert(records, insert, index, previousInsert);
+                            previousInsert = insert.Id;
+                            i++;
+                        }
+
+                        recordCount++;
+                        break;
+                    }
 
                 case DeleteOperation delete:
-                    bytes.Add(BinaryFormat.OpDelete);
-                    WriteElementId(bytes, delete.Id, index);
-                    WriteElementId(bytes, delete.Target, index);
+                    records.Add(BinaryFormat.OpDelete);
+                    WriteElementId(records, delete.Id, index);
+                    WriteElementId(records, delete.Target, index);
                     previousInsert = null;
+                    recordCount++;
+                    i++;
                     break;
 
                 default:
                     throw new BinaryFormatException(
-                        $"Unknown operation type {operation.GetType().Name}.");
+                        $"Unknown operation type {operations[i].GetType().Name}.");
             }
         }
+
+        BinaryFormat.WriteVarint(bytes, (ulong)recordCount);
+        bytes.AddRange(records);
 
         return [.. bytes];
     }
 
     /// <summary>Decodes a batch, or throws without applying any of it.</summary>
-    public static IReadOnlyList<Operation> Decode(ReadOnlySpan<byte> encoded)
+    public static IReadOnlyList<Operation> Decode(
+        ReadOnlySpan<byte> encoded, int maxRunCodePoints = BinaryFormat.MaxRunCodePoints)
     {
         var cursor = new BinaryCursor(encoded);
         SnapshotBinary.ReadHeader(ref cursor, BinaryFormat.KindOperations);
 
         var table = SnapshotBinary.ReadTable(ref cursor);
-        var count = cursor.ReadCount("An operation count");
+        var count = cursor.ReadCount("A record count");
         var operations = new List<Operation>(count);
+
+        // Where each record's operations start, so maximality can be checked
+        // across record boundaries once everything is expanded.
+        var recordStarts = new List<int>(count);
 
         ElementId? previousInsert = null;
         for (var i = 0; i < count; i++)
         {
+            recordStarts.Add(operations.Count);
             var tag = cursor.ReadByte();
             switch (tag)
             {
@@ -83,6 +121,14 @@ public static class OperationBinary
                         var insert = ReadInsert(ref cursor, table, previousInsert);
                         operations.Add(insert);
                         previousInsert = insert.Id;
+                        break;
+                    }
+
+                case BinaryFormat.OpRun:
+                    {
+                        var expanded = ReadRun(ref cursor, table, previousInsert, maxRunCodePoints);
+                        operations.AddRange(expanded);
+                        previousInsert = expanded[^1].Id;
                         break;
                     }
 
@@ -103,7 +149,33 @@ public static class OperationBinary
         if (cursor.Remaining != 0)
         {
             throw new BinaryFormatException(
-                $"{cursor.Remaining} bytes remain after the declared {count} operations (§6).");
+                $"{cursor.Remaining} bytes remain after the declared {count} records (§6).");
+        }
+
+        // Maximality, checked over the whole batch rather than record by
+        // record: a lone insert that could have continued the record before it
+        // is exactly as non-canonical as a run that stopped early, and both
+        // read the same way here.
+        var ceiling = Math.Min(maxRunCodePoints, BinaryFormat.MaxRunCodePoints);
+        for (var record = 1; record < recordStarts.Count; record++)
+        {
+            var start = recordStarts[record];
+            var previousLength = start - recordStarts[record - 1];
+
+            // A run already at the cap is the one place a boundary is allowed
+            // to fall mid-run: a paste of 300 code points has to be encodable,
+            // and it is a run of 256 followed by a record that continues it.
+            if (previousLength >= ceiling)
+            {
+                continue;
+            }
+
+            if (start < operations.Count && Continues(operations[start - 1], operations[start]))
+            {
+                throw new BinaryFormatException(
+                    "Non-canonical: a record begins with an element that continues the previous "
+                    + "record's last element, so the two should be one run (§6).");
+            }
         }
 
         return operations;
@@ -123,6 +195,113 @@ public static class OperationBinary
         }
 
         return operations[0];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="later"/> continues <paramref name="earlier"/>'s run.
+    /// </summary>
+    /// <remarks>
+    /// §6's rule for an operation batch, and the whole of maximality. It is
+    /// one-sided, unlike the snapshot form's: nothing is required of the
+    /// earlier element, because a run's first element may carry a right origin.
+    /// A snapshot run record has nowhere to put one and so must refuse it; this
+    /// record has somewhere, and the case it serves — a paste into the middle
+    /// of a document — is the common one.
+    /// </remarks>
+    private static bool Continues(Operation earlier, Operation later) =>
+        earlier is InsertOperation previous
+        && later is InsertOperation next
+        && next.RightOrigin is null
+        && next.Side == Side.Right
+        && next.Parent is { } parent
+        && parent.Equals(previous.Id)
+        && next.Id.Replica.Equals(previous.Id.Replica)
+        && next.Id.Seq == previous.Id.Seq + 1;
+
+    /// <summary>How many operations from <paramref name="start"/> form one run.</summary>
+    private static int RunLength(IReadOnlyList<Operation> operations, int start)
+    {
+        var length = 1;
+        while (start + length < operations.Count
+            && length < BinaryFormat.MaxRunCodePoints
+            && Continues(operations[start + length - 1], operations[start + length]))
+        {
+            length++;
+        }
+
+        return length;
+    }
+
+    private static List<InsertOperation> ReadRun(
+        ref BinaryCursor cursor, ReplicaId[] table, ElementId? previousInsert, int maxRunCodePoints)
+    {
+        // Same reader as an insert record, because the body is one.
+        var first = ReadInsert(ref cursor, table, previousInsert);
+        var count = cursor.ReadCount("A run length");
+
+        if (count < 2)
+        {
+            throw new BinaryFormatException(
+                $"Non-canonical: a run of {count} is an insert record (§6).");
+        }
+
+        var ceiling = Math.Min(maxRunCodePoints, BinaryFormat.MaxRunCodePoints);
+        if (count > ceiling)
+        {
+            // Before the allocation, not after: a run naming four billion code
+            // points is one varint, and expanding it first would make the cap a
+            // denial of service rather than a defence against one (§6, §7).
+            throw new RunLengthExceededException(
+                $"A run of {count} code points exceeds the cap of {ceiling} (§7).");
+        }
+
+        var expanded = new List<InsertOperation>(count) { first };
+
+        for (var i = 1; i < count; i++)
+        {
+            // §6 and §5: each element chains onto the one before it. Giving
+            // them all the same parent and side would make them siblings and
+            // reintroduce exactly the interleaving invariant 8 forbids — which
+            // is the reason expansion replays the placement rule instead of
+            // copying the record's fields n times.
+            var previous = expanded[^1];
+            expanded.Add(new InsertOperation(
+                new ElementId(previous.Id.Replica, previous.Id.Seq + 1),
+                cursor.ReadValue(),
+                previous.Id,
+                Side.Right,
+                RightOrigin: null));
+        }
+
+        return expanded;
+    }
+
+    private static void WriteRun(
+        List<byte> bytes,
+        IReadOnlyList<Operation> operations,
+        int start,
+        int length,
+        IReadOnlyDictionary<ReplicaId, int> index,
+        ElementId? previousInsert)
+    {
+        var first = (InsertOperation)operations[start];
+
+        // The body is an insert record's, tag included, and the tag is then
+        // overwritten. Sharing the writer rather than copying it is what keeps
+        // the two records from drifting apart field by field — the run form is
+        // an insert plus a count plus values, and it has to stay that.
+        var tagAt = bytes.Count;
+        WriteInsert(bytes, first, index, previousInsert);
+        bytes[tagAt] = BinaryFormat.OpRun;
+
+        BinaryFormat.WriteVarint(bytes, (ulong)length);
+
+        // The first element's value went out with its body; the rest follow in
+        // the order they were placed.
+        for (var i = 1; i < length; i++)
+        {
+            WriteValue(bytes, ((InsertOperation)operations[start + i]).Value);
+        }
     }
 
     private static InsertOperation ReadInsert(
@@ -209,8 +388,13 @@ public static class OperationBinary
             WriteElementId(bytes, insert.RightOrigin!.Value, index);
         }
 
+        WriteValue(bytes, insert.Value);
+    }
+
+    private static void WriteValue(List<byte> bytes, Rune value)
+    {
         Span<byte> utf8 = stackalloc byte[4];
-        var written = insert.Value.EncodeToUtf8(utf8);
+        var written = value.EncodeToUtf8(utf8);
         BinaryFormat.WriteVarint(bytes, (ulong)written);
         bytes.AddRange(utf8[..written]);
     }
