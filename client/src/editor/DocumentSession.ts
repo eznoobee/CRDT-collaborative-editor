@@ -11,6 +11,31 @@ import { serializeSnapshot } from '../crdt/snapshotJson';
 import { replacementBetween } from './diff';
 
 /**
+ * Operations one submission may carry (§7).
+ *
+ * @remarks
+ * <p>
+ * §7's ingest cap, restated on the client because the client is the party that
+ * has to respect it: the server counts operations *after* runs are expanded, so
+ * a paste that looks like one record on the wire is 900 operations to the
+ * validator, and 900 is refused.
+ * </p><p>
+ * <b>It was not restated for two phases, and a pasted paragraph was refused the
+ * whole time.</b> Typing produces one operation per change event and never came
+ * near the cap; pasting produces as many as the clipboard held, in one event,
+ * and `batch_too_large` recovers by `stop` — so the first paragraph a user
+ * pasted halted their sync for the rest of the session (§13.37: the number that
+ * matters belongs to the action the limit is not named after). Found by row
+ * 27's largest-legitimate-use test, which is what it is for.
+ * </p><p>
+ * A constant rather than a value fetched from the server: the split has to be
+ * decided before the first submission, and a client that learned its batch size
+ * from a response would learn it after the paste it needed it for.
+ * </p>
+ */
+export const MAX_OPERATIONS_PER_BATCH = 256;
+
+/**
  * One editing session over the local replica (§9).
  *
  * @remarks
@@ -139,10 +164,15 @@ export class DocumentSession {
     });
 
     if (operations.length > 0) {
-      // Encoded once, after applying. The sink gets §6 bytes rather than
-      // objects because §6 is the authoritative encoding and the transport
-      // frames it without looking inside (§13.13a).
-      this.sink(encodeOperations(operations));
+      // Encoded after applying, and split into batches §7 admits. The sink gets
+      // §6 bytes rather than objects because §6 is the authoritative encoding
+      // and the transport frames it without looking inside (§13.13a) — which is
+      // also why the split has to happen here: the transport cannot look inside
+      // to do it, so a layer that encodes is the only layer that can.
+      for (let at = 0; at < operations.length; at += MAX_OPERATIONS_PER_BATCH) {
+        this.sink(encodeOperations(operations.slice(at, at + MAX_OPERATIONS_PER_BATCH)));
+      }
+
       this.changed();
     }
 
