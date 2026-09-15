@@ -367,7 +367,7 @@ public sealed class EditorHubTests
         var owner = await factory.CreateUserAsync(ownerSubject, TestContext.Current.CancellationToken);
         var userId = await factory.CreateUserAsync(subject, TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            ownerSubject, cancellationToken: TestContext.Current.CancellationToken);
 
         await using (var scope = factory.Services.CreateAsyncScope())
         {

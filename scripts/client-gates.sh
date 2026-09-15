@@ -25,18 +25,11 @@ npm run --silent test
 echo "==> build"
 npm run --silent build
 
-# §12: no harness reaches past the product to create a document.
+# The no-seeding rule moved to scripts/check-seeding.sh, which covers both
+# harnesses and has a CI job of its own.
 #
-# Register rows 15 and 16 were exactly this — every harness seeded through psql
-# because nothing in the product could make a document, and eleven phases of a
-# green suite never noticed. A grep rather than a review, because judgement at
-# the end of a long phase is what produced those rows: it is easy to add one
-# INSERT "just for this test", and impossible to see later.
-echo "==> no seeded documents"
-if grep -rniE 'insert[[:space:]]+into[[:space:]]+(documents|document_members|users)' \
-    src --include='*.ts' --include='*.tsx'; then
-  echo
-  echo "A harness is writing rows the product's own API should create."
-  echo "PROJECT_SPEC.md §12: seeding through psql is what register rows 15 and 16 were."
-  exit 1
-fi
+# It lived here, grepping `client/src` only, and nothing in CI called this
+# script — so it covered half the repository and ran once per phase. Register
+# row 25 is both halves of that. Still called from here, so a client-side
+# regression fails the client gate too.
+../scripts/check-seeding.sh

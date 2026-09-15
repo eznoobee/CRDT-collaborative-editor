@@ -329,6 +329,20 @@ jobs:
       - name: Breakdown fields
         run: ./scripts/check-breakdown.sh
 
+  seeding:
+    name: §12's no-seeding rule, on both harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Register rows 15 and 16 were every harness seeding past the product.
+      # The grep that stopped it covered client/src only and ran from
+      # client-gates.sh, which NO CI JOB CALLED — so it fired once per phase, in
+      # preflight, while the C# harness added Document and User rows through the
+      # DbContext for two more phases (row 25). Scope and trigger were both
+      # half-measures; this is the trigger half.
+      - name: No seeded documents
+        run: ./scripts/check-seeding.sh
+
   sabotage:
     name: §12's sabotage harness reverts what it changed
     runs-on: ubuntu-latest

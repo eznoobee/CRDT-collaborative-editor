@@ -308,9 +308,8 @@ public static class DocumentSetup
     {
         ArgumentNullException.ThrowIfNull(factory);
 
-        var owner = await factory.CreateUserAsync(ownerSubject, TestContext.Current.CancellationToken);
         return await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            ownerSubject, cancellationToken: TestContext.Current.CancellationToken);
     }
 
     /// <summary>Grants <paramref name="subject"/> a role on the document.</summary>

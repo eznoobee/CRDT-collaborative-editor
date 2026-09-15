@@ -1,3 +1,5 @@
+using System.Net.Http.Json;
+using Editor.Api.Documents;
 using Editor.Domain;
 using Editor.Infrastructure.Authorization;
 using Editor.Infrastructure.Persistence;
@@ -108,56 +110,82 @@ public sealed class EditorApiFactory : WebApplicationFactory<Program>
         return client;
     }
 
-    /// <summary>Creates a document owned by <paramref name="ownerId"/>.</summary>
+    /// <summary>
+    /// Creates a document through the product's own API (§12, register row 25).
+    /// </summary>
+    /// <param name="ownerSubject">Who creates it. A subject, not a user id,
+    /// because <c>POST /documents</c> takes an identity and not a row.</param>
+    /// <param name="deleted">
+    /// Remove it afterwards, through <c>DELETE /documents/{id}</c>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <strong>This used to insert a row.</strong> Register rows 15 and 16 were
+    /// exactly that — every harness seeded past the product because nothing in
+    /// the product could make a document — and the grep §12 added to stop it
+    /// covered <c>client/src</c> only, so this file went on doing it for another
+    /// two phases. Row 25 is the scope of a rule being half of it.
+    /// </para><para>
+    /// It matters beyond tidiness: a seeded document has no owner membership
+    /// row unless the harness remembers to add one, no rate-limit charge, and
+    /// no <c>updated_at</c> the product wrote — so every test built on it is a
+    /// test of a state the product never produces.
+    /// </para><para>
+    /// "Deleted" goes through <c>DELETE</c> for the same reason. Setting
+    /// <c>deleted_at</c> by hand skips the cache invalidation §7 requires, which
+    /// is exactly the half 7.6 found already worked and the half it found did
+    /// not.
+    /// </para>
+    /// </remarks>
     public async Task<Guid> CreateDocumentAsync(
-        Guid ownerId, bool deleted = false, CancellationToken cancellationToken = default)
+        string ownerSubject, bool deleted = false, CancellationToken cancellationToken = default)
     {
-        await using var scope = Services.CreateAsyncScope();
-        var context = scope.ServiceProvider.GetRequiredService<EditorDbContext>();
+        using var client = ClientFor(ownerSubject);
 
-        var id = Guid.CreateVersion7();
-        context.Documents.Add(new Document
+        using var created = await client.PostAsJsonAsync(
+            new Uri("/documents", UriKind.Relative),
+            new { title = "test" },
+            cancellationToken);
+
+        created.EnsureSuccessStatusCode();
+
+        var summary = await created.Content.ReadFromJsonAsync<DocumentSummary>(cancellationToken)
+            ?? throw new InvalidOperationException("POST /documents returned no body.");
+
+        if (deleted)
         {
-            Id = id,
-            OwnerId = ownerId,
-            Title = "test",
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-            DeletedAt = deleted ? DateTimeOffset.UtcNow : null,
-        });
+            using var removed = await client.DeleteAsync(
+                new Uri($"/documents/{summary.Id}", UriKind.Relative), cancellationToken);
 
-        await context.SaveChangesAsync(cancellationToken);
-        return id;
-    }
-
-    /// <summary>Provisions a user row directly, the way a first negotiate would.</summary>
-    public async Task<Guid> CreateUserAsync(string subject, CancellationToken cancellationToken = default)
-    {
-        await using var scope = Services.CreateAsyncScope();
-        var context = scope.ServiceProvider.GetRequiredService<EditorDbContext>();
-
-        var existing = await context.Users
-            .Where(user => user.OidcIssuer == ApiFactory.Issuer && user.OidcSubject == subject)
-            .Select(user => (Guid?)user.Id)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        if (existing is not null)
-        {
-            return existing.Value;
+            removed.EnsureSuccessStatusCode();
         }
 
-        var id = Guid.CreateVersion7();
-        context.Users.Add(new User
-        {
-            Id = id,
-            OidcIssuer = ApiFactory.Issuer,
-            OidcSubject = subject,
-            DisplayName = subject,
-            CreatedAt = DateTimeOffset.UtcNow,
-        });
+        return summary.Id;
+    }
 
-        await context.SaveChangesAsync(cancellationToken);
-        return id;
+    /// <summary>
+    /// Provisions a user through the product's own API (§12, register row 25).
+    /// </summary>
+    /// <remarks>
+    /// <c>GET /me</c> is what provisions a user row on first contact, so this
+    /// is the path a real person takes. It used to write the row directly,
+    /// which meant every test depending on a user row depended on this file
+    /// agreeing with <c>UserResolver</c> about what one looks like.
+    /// </remarks>
+    public async Task<Guid> CreateUserAsync(
+        string subject, CancellationToken cancellationToken = default)
+    {
+        using var client = ClientFor(subject);
+
+        using var response = await client.GetAsync(
+            new Uri("/me", UriKind.Relative), cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        var identity = await response.Content.ReadFromJsonAsync<Identity>(cancellationToken)
+            ?? throw new InvalidOperationException("GET /me returned no body.");
+
+        return identity.UserId;
     }
 }
 

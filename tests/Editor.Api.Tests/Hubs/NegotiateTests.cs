@@ -52,13 +52,15 @@ public sealed class NegotiateTests
         _fixture.RequireBoth();
         await using var factory = new EditorApiFactory(_fixture);
 
-        var owner = await factory.CreateUserAsync("owner-" + scenario, TestContext.Current.CancellationToken);
+        var ownerSubject = "owner-" + scenario;
+        var owner = await factory.CreateUserAsync(ownerSubject, TestContext.Current.CancellationToken);
         var documentId = scenario switch
         {
             "missing" => Guid.CreateVersion7(),
             "deleted" => await factory.CreateDocumentAsync(
-                owner, deleted: true, TestContext.Current.CancellationToken),
-            _ => await factory.CreateDocumentAsync(owner, cancellationToken: TestContext.Current.CancellationToken),
+                ownerSubject, deleted: true, TestContext.Current.CancellationToken),
+            _ => await factory.CreateDocumentAsync(
+                ownerSubject, cancellationToken: TestContext.Current.CancellationToken),
         };
 
         using var client = factory.ClientFor("stranger-" + scenario);
@@ -80,7 +82,7 @@ public sealed class NegotiateTests
 
         var owner = await factory.CreateUserAsync("owner-deleted", TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, deleted: true, TestContext.Current.CancellationToken);
+            "owner-deleted", deleted: true, TestContext.Current.CancellationToken);
 
         using var client = factory.ClientFor("owner-deleted");
         using var response = await client.PostAsync(
@@ -97,7 +99,7 @@ public sealed class NegotiateTests
 
         var owner = await factory.CreateUserAsync("owner-member", TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            "owner-member", cancellationToken: TestContext.Current.CancellationToken);
 
         using var client = factory.ClientFor("owner-member");
         var negotiated = await Post(client, documentId);
@@ -145,7 +147,7 @@ public sealed class NegotiateTests
 
         var owner = await factory.CreateUserAsync("owner-two-tabs", TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            "owner-two-tabs", cancellationToken: TestContext.Current.CancellationToken);
 
         using var client = factory.ClientFor("owner-two-tabs");
         var first = await Post(client, documentId);
@@ -166,7 +168,7 @@ public sealed class NegotiateTests
         var owner = await factory.CreateUserAsync("owner-viewer", TestContext.Current.CancellationToken);
         var viewer = await factory.CreateUserAsync("viewer", TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            "owner-viewer", cancellationToken: TestContext.Current.CancellationToken);
 
         await using (var scope = factory.Services.CreateAsyncScope())
         {

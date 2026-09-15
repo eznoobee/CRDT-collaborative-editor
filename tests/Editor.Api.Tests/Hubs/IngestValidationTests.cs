@@ -480,7 +480,7 @@ public sealed class IngestValidationTests
 
         var owner = await factory.CreateUserAsync("owner-cap", TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            "owner-cap", cancellationToken: TestContext.Current.CancellationToken);
 
         using var client = factory.ClientFor("owner-cap");
         var uri = new Uri($"/documents/{documentId}/negotiate", UriKind.Relative);
@@ -603,7 +603,7 @@ public sealed class IngestValidationTests
             "owner-" + subject, TestContext.Current.CancellationToken);
         var userId = await factory.CreateUserAsync(subject, TestContext.Current.CancellationToken);
         var documentId = await factory.CreateDocumentAsync(
-            owner, cancellationToken: TestContext.Current.CancellationToken);
+            "owner-" + subject, cancellationToken: TestContext.Current.CancellationToken);
 
         await using (var scope = factory.Services.CreateAsyncScope())
         {
