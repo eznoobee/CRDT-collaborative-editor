@@ -33,3 +33,8 @@ dist-types/
 
 # Browser metric harness dependencies (PROJECT_SPEC.md §8); the lockfile is kept.
 tests/browser/node_modules/
+
+# Scratch entry points written by tests/browser/bundle-metrics.mjs. They live
+# inside the client because esbuild resolves a bare import from the importing
+# file's directory, so an entry point outside it cannot see client/node_modules.
+client/.bundle-metrics-*/

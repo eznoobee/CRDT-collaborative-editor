@@ -24,8 +24,6 @@ public sealed class EditorHubTests
 
     public EditorHubTests(EditorFixture fixture) => _fixture = fixture;
 
-    private sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
-
     [Fact]
     public async Task A_connection_without_a_ticket_is_refused()
     {
@@ -260,6 +258,38 @@ public sealed class EditorHubTests
     }
 
     [Fact]
+    public async Task A_client_that_cannot_speak_messagepack_is_refused_rather_than_downgraded()
+    {
+        // §13.13a. Supporting JSON alongside MessagePack would let a client
+        // negotiate it and silently take a 25% worse wire and a §7 cap that
+        // admits 49 KB rather than 65 KB of operations — a downgrade nobody
+        // would ever see. Failing to connect is loud, and §13.13 is why loud is
+        // the better failure.
+        //
+        // Every other hub test in this file registers the MessagePack protocol.
+        // This one deliberately does not, which is the whole assertion.
+        _fixture.RequireBoth();
+        await using var factory = new EditorApiFactory(_fixture);
+        var (_, _, negotiated) = await JoinAsync(factory, "json-client", Role.Editor);
+
+        var server = factory.Server;
+        await using var connection = new HubConnectionBuilder()
+            .WithUrl(
+                new Uri(server.BaseAddress, $"/hub/editor?access_token={Uri.EscapeDataString(negotiated.Ticket)}"),
+                options =>
+                {
+                    options.HttpMessageHandlerFactory = _ => server.CreateHandler();
+                    options.Transports = HttpTransportType.WebSockets;
+                    options.WebSocketFactory = async (context, cancellationToken) =>
+                        await server.CreateWebSocketClient().ConnectAsync(context.Uri, cancellationToken);
+                })
+            .Build();
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => connection.StartAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task Hub_errors_never_carry_server_exception_detail()
     {
         // Detailed errors append the exception's type and message to every hub
@@ -325,6 +355,7 @@ public sealed class EditorHubTests
                     return await client.ConnectAsync(context.Uri, cancellationToken);
                 };
             })
+            .AddMessagePackProtocol()
             .Build();
     }
 

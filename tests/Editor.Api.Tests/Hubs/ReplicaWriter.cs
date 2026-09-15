@@ -49,6 +49,16 @@ public sealed class ReplicaWriter
         return OperationBinary.Encode(operations);
     }
 
+    /// <summary>Deletes an element this writer inserted earlier.</summary>
+    /// <remarks>
+    /// The insertion point is left where it was: a delete does not move a
+    /// cursor, and advancing it here would silently change what a following
+    /// <see cref="Type"/> attaches to.
+    /// </remarks>
+    public byte[] Delete(ulong targetSeq) =>
+        OperationBinary.Encode(
+            [new DeleteOperation(new ElementId(_replica, NextSeq++), new ElementId(_replica, targetSeq))]);
+
     /// <summary>
     /// A batch built as if from a different replica, keeping this writer's
     /// sequence numbers.

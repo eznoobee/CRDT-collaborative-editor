@@ -124,6 +124,13 @@ public sealed class IngestValidator
             expected++;
         }
 
+        // §5's readiness, enforced at ingest rather than buffered. See below for
+        // why the server has no pending set at all.
+        if (!await OriginsExistAsync(documentId, operations, cancellationToken).ConfigureAwait(false))
+        {
+            return IngestResult.Reject(IngestRejection.UnknownOrigin);
+        }
+
         var live = await _state.LiveBytesAsync(documentId, cancellationToken).ConfigureAwait(false);
         var added = 0L;
 
@@ -141,5 +148,74 @@ public sealed class IngestValidator
         }
 
         return IngestResult.Accept(operations);
+    }
+
+    /// <summary>
+    /// Whether every id the batch references already exists, or is created
+    /// earlier within the batch itself.
+    /// </summary>
+    /// <remarks>
+    /// <b>The server rejects a non-ready operation; it does not buffer one.</b>
+    /// §5 describes a bounded pending set because "origins are client-supplied",
+    /// and that is true of a peer receiving a broadcast. It is not true here. A
+    /// client can only reference an element it knows about, and it knows about
+    /// exactly two kinds: its own earlier operations, which density already
+    /// guarantees the server holds, and other replicas' operations, which it
+    /// learned from a broadcast the server sent only after committing them.
+    /// <para>
+    /// So a non-ready operation arriving at ingest is a bug or an attack, never
+    /// a legitimate race — and buffering one is buffering an id that may never
+    /// arrive, which is the denial of service §5 warns about. Rejecting removes
+    /// the vector rather than bounding it, and leaves the server with no
+    /// pending set to bound.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> OriginsExistAsync(
+        Guid documentId,
+        IReadOnlyList<Operation> operations,
+        CancellationToken cancellationToken)
+    {
+        var created = new HashSet<ElementId>();
+        var referenced = new HashSet<ElementId>();
+
+        foreach (var operation in operations)
+        {
+            switch (operation)
+            {
+                case InsertOperation insert:
+                    // Order matters: an operation may reference one created
+                    // earlier in the same batch, which is the ordinary case for
+                    // a run or for typing, but never one created after it.
+                    Require(insert.Parent);
+                    Require(insert.RightOrigin);
+                    created.Add(insert.Id);
+                    break;
+
+                case DeleteOperation delete:
+                    Require(delete.Target);
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        if (referenced.Count == 0)
+        {
+            return true;
+        }
+
+        var known = await _state.KnownElementsAsync(documentId, referenced, cancellationToken)
+            .ConfigureAwait(false);
+
+        return referenced.IsSubsetOf(known);
+
+        void Require(ElementId? id)
+        {
+            if (id is { } value && !created.Contains(value))
+            {
+                referenced.Add(value);
+            }
+        }
     }
 }

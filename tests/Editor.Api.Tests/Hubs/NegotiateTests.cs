@@ -20,8 +20,6 @@ public sealed class NegotiateTests
 
     public NegotiateTests(EditorFixture fixture) => _fixture = fixture;
 
-    private sealed record Negotiated(string Ticket, Guid DocumentId, Guid ReplicaId, Role Role);
-
     private static Uri Negotiate(Guid documentId) =>
         new($"/documents/{documentId}/negotiate", UriKind.Relative);
 
