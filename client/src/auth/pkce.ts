@@ -35,12 +35,22 @@ export interface PkceOptions {
  * script access from anything running on this origin, and §7's rule is that
  * the token never lands anywhere a later bug can read it back.
  * </p><p>
- * The **state store stays in `sessionStorage`, and must**: the login is a full
- * page navigation, so the `state` value and the PKCE code verifier have to
- * outlive the document that created them. `oidc-client-ts` removes that entry
- * when the callback consumes it, which is why §7 states the rule as *after a
- * complete login* rather than *never* — a rule that forbade it outright would
- * forbid the redirect flow itself, and would be quietly worked around.
+ * The **state store is `sessionStorage`, set explicitly, and that line is the
+ * fix for a real defect**: the login is a full page navigation, so the `state`
+ * value and the PKCE code verifier have to outlive the document that created
+ * them — and `sessionStorage` is exactly enough to do that. `oidc-client-ts`
+ * defaults this store to **`localStorage`**, which is strictly more persistent
+ * than the flow needs: it survives the browser closing and is shared by every
+ * tab on the origin, so an abandoned sign-in leaves a live code verifier there
+ * until some later sign-in happens to sweep it. This class documented
+ * `sessionStorage` and the reason for it for two phases while shipping
+ * `localStorage`, because nothing asserted which one was in use — the browser
+ * walk signs in successfully either way (register row 26).
+ * </p><p>
+ * `oidc-client-ts` removes the entry when the callback consumes it, which is
+ * why §7 states the rule as *after a complete login* rather than *never* — a
+ * rule that forbade it outright would forbid the redirect flow itself, and
+ * would be quietly worked around.
  * </p><p>
  * The cost of in-memory tokens is a redirect on every page load, since nothing
  * survives the reload. That is the trade §7 chose, and it is invisible in
@@ -71,6 +81,11 @@ export class PkceTokenSource implements SessionSource {
       scope: 'openid profile offline_access',
 
       userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() }),
+
+      // Explicit, because the library's default here is localStorage. See the
+      // remarks above: sessionStorage is what the redirect flow actually needs,
+      // and localStorage outlives both the tab and the browser.
+      stateStore: new WebStorageStateStore({ store: window.sessionStorage }),
 
       // The library's own renewal, on a timer it owns. Turned on explicitly
       // because the alternative is this class noticing an expiry and doing it,
