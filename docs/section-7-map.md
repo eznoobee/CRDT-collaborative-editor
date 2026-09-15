@@ -23,12 +23,12 @@ and that question had no answer before.
 | 1 | `OIDC with JWT bearer tokens` | `OidcOptions`, `AddEditorAuthentication` | `TokenValidationTests`, `HostStartupTests` |
 | 2 | `short-lived connect ticket` | `RedisConnectTicketStore`, `NegotiateEndpoint` | `ConnectTicketTests`, `NegotiateTests` |
 | 3 | `must never be written to logs` | `SecretRedaction`, logging configuration | `LogRedactionSentinelTests`, `SecretRedactionTests` |
-| 4 | `Authorization Code with PKCE, and no client secret` | `client/src/auth/pkce.ts` | `app.e2e.test.ts` |
-| 5 | `The access token lives in memory only` | `InMemoryWebStorage` in `client/src/auth/pkce.ts` | `app.e2e.test.ts` |
+| 4 | `Authorization Code with PKCE, and no client secret` | `client/src/auth/pkce.ts` | `pkce.test.ts`, `app.e2e.test.ts` |
+| 5 | `The access token lives in memory only` | `InMemoryWebStorage` in `client/src/auth/pkce.ts` | `pkce.test.ts`, `app.e2e.test.ts` |
 | 6 | `The token must never reach the SignalR connection URL` | `signalRTransport.ts`, the ticket flow | `signalRTransport.test.ts`, `security.e2e.test.ts` |
-| 7 | `Refresh is delegated to the provider's library` | `oidc-client-ts` `automaticSilentRenew` | `app.e2e.test.ts` |
+| 7 | `Refresh is delegated to the provider's library` | `oidc-client-ts` `automaticSilentRenew` | `pkce.test.ts`, `app.e2e.test.ts` |
 | 8 | `A refresh that fails is a client state, not an exception` | `tokenSource.ts`, `SyncController` | `rejections.test.ts` |
-| 9 | `The redirect URI is exact-match` | `client/src/auth/pkce.ts` | `app.e2e.test.ts` |
+| 9 | `The redirect URI is exact-match` | `client/src/auth/pkce.ts` | `pkce.test.ts`, `app.e2e.test.ts` |
 | 10 | `Signing out is three separate things` | `client/src/app/signOut.ts` | `signOut.test.ts`, `app.e2e.test.ts` |
 | 11 | `A membership change reaches a live connection` | `MembershipSweep`, `DocumentRoleCache` | `MembershipRevocationTests`, `DocumentRoleCacheTests` |
 | 12 | `Every hub method and every endpoint re-checks document membership` | `EditorHub`, `DocumentsEndpoints` | `EditorHubTests`, `DocumentCreationTests`, `MembershipGrantTests` |
@@ -99,3 +99,29 @@ would still sign in, and nothing would go red.
 Recorded as register row 26 rather than fixed here. This phase was scoped before
 the map existed, and quietly widening a phase because a new check found
 something is how the register stops being a record of anything (§12).
+
+
+Row 3's `LogRedactionSentinelTests` now drives **every routed endpoint**, taken
+from the application's own `EndpointDataSource` rather than from a list written
+by hand (register row 24). The cell above stays a bare test name because
+`Section7MapTests` parses it, and a note in a table cell it cannot parse is a
+note that breaks the check that keeps this table honest.
+
+## What register row 26 found when it was closed (7b.6)
+
+The rows above now name unit tests because 7b.6 wrote them. Writing them found
+the defect the row existed to find, and it is worth recording what kind it was.
+
+`pkce.ts` carried a paragraph explaining that the state store stays in
+`sessionStorage` **and must** — the login is a full page navigation, so the
+`state` value and the PKCE code verifier have to outlive the document that
+created them. The paragraph was right about the requirement and wrong about the
+code: `oidc-client-ts` defaults that store to `localStorage`, the class never
+set it, and `localStorage` survives the browser closing and is shared by every
+tab on the origin. An abandoned sign-in left a live code verifier there until
+some later sign-in happened to sweep it.
+
+Nothing caught it for two phases because **the browser walk signs in
+successfully either way**. That is the whole shape of this row: a flow that
+succeeds is not evidence about how it succeeded, and documentation is not
+evidence at all.
