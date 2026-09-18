@@ -122,18 +122,35 @@ describe('pasting through the shipped client', () => {
       // Waited on the condition rather than a duration: a split paste is
       // several round trips and a fixed sleep tuned to a fast machine fails on
       // a slow one for reasons unrelated to the claim.
-      await waitFor(() => pasting.sync.pending.length === 0, 30_000);
+      //
+      // A REFUSAL ENDS THE WAIT. Waiting only for the outbox to drain makes a
+      // refused paste take the full timeout and report `expected false to be
+      // true`, which says nothing — and a diagnosis-hostile failure in a test
+      // written to catch a diagnosis-hostile bug is the wrong trade twice over.
+      // §9 requires every code to reach `problem`, so the refusal is available
+      // immediately and the assertion below can name it.
+      await waitFor(
+        () => pasting.sync.pending.length === 0 || pasting.sync.problem !== null,
+        30_000,
+        'the outbox neither drained nor reported a refusal',
+      );
 
-      // The state the failure produced: sync stopped, with the text still on
-      // screen. Asserted explicitly so that a regression names itself rather
-      // than showing up as a timeout.
+      // Named before the drain is asserted, so the message is the server's
+      // reason rather than a timeout. Reverting the client's batch splitting
+      // makes this line read `batch_too_large`.
+      expect(pasting.sync.problem?.code ?? null).toBeNull();
+      expect(pasting.sync.pending).toHaveLength(0);
       expect(pasting.sync.state).not.toBe('stopped');
 
       // The reader is the only party that can tell "sent" from "applied
       // locally", and it is compared on the tree rather than on the text: a
       // paste split across batches interleaves visibly if causality across the
       // split is mishandled, and equal text would not show it.
-      await waitFor(() => watching.sync.session?.text === pasted, 30_000);
+      await waitFor(
+        () => watching.sync.session?.text === pasted,
+        30_000,
+        'the reader never received the pasted text',
+      );
       expect(watching.sync.session?.normalised).toBe(session!.normalised);
     } finally {
       await pasting.transport.close();
@@ -150,11 +167,15 @@ describe('pasting through the shipped client', () => {
   }, 120_000);
 });
 
-async function waitFor(condition: () => boolean, withinMs = 10_000): Promise<void> {
+async function waitFor(
+  condition: () => boolean,
+  withinMs = 10_000,
+  because = 'the condition never held',
+): Promise<void> {
   const deadline = Date.now() + withinMs;
   while (!condition() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 
-  expect(condition()).toBe(true);
+  expect(condition(), because).toBe(true);
 }
