@@ -2538,7 +2538,7 @@ written, not done).
 | 23 | Removing a document | **CLOSED (7.6)** | `DELETE /documents/{id}`, owner only, soft. The finding was that writing `deleted_at` is the half that already worked: removing the cache invalidation turns three tests red — a held connection stays open, the server goes on accepting operations into the removed document, and `negotiate` still grants a brand-new connection to it. The walk's step 10 no longer stops; it removes a document a person made. Its previous assertion, that no `[data-delete-document]` element existed, is worth recording as a near miss: that selector never matched anything either way, so the step would have gone on passing beside a working Remove button under a different name | §9, §13.19, §13.27, §13.32 |
 | 24 | The redaction sentinel driven through the document API | **CLOSED (7b.6)** | The endpoint list is read from the application's own `EndpointDataSource` rather than written by hand — a sentinel is keyed on traffic, so the endpoints nobody drives are exactly the ones that leak, and a written list is a list of what somebody remembered. Twelve routed endpoints are driven with the sentinel in the query, the `Authorization` header, a custom header and the body. Demonstrated by a redactor that skips `/documents` and `/me` alone: the old hub-only sentinel passes and the new test fails, which is this row's gap made visible. Originally found by 6b.2's guard audit | §7, §13.19, §13.36 |
 | 25 | The seeded-documents rule enforced on the C# harness too | **CLOSED (7b.6)** | Two failures, not one. The grep covered `client/src`, which is what this row named — *and* it lived in `client-gates.sh`, which **no CI job calls**, so it fired once per phase in preflight while `EditorApiFactory` added `Document` and `User` rows through the DbContext for two more phases. A rule whose scope is half the repository and whose trigger is once a phase is barely a rule. Now `scripts/check-seeding.sh`, covering both harnesses, with a CI job and a preflight gate of its own; the harness creates documents with `POST /documents`, users with `GET /me`, and deletions with `DELETE`. That last one matters: setting `deleted_at` by hand skipped the cache invalidation §7 requires, which is the half 7.6 found did not work | §12, §13.36, §13.43 |
-| 27 | A largest-legitimate-use test for every configured limit | **7 and 7b** | §13.37's standing technique. Fifteen tuned values, each with tests proving it enforces and none proving the number is right; the two that exist are accidents of testing a different cap. Each needs one test phrased as the action a person takes, taking its numbers from the use and never from the configuration. **Split deliberately: `T_retire` and the GC watermark belong to Phase 7**, because they are new numbers introduced there and §13.37 says their own tests will pass at any value — and a `T_retire` that retires a replica whose owner is at lunch is data loss, not a tuning complaint. The other thirteen are 7b | §13.37, §12 |
+| 27 | A largest-legitimate-use test for every configured limit | **CLOSED (7b.7), and it found a defect in the client** | Thirteen limits, one test each, phrased as the action a person takes with numbers taken from the use and never from the configuration. **The defect was not in a configured number.** `DocumentSession.edit()` encoded every operation from one change event into a single batch, so a paste of more than 256 code points went out as one batch of 900, the server refused it as `batch_too_large`, and §9's recovery for that code is `stop` — the first paragraph anyone pasted halted their sync for the rest of the session. Typing produces one operation per change event and never came near the cap, which is why nothing noticed for two phases and why §13.37's own sentence applies exactly: the number that matters belongs to the action the limit is not named after. Headroom for all thirteen is measured in `docs/limit-headroom.md` by `scripts/limit-headroom.sh`, and the measurement corrected §13.37 itself — see §13.45 | §13.37, §13.45, §12 |
 | 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **CLOSED (7b.6), and it found a defect** | `oidc-client-ts` defaults its state store to **`localStorage`**, and `pkce.ts` documented `sessionStorage` — with a reason for it — while shipping `localStorage` for two phases, because nothing asserted which was in use. `localStorage` survives the browser closing and is shared by every tab on the origin, so an abandoned sign-in left a live PKCE code verifier there until some later sign-in swept it. Now set explicitly and asserted. The challenge comparison is deliberately not circular: the expected value is computed by an implementation written in the test file, and *that* implementation is checked against RFC 7636 Appendix B's published pair — library → test → RFC, with no step comparing something to itself. Originally found by building 6b.7's requirement map, which is what the map is for | §7, §12 |
 | 28 | §6's periodic snapshot is never taken | **CLOSED (7b.3)** | Installed as a background sweep, and installing it changed the predicate: "did this batch step over a multiple of N" is the right question for a caller that sees every batch and the wrong one for a sweep that sees documents, so `IsDue` now asks how far the log has run past the latest snapshot — which is also the self-healing form, since a crossing missed to a restart left a document unsnapshotted for another N operations. Unblocks §10's snapshot-age gauge, absent until now for this row's reason. Originally found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause could not arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` were implemented and correct, and nothing in `src/` called either: every document was rebuilt by full replay of its log, and the collector's write was the only snapshot the product stored. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
 | 29 | GC reclaims nothing from a mid-document deletion | **7b** | Found in 7.3 by testing a shape the existing tests had never used. Rule 2 plus the right-child chain that forward typing builds means a tombstone in the middle of text always has a visible right child, is never a leaf, and is never collected; only trailing runs collect. Correct, and not to be fixed by relaxing rule 2. The open question for 7b is whether a placeholder's payload can be dropped while its position is kept, decided on measurement against realistic edit traces rather than on the trailing-run case | §5, §13.37 |
@@ -2548,6 +2548,8 @@ written, not done).
 | 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
 | 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
 | 34 | Audit the convergence tests for §13.42's shape | **7b** | §13.42 was found in the one test guarding the only operation that destroys data, and the setup that produced it — compose on A, deliver to B, compare — is how every convergence test in this repository is naturally written. Twenty files carry such an assertion. One lead already: `ScaleOutTests`' rejoin case compares `kept.Normalised` to a `rejoined` replica that adopted a server snapshot wholesale, so what it proves is closer to "the snapshot round-trips" than to "two replicas independently agree". Each test needs the §13.42 question asked of it by hand — what property is under test, and could the checking party have got it from the party being checked — which is judgement per file rather than a grep, and more than an afternoon | §13.42, §13.19 |
+| 36 | §5's per-connection pending-set bound is never set by the product | **8** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody does. The server has no pending set by design (`IngestValidator` rejects a non-ready operation rather than buffering it, which removes the vector instead of bounding it), so the only layer left is the browser client, and `DocumentSession` constructs `new Replica(id)` and leaves the bound alone. The only assignments anywhere are in the two causal-readiness test files. Deferred rather than fixed in 7b because the number is a §9 question — what a client should do when a peer's backlog exceeds what it will hold is a recovery, not a refusal, and §9's rejection table has no entry for it | §5, §9, §13.37 |
+| 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **8** | `SnapshotSweeper` ranks laggards **globally** and sweeps the top N, so a test asserting that *its* document was swept is asserting that no other test left N documents further behind. The test knows — its `BatchSize` is set to 64 with a comment saying the database is shared — and 64 is a number that was large enough at the time. 7b.7's use tests write the largest documents in the suite and turned it red once, then green on a re-run, which is the signature. They now remove their documents through `DELETE /documents/{id}`, which is hygiene rather than a fix: the next test that writes a big document brings it back. **Widening the batch until the red goes away is tuning a control into silence** (§13.37's second half), so the real repair is to make the sweep assertion independent of the ranking — sweep scoped to a document, or assert on the document's snapshot given that it was in the batch rather than assuming it was | §8, §13.31, §12 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -2768,6 +2770,24 @@ question 2**: the test invoked the mechanism and so proved the mechanism works,
 not that anything invokes it. The check is mechanical: for any such component,
 does a test exercise it **without resolving it first**, and does the startup path
 construct it rather than the request path?
+
+**5. Does the party that must respect this limit know what it is?** (§13.37,
+§13.45.) For any cap the server enforces on something a *client* constructs — a
+batch size, a run length, a message size, a page size — the client is the only
+party that can build a conforming request, and it can only do that if the number
+is on its side of the wire. 7b.7 found `DocumentSession` encoding every
+operation from one change event into a single batch: typing produced one
+operation at a time and never came near the cap, pasting produced as many as the
+clipboard held, and a paste of more than 256 code points was refused with a code
+whose recovery is `stop`. Two phases of green tests, because every test that
+existed typed.
+
+The check is mechanical and it is not "is the limit tested": the limit's own
+tests were correct and passed throughout. It is **does a constant on the client
+side name this cap, and does something assert that the client's largest output
+respects it** — a question with an answer you can grep for. Where the answer is
+no, the limit is enforced against a client that cannot comply, which is an
+outage for whoever performs the action the limit was not named after.
 
 **3. In this comparison, does each side decide for itself?** (§13.42.) For any
 test that asserts two things agree — two implementations, two replicas, two
@@ -5025,6 +5045,12 @@ Every tuned value here has that shape:
 
 The right-hand column is the one nothing tests.
 
+**Two of its cells are wrong, and row 27 found out by measuring.**
+`MaxMessageBytes` and `MaxDocumentBytes` are resource guards rather than
+capacity limits: their numbers come from what the process may be made to
+allocate, not from what a person does, and no use test can set them. §13.45
+carries the distinction and the measured headroom for all thirteen.
+
 #### The standing technique
 
 **For each configured limit, one test that performs the largest thing a real
@@ -5362,3 +5388,69 @@ a connection dropped for backpressure is closed and gone, no row records it, and
 the count is the only evidence — which §13.15 names outright. It has exactly this
 decoupling property and no remedy. `docs/section-10-audit.md` carries the audit
 of every §10 instrument against this entry.
+
+### 13.45 A resource guard's number does not come from use, and a use test against one proves only that it is out of the way
+
+§13.37 asserts that every tuned value's number is set by the largest legitimate
+use, and gives a table with a "largest legitimate use" column filled in for all
+fifteen. Row 27 wrote the test for each of those cells and then measured how far
+each number could actually fall before a real use broke. **Two of the cells were
+written by reflex, and the measurement is what showed it.**
+
+| Limit | Default | Breaks at | Factor |
+|---|---|---|---|
+| `MaxOperationsPerBatch` | 256 | 128 | 2 |
+| `MaxReplicasPerDocument` | 50 | 25 | 2 |
+| `CodePointsPerConnection` | 10,000 | 2,500 | 4 |
+| `MaxMessageBytes` | 64 KB | ~1–2 KB | ~48 |
+| `MaxDocumentBytes` | 5 MB | ~25 KB | ~210 |
+
+The first three behave as §13.37 predicts. The last two do not, and the reason
+is not that their tests are too weak.
+
+**`MaxMessageBytes` is checked before the decode, because the decode is what
+allocates.** It is a guard against a hostile frame, not a promise to a client —
+and it cannot bind a legitimate client at all, because `MaxOperationsPerBatch`
+caps a batch at 256 operations and 256 operations encode to one or two
+kilobytes. Above about 2 KB the operation cap refuses first, every time, at
+every setting. Its stated "largest legitimate use" — the largest batch the
+client can build — names a quantity that is three percent of it.
+`MaxDocumentBytes` is the same shape at 210×: five megabytes of live text is
+roughly eight hundred thousand words in one collaboratively edited document, and
+there is no user to write a test for at that size.
+
+**The distinction, and it is the whole entry: a capacity limit and a resource
+guard are different objects wearing the same syntax.** A capacity limit answers
+*how much may somebody legitimately do*, and the largest legitimate use sets it
+exactly — §13.37's rate-limit story is this case, and a test written from the use
+catches it moving. A resource guard answers *how much may this process be made
+to allocate before it refuses*, and the number comes from the resource; the
+largest legitimate use is only ever a floor it must clear. Asking a guard's
+number to come from use produces either an invented user or a test that passes
+at every setting, and §13.37's table did the first.
+
+So the technique keeps its form and gains a step. For each limit: write the use
+test, then **measure the factor** rather than halving once.
+
+- **Factor 2** — a capacity limit sitting on its use. Any reduction breaks
+  somebody, and the test says so. This is the state §13.37 is arguing for.
+- **Factor 3 to 4** — a capacity limit with a deliberate margin. Sound, but the
+  margin has to be *recorded*, because "survived halving" otherwise reads as a
+  failing check and invites tightening a number that was chosen on purpose.
+- **Factor in the tens** — either the use test is wrong, or this is a resource
+  guard and the use column should say so. Deciding which is the work; leaving it
+  as a red mark against the test is what produces the invented user.
+
+**Halving once cannot distinguish the second case from the third**, which is why
+it is the wrong form of the check for anything but a limit already known to sit
+on its use. `docs/limit-headroom.md` carries the factor for all thirteen, and
+`scripts/limit-headroom.sh` is what measures them — through configuration, which
+is the path a deployment sets them by, rather than by editing a compiled-in
+default that the deployment never reads.
+
+A limit whose measurement comes back **refused** is a fourth outcome and a
+better one than any of the above. `ReplicaClaims.Lifetime` cannot be lowered to
+half its default at all: options validation floors it at 90 seconds, above the
+45-second reload that is its largest legitimate use. No configuration can put
+that number where a real use breaks, which is a stronger guarantee than a test —
+and the pattern is worth reaching for wherever a limit has a defensible floor.

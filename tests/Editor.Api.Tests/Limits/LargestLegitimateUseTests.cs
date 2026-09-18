@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
+using Editor.Api.Hubs;
 using Editor.Api.Tests.Hubs;
 using Editor.Domain;
 using Editor.Infrastructure.Ingest;
@@ -199,6 +200,14 @@ public sealed class LargestLegitimateUseTests
             {
                 await tab.DisposeAsync();
             }
+
+            // Nine thousand un-snapshotted operations, removed for the reason
+            // Session.DisposeAsync gives: a laggard this large outranks every
+            // other test's document in SnapshotSweeper's global ranking.
+            using var owner = factory.ClientFor("owner-tabs");
+            using var _ = await owner.DeleteAsync(
+                new Uri($"/documents/{documentId}", UriKind.Relative),
+                TestContext.Current.CancellationToken);
         }
     }
 
@@ -456,7 +465,7 @@ public sealed class LargestLegitimateUseTests
 
     /// <summary>Submits <paramref name="codePoints"/> of prose the way the client would.</summary>
     /// <returns>The operations the server said it accepted.</returns>
-    private static async Task<long> PasteAsync(DocumentClient session, int codePoints)
+    private static async Task<long> PasteAsync(Session session, int codePoints)
     {
         var text = Prose(codePoints);
         long accepted = 0;
@@ -509,7 +518,7 @@ public sealed class LargestLegitimateUseTests
         ["ConnectionLimits:KeyPrefix"] = $"conn:use-{prefix}:{Guid.NewGuid():N}:",
     };
 
-    private async Task<DocumentClient> SessionAsync(
+    private async Task<Session> SessionAsync(
         string subject, Dictionary<string, string?>? settings = null)
     {
         _fixture.RequireBoth();
@@ -524,7 +533,64 @@ public sealed class LargestLegitimateUseTests
         var documentId = await DocumentSetup.DocumentAsync(factory, $"owner-{subject}");
         await DocumentSetup.GrantAsync(factory, documentId, subject, Role.Editor);
 
-        return await DocumentClient.JoinAsync(factory, subject, documentId);
+        var client = await DocumentClient.JoinAsync(factory, subject, documentId);
+        return new Session(factory, client, documentId, $"owner-{subject}");
+    }
+
+    /// <summary>
+    /// A connected editor that removes its document when it is done.
+    /// </summary>
+    /// <remarks>
+    /// <b>The cleanup is not tidiness.</b> These tests write the largest
+    /// documents in the suite — a book chapter, three pages, a paragraph — into
+    /// a Postgres shared with every other test in the collection, and
+    /// <c>SnapshotSweeper</c> ranks laggards <i>globally</i> and sweeps the top
+    /// N. A document left here with twenty-five thousand un-snapshotted
+    /// operations outranks every document any other test creates, so it takes a
+    /// slot in every sweep from then on and pushes somebody else's document out
+    /// of its own batch. <c>PeriodicSnapshotTests</c> went red exactly once that
+    /// way while this file was being written, and passed on a re-run, which is
+    /// the shape of a test made to depend on what its neighbours left behind.
+    /// <para>
+    /// Removed through <c>DELETE /documents/{id}</c> — the product's own path,
+    /// added in 7.6 — because the laggard query filters on <c>deleted_at</c>
+    /// and a row deleted any other way would not be the thing the sweep skips.
+    /// The underlying fragility is not fixed by this and is not this task's to
+    /// fix: it is register row 37. Widening the sweep's batch until the red
+    /// went away was the other option, and that is tuning a control into
+    /// silence.
+    /// </para>
+    /// </remarks>
+    private sealed class Session(
+        EditorApiFactory factory, DocumentClient client, Guid documentId, string ownerSubject)
+        : IAsyncDisposable
+    {
+        public ReplicaWriter Writer => client.Writer;
+
+        public Task<SubmitResult> SubmitAsync(byte[]? operations = null) =>
+            client.SubmitAsync(operations);
+
+        public async ValueTask DisposeAsync()
+        {
+            await client.DisposeAsync();
+
+            using (var owner = factory.ClientFor(ownerSubject))
+            {
+                // Best effort: a failure here must not turn a green test red or
+                // mask the assertion that actually ran.
+                try
+                {
+                    using var _ = await owner.DeleteAsync(
+                        new Uri($"/documents/{documentId}", UriKind.Relative),
+                        TestContext.Current.CancellationToken);
+                }
+                catch (HttpRequestException)
+                {
+                }
+            }
+
+            await factory.DisposeAsync();
+        }
     }
 
     /// <summary>What <c>POST /documents</c> answers with.</summary>
