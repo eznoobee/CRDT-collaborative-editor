@@ -2547,10 +2547,11 @@ written, not done).
 | 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
 | 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
 | 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
-| 34 | Audit the convergence tests for §13.42's shape | **7b** | §13.42 was found in the one test guarding the only operation that destroys data, and the setup that produced it — compose on A, deliver to B, compare — is how every convergence test in this repository is naturally written. Twenty files carry such an assertion. One lead already: `ScaleOutTests`' rejoin case compares `kept.Normalised` to a `rejoined` replica that adopted a server snapshot wholesale, so what it proves is closer to "the snapshot round-trips" than to "two replicas independently agree". Each test needs the §13.42 question asked of it by hand — what property is under test, and could the checking party have got it from the party being checked — which is judgement per file rather than a grep, and more than an afternoon | §13.42, §13.19 |
+| 34 | Audit the convergence tests for §13.42's shape | **CLOSED (7b.9), and the scoping lead was wrong** | `ScaleOutTests`' rejoin case does *not* adopt a snapshot — an empty version vector asks for everything, which is eleven operations, well under `MaxDeltaOperations`, so catch-up answers with a delta and the rejoining replica places every operation itself. Probed directly: `caught.Snapshot` is null. The file named as the worst case is one of the better ones. What the audit found instead is structural and larger: **a convergence assertion is invariant under any consistent ordering rule**, so none of the twenty-five two-party comparisons can detect a placement bug (§13.47). Inverting the sibling tie-break turns red 3 of 77 in `Crdt.Core.Tests`, 2 of 14 in `Conformance`, 1 of 393 in `Editor.Api.Tests` and **0 of 213** in the default client suite — every detection a comparison against a committed value. Repaired: `client/src/crdt/elementId.test.ts`, which TypeScript never had while `AGENTS.md` calls the comparator load-bearing *because* TypeScript has no `Guid`. `scripts/placement-probe.sh` makes it re-runnable; `docs/convergence-audit.md` names the property each file's comparison actually guards | §13.42, §13.47, §13.19 |
 | 36 | §5's per-connection pending-set bound is never set by the product | **8** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody does. The server has no pending set by design (`IngestValidator` rejects a non-ready operation rather than buffering it, which removes the vector instead of bounding it), so the only layer left is the browser client, and `DocumentSession` constructs `new Replica(id)` and leaves the bound alone. The only assignments anywhere are in the two causal-readiness test files. Deferred rather than fixed in 7b because the number is a §9 question — what a client should do when a peer's backlog exceeds what it will hold is a recovery, not a refusal, and §9's rejection table has no entry for it | §5, §9, §13.37 |
 | 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **8** | `SnapshotSweeper` ranks laggards **globally** and sweeps the top N, so a test asserting that *its* document was swept is asserting that no other test left N documents further behind. The test knows — its `BatchSize` is set to 64 with a comment saying the database is shared — and 64 is a number that was large enough at the time. 7b.7's use tests write the largest documents in the suite and turned it red once, then green on a re-run, which is the signature. They now remove their documents through `DELETE /documents/{id}`, which is hygiene rather than a fix: the next test that writes a big document brings it back. **Widening the batch until the red goes away is tuning a control into silence** (§13.37's second half), so the real repair is to make the sweep assertion independent of the ranking — sweep scoped to a document, or assert on the document's snapshot given that it was in the batch rather than assuming it was | §8, §13.31, §12 |
 | 38 | An interior placeholder is never collected, and the fraction grows without bound | **8** | Row 29's measurement, which was asked about payloads and answered about positions. 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages — a document edited for a year is mostly structure. The question is whether a placeholder whose payload and children are all themselves collectable can be spliced out by rewiring its child's parent, which is a §5 correctness question about whether that rewiring preserves Definition 4 for a concurrent insert that names the spliced element as a right origin. **Not to be attempted by relaxing rule 2**, which 7.3 already settled. Belongs with §8's load work because the cost is a scale cost and the safety argument needs the property suite at scale | §5, §8, §13.46 |
+| 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **8** | Found by 7b.9's probe. `client/src/crdt/conformance.test.ts` is excluded from `npm test` because it needs the C# runner to materialise the corpus first, which is a sound reason and leaves the default suite unable to see a whole class of core bug. 7b.9 closed the specific hole for the comparator by adding direct tests, but the general shape stands: anything the two cores must agree on byte for byte is checked only by a suite a contributor does not run. The fix is a committed fixture the TypeScript suite can replay unaided — the canonical-form fixtures of 2.5 are the precedent — rather than making the default run depend on a build of the other implementation | §9, §11, §13.47 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -5498,3 +5499,73 @@ Two consequences worth carrying:
   interior tombstone is about one byte, and the reason to care is that the
   *count* grows without bound as a document is edited (register row 38) — not
   that any one of them is heavy.
+
+### 13.47 A convergence assertion is invariant under any consistent ordering rule
+
+Row 34 was opened to audit twenty files of convergence assertions for §13.42's
+shape — one party's answer derived from the other's — by reading each in turn.
+The reading was replaced by a probe, and the probe found something a reading
+could not have established.
+
+**Invert the sibling tie-break** — `compareElementId`, the comparator §5 makes
+load-bearing, one change that reorders every user's text whenever two people
+type at the same position — and run every suite in the repository:
+
+| suite | tests | red |
+|---|---|---|
+| `Crdt.Core.Tests` | 77 | 3 |
+| `Conformance` (C#) | 14 | 2 |
+| `Editor.Api.Tests` | 393 | 1 |
+| `client` (`npm test`) | 213 | **0** |
+
+Twenty-five two-party convergence comparisons, and **not one of them noticed.**
+Every detection came from a comparison against a value committed to the
+repository: the comparator's own tests, expected sibling orders from the
+paper's figures, committed trace expectations, a committed manifest, and one
+hardcoded string in `ScaleOutTests`.
+
+The reason is not that the assertions are weak:
+
+> **Both replicas run the same comparator, so they agree on whatever it says.
+> Convergence is preserved by *any* deterministic ordering rule, including a
+> wrong one — so a convergence assertion cannot detect a placement bug.**
+
+§13.42 asks whether the checking party could have obtained the property from the
+party being checked. For placement, in a two-party comparison, the answer is
+always yes and not by accident of setup: both parties compute it with the same
+code, and no rearrangement of the test changes that. Convergence and correct
+placement are different properties, and only the second needs an oracle neither
+party computed.
+
+So what those twenty-five assertions establish is **delivery** — that the
+operations arrived, in an order each side had to cope with, and that readiness
+buffering released them correctly. That is worth testing and they test it. What
+they do not establish, and cannot, is where the characters went.
+
+#### The two consequences
+
+**An external oracle is not optional, and its coverage is invisible.** The
+repository's entire defence against a comparator bug was six assertions, and
+nothing said so — every convergence test *reads* as though it is checking
+placement, and its comment usually says "tombstones and tree shape included",
+which is true of the comparison and irrelevant to the property. The audit's
+output is therefore a statement, per file, of which property each comparison
+guards (`docs/convergence-audit.md`), because the gap was never a missing
+assertion; it was a missing sentence.
+
+**The gap lands where nobody looks.** The default client suite — the command
+`AGENTS.md` tells a contributor to run — passed 213 of 213 with the comparator
+inverted, because TypeScript had no direct comparator test and its only
+placement oracle, the conformance corpus, is excluded from the default run for
+needing the C# runner first. The side with no `Guid` to fall back on, which is
+exactly why §5 makes the comparator hand-written, was the side with no check.
+
+#### The technique
+
+**Sabotage one rule that every replica shares, then count which suites notice.**
+It answers "what actually guards this property" in a way no reading of the tests
+can, because the tests all *look* like they guard it. Worth reaching for
+wherever a property is computed identically by every party to a comparison —
+ordering, hashing, normalisation, serialisation — since in every such case the
+comparison is invariant under changing it. `scripts/placement-probe.sh` is the
+standing form for this one.
