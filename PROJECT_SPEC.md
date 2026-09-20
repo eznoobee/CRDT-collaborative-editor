@@ -2545,7 +2545,7 @@ written, not done).
 | 30 | `resync_required` has no reachable path until the log is truncated | **CLOSED (7b.8)** | `LogTruncator` removes the rows behind a collected snapshot, and the end-to-end test reaches the state through the product — type, delete a trailing run, close the tab, retire, collect, truncate — with nothing constructing a frontier. **What it removes is not a prefix, and that was found before it was built.** §5 resolves a reference by asking whether the id is in `document_ops`, which is sound only while the log is the whole truth; delete a prefix and a live element visible on every screen has no row, and the classifier answers `resync_required` — telling that client to destroy unsent work. Predicted, then demonstrated, and `LogTruncationHazardTests` keeps the demonstration. So the rows removed are exactly those whose elements the snapshot no longer holds, derived as a difference rather than recorded by the collector (§13.44). Delete rows are kept so §9's 'that id names a delete' narrowing survives | §5, §9, §13.19, §13.44 |
 | 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
 | 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
-| 33 | A walk step observing GC's effect on the deployed stack | **7b, behind row 6** | Asked for when Phase 7 was approved, and it cannot be written honestly yet. The walk is black-box — HTTP and a browser, no database access — and §5 *requires* collection to be invisible through the product: identical text, identical version vector, by design. So the only observable evidence is the collector's own counters, and §10's metric surface does not exist (row 6). A step that opened a collected document and found the text correct would pass identically whether or not anything had been collected, which is §13.19 written on purpose. Blocked on row 6 rather than deferred by preference | §5, §10, §13.19, §13.27 |
+| 33 | A walk step observing GC's effect on the deployed stack | **7b.10 attempted; still open, and the blocker is no longer row 6** | Two findings. **The premise collides with §7.** Row 6's metric surface arrived in 7b.5 as `/metrics` on an admin port the proxy deliberately does not forward — "unreachable from outside the deployment by construction rather than by a rule someone has to keep applying", and explicitly *not* "authenticate it instead". The walk is black-box from outside, so it cannot reach that port without publishing it, which would undo the control in the artefact that ships. Two honest restatements: reach the admin port on the compose network without publishing it (no longer strictly black-box), or observe a product-visible consequence instead — and 7b.10 found one, since after collection and truncation a first-open client's catch-up returns a snapshot where it previously returned a delta, which is visible over the ordinary hub API. **And asking the question found a defect** (§13.48): truncation had stranded every first-open client, fixed here. Still needs a Docker daemon, which this environment does not have | §5, §7, §10, §13.19, §13.27, §13.48 |
 | 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
 | 34 | Audit the convergence tests for §13.42's shape | **CLOSED (7b.9), and the scoping lead was wrong** | `ScaleOutTests`' rejoin case does *not* adopt a snapshot — an empty version vector asks for everything, which is eleven operations, well under `MaxDeltaOperations`, so catch-up answers with a delta and the rejoining replica places every operation itself. Probed directly: `caught.Snapshot` is null. The file named as the worst case is one of the better ones. What the audit found instead is structural and larger: **a convergence assertion is invariant under any consistent ordering rule**, so none of the twenty-five two-party comparisons can detect a placement bug (§13.47). Inverting the sibling tie-break turns red 3 of 77 in `Crdt.Core.Tests`, 2 of 14 in `Conformance`, 1 of 393 in `Editor.Api.Tests` and **0 of 213** in the default client suite — every detection a comparison against a committed value. Repaired: `client/src/crdt/elementId.test.ts`, which TypeScript never had while `AGENTS.md` calls the comparator load-bearing *because* TypeScript has no `Guid`. `scripts/placement-probe.sh` makes it re-runnable; `docs/convergence-audit.md` names the property each file's comparison actually guards | §13.42, §13.47, §13.19 |
 | 36 | §5's per-connection pending-set bound is never set by the product | **8** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody does. The server has no pending set by design (`IngestValidator` rejects a non-ready operation rather than buffering it, which removes the vector instead of bounding it), so the only layer left is the browser client, and `DocumentSession` constructs `new Replica(id)` and leaves the bound alone. The only assignments anywhere are in the two causal-readiness test files. Deferred rather than fixed in 7b because the number is a §9 question — what a client should do when a peer's backlog exceeds what it will hold is a recovery, not a refusal, and §9's rejection table has no entry for it | §5, §9, §13.37 |
@@ -5569,3 +5569,68 @@ wherever a property is computed identically by every party to a comparison —
 ordering, hashing, normalisation, serialisation — since in every such case the
 comparison is invariant under changing it. `scripts/placement-probe.sh` is the
 standing form for this one.
+
+### 13.48 Removing data satisfies one invariant at a time; enumerate the rest
+
+7b.8 built log truncation and took Phase 7's standard of care over the obvious
+hazard. §5 resolves a client's reference by asking whether the element id is in
+`document_ops`, so removing a prefix would make a live element indistinguishable
+from a collected one — predicted before the code existed, demonstrated by test,
+and designed around: the truncator removes only the rows of elements the
+snapshot no longer holds, so **every reference stays resolvable.**
+
+That property was established, and a second one was assumed to follow from it.
+It does not. §5 also makes a replica's sequence **dense**, and readiness refuses
+any operation whose sequence number skips one:
+
+```
+var expected = _versionVector[replica] ?? 0;
+if (operation.Id.Seq != expected) return false;
+```
+
+A removed row is a hole in that sequence **whatever the row was**. Care about
+*which* rows go buys reference resolvability and buys nothing at all here: the
+tenth operation's absence stops the eleventh regardless of why it went.
+
+What it looked like: a client opening a truncated document for the first time
+is served a delta of surviving rows, applies operations up to the hole, and
+buffers every operation after it — including the deletes — in the pending set,
+forever, while reporting itself current. It renders deleted characters that
+every other client has stopped showing. The condition never clears, because the
+dependency it waits for was deleted on purpose.
+
+**None of 7b.8's tests could see it.** Every one either loads through
+`DocumentStore.LoadAsync`, which reads the snapshot plus the rows *after* it and
+so never replays the truncated region, or catches up a client that was already
+nearly current. The first-open client is the only one that asks for everything,
+and it was the one nobody modelled.
+
+#### The general form
+
+> **An operation that removes data participates in every invariant the data
+> participated in. Satisfying the one that motivated the removal says nothing
+> about the others, and the others are the ones nobody lists.**
+
+The discipline is to enumerate them before removing anything, as a list, from
+the spec rather than from memory. For a row in an operation log, §5 alone gives
+at least four: *referential* (ids the row's element is named by), *sequential*
+(density of its author's numbering), *reconstructive* (can the document be
+rebuilt without it), and *evidential* (what its absence is taken to mean — here,
+`resync_required`, which 7b.8 did consider). The design satisfied the first and
+the fourth and broke the second.
+
+This is not §13.19's guard that cannot fail or §13.42's comparison that cannot
+disagree. Those are tests that prove less than they appear to. This is a *design*
+that is correct about the property it was argued from and silently wrong about a
+property nobody wrote down — which no amount of testing the first property will
+surface, and which sabotage will not find either, because the code does exactly
+what it was built to do.
+
+#### What found it
+
+Asking what a **walk step** would observe. Register row 33 wanted GC's effect
+visible on the deployed stack, and the walk's client is the one that arrives
+cold and asks for everything — the client no unit test models, because every
+test builds its clients from the state it just created. The finding is an
+argument for the walk as a design tool rather than a regression suite: its
+value is the viewpoint, not the coverage.

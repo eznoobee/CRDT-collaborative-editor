@@ -83,16 +83,24 @@ public sealed class TruncatedCatchUpTests
     }
 
     [Fact]
-    public async Task A_document_that_was_never_truncated_still_gets_a_delta()
+    public async Task A_document_with_a_snapshot_but_no_truncation_still_gets_a_delta()
     {
         // The other half, and the one that stops the repair from being "serve a
         // snapshot to everybody". §8 is explicit: a client that has been away
         // for one keystroke wants two operations, not a five-megabyte snapshot.
-        // Forcing the floor for every document would fix the stranding and pay
-        // for it on every reconnect in the system, and nothing else in the
-        // suite would have noticed.
+        //
+        // THE DOCUMENT HAS TO HAVE A SNAPSHOT, and the first version of this
+        // test did not. Without one the safety check returns early on "no
+        // snapshot to fall back on" and the delta comes back for a reason that
+        // has nothing to do with truncation — so the test passed with the whole
+        // never-truncated fast path deleted. The sabotage said so; it is here
+        // because a reader would not have.
         _fixture.RequireBoth();
-        await using var factory = new EditorApiFactory(_fixture);
+        await using var factory = new EditorApiFactory(_fixture, settings: new Dictionary<string, string?>
+        {
+            ["Snapshots:OperationsPerSnapshot"] = "1",
+            ["Snapshots:BatchSize"] = "64",
+        });
 
         var documentId = await DocumentSetup.DocumentAsync(factory, "owner-untruncated");
         await DocumentSetup.GrantAsync(factory, documentId, "writer-untruncated", Role.Editor);
@@ -103,6 +111,19 @@ public sealed class TruncatedCatchUpTests
 
         Assert.Null((await writer.SubmitAsync(writer.Writer.Type("hello"))).Code);
 
+        await using (var snapshotScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(
+                await snapshotScope.ServiceProvider.GetRequiredService<IPeriodicSnapshotter>()
+                    .SnapshotDocumentAsync(documentId, TestContext.Current.CancellationToken),
+                "no snapshot was written, so this test would prove nothing");
+        }
+
+        // Written after the snapshot, so the reader below is genuinely behind
+        // it — which is the state the safety check has to answer, and the state
+        // "no snapshot at all" never reaches.
+        Assert.Null((await writer.SubmitAsync(writer.Writer.Type(" world"))).Code);
+
         await using var reader = await DocumentClient.JoinAsync(
             factory, "reader-untruncated", documentId);
 
@@ -112,7 +133,7 @@ public sealed class TruncatedCatchUpTests
         Assert.Null(caught.Snapshot);
 
         reader.ApplyCatchUp(caught);
-        Assert.Equal("hello", reader.Replica.Text);
+        Assert.Equal("hello world", reader.Replica.Text);
     }
 
     /// <summary>A document with a collectable trailing run, built through the product.</summary>
