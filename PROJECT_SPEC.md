@@ -2543,7 +2543,7 @@ written, not done).
 | 28 | §6's periodic snapshot is never taken | **CLOSED (7b.3)** | Installed as a background sweep, and installing it changed the predicate: "did this batch step over a multiple of N" is the right question for a caller that sees every batch and the wrong one for a sweep that sees documents, so `IsDue` now asks how far the log has run past the latest snapshot — which is also the self-healing form, since a crossing missed to a restart left a document unsnapshotted for another N operations. Unblocks §10's snapshot-age gauge, absent until now for this row's reason. Originally found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause could not arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` were implemented and correct, and nothing in `src/` called either: every document was rebuilt by full replay of its log, and the collector's write was the only snapshot the product stored. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
 | 29 | GC reclaims nothing from a mid-document deletion | **CLOSED (7b.8) — decided on measurement, and the measurement inverted the question** | Confirmed at scale first: mid-document deletion collects *zero*, not less — 0 of 17, 0 of 26, 0 of 114 across every realistic edit shape. Then the open question, whether a placeholder's payload can be dropped while its position is kept, came back the opposite way round from the intuition it was asked with. **Removing a placeholder entirely would make the snapshot bigger** on two of five shapes: §6 encodes contiguous elements as a run with one header and one concatenated string, so a placeholder inside a run costs its character and nothing else, and taking it out splits the run and pays for a second header. The position is nearly free; the payload is the whole cost, at 8–16% of snapshot bytes. Decision: **not now** — sound, but a coordinated §6 change across two codecs, the conformance corpus and §9's byte-identical rule, to take 8–16% off a snapshot already costing 1.2 bytes an element. Reversal condition and numbers in `docs/gc-reclamation.md`; the number worth attacking is row 38 instead | §5, §6, §13.37, §13.46 |
 | 30 | `resync_required` has no reachable path until the log is truncated | **CLOSED (7b.8)** | `LogTruncator` removes the rows behind a collected snapshot, and the end-to-end test reaches the state through the product — type, delete a trailing run, close the tab, retire, collect, truncate — with nothing constructing a frontier. **What it removes is not a prefix, and that was found before it was built.** §5 resolves a reference by asking whether the id is in `document_ops`, which is sound only while the log is the whole truth; delete a prefix and a live element visible on every screen has no row, and the classifier answers `resync_required` — telling that client to destroy unsent work. Predicted, then demonstrated, and `LogTruncationHazardTests` keeps the demonstration. So the rows removed are exactly those whose elements the snapshot no longer holds, derived as a difference rather than recorded by the collector (§13.44). Delete rows are kept so §9's 'that id names a delete' narrowing survives | §5, §9, §13.19, §13.44 |
-| 31 | The offline-window discard, observed in a browser | **7b** | 7.5 verified it in three places that all run without Docker — the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is not covered is a real browser doing it against the deployed stack, because `T_retire` is seven days and the deployed clock is not injectable. Needs the walk stack configured with a short `ReplicaRetirement__Retire` and a heartbeat under it, so a closed tab ages out in about a minute while a live one does not — which is a compose-level change with its own flakiness risk, and belongs with 7b's other walk work rather than bolted on here | §9, §12, §13.27 |
+| 31 | The offline-window discard, observed in a browser | **OPEN — blocked on a Docker daemon, not deferred** | 7.5 verified it in three places that all run without Docker: the server retires and declines, the client discards and reports, and the raw negotiate body carries the two fields the client keys on. What is missing is a real browser doing it against the deployed stack, and that needs its **own** compose stack — a one-minute `ReplicaRetirement__Retire` would retire tabs mid-walk in the existing one — so a separate override, script, vitest config and CI job. 7b.8 wrote none of them: four files that could not be executed even once in an environment with no Docker daemon would be a stub presented as done (§12). The one thing checkable without Docker was checked — `Retire` has no validation floor, so the configuration is feasible | §9, §12, §13.27 |
 | 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
 | 33 | A walk step observing GC's effect on the deployed stack | **7b.10 attempted; still open, and the blocker is no longer row 6** | Two findings. **The premise collides with §7.** Row 6's metric surface arrived in 7b.5 as `/metrics` on an admin port the proxy deliberately does not forward — "unreachable from outside the deployment by construction rather than by a rule someone has to keep applying", and explicitly *not* "authenticate it instead". The walk is black-box from outside, so it cannot reach that port without publishing it, which would undo the control in the artefact that ships. Two honest restatements: reach the admin port on the compose network without publishing it (no longer strictly black-box), or observe a product-visible consequence instead — and 7b.10 found one, since after collection and truncation a first-open client's catch-up returns a snapshot where it previously returned a delta, which is visible over the ordinary hub API. **And asking the question found a defect** (§13.48): truncation had stranded every first-open client, fixed here. Still needs a Docker daemon, which this environment does not have | §5, §7, §10, §13.19, §13.27, §13.48 |
 | 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
@@ -2805,6 +2805,39 @@ and make both sides exercise it independently.
 **Every task in a phase breakdown states how its test could pass meaninglessly,
 written before the test exists.** Not after, and not as a review step — as part
 of proposing the work.
+
+### What the apparatus is worth, in numbers
+
+The vacuity statements, the sabotage runs, the guard audits, the probes and the
+gates cost a large fraction of this project's effort, and the case for them is
+not that they feel rigorous. It is Phase 7b, which was a backlog phase — every
+task a debt written down in an earlier phase, with no new feature and therefore
+the least surprising work available:
+
+> **Nine defects. Six of them in code that already existed and passed its tests.
+> Three in work written earlier in the same phase. Five of the nine were found
+> by sabotage or by a probe — not by writing the test, and not by running it.**
+
+Each clause is a separate argument.
+
+**Six in code that already passed its tests** is the case for the audits and the
+probes. Those tests were not bad; they were green, and the code was wrong
+anyway, so the only thing that could have found the defects was a question asked
+about the tests rather than another test.
+
+**Three in work written earlier in the same phase** is the case against trusting
+freshly-written code more than old code. Two of those three were in the task
+immediately before the one that found them, written with full attention by
+someone who had just reasoned carefully about the design.
+
+**Five of nine by sabotage or probe** is the case for the cost. A test written
+to check a property and a test that cannot check it look identical in a green
+run. Sabotage is the routine step that distinguishes them, and on this evidence
+it is not a supplement to writing tests — it is the majority of the yield.
+
+The ratio is recorded here rather than only in `docs/phase-7b-report.md` because
+a phase report is read once. This is the number to return to when the apparatus
+looks like overhead.
 
 Sabotage catches a vacuous check afterwards, by breaking the code and watching
 nothing happen. That works and it is why sabotage is a standing practice, but it
@@ -5634,3 +5667,84 @@ cold and asks for everything — the client no unit test models, because every
 test builds its clients from the state it just created. The finding is an
 argument for the walk as a design tool rather than a regression suite: its
 value is the viewpoint, not the coverage.
+
+### 13.49 A phase report certifies a commit; it must be the commit containing the report
+
+7b.11 ran the preflight, got a pass on the pushed head, wrote the report with
+that job table in it, and committed. The commit moved the head. **The preflight
+that passed had never seen the report** — nor the register edits that shipped
+alongside it, which in that commit were two rows being closed.
+
+Stated generally, because the shape is not about reports:
+
+> **When a document makes a claim about a tree, and the document is part of that
+> tree, verifying the tree before adding the document verifies a different tree —
+> and nothing in the document says so.**
+
+The claim and the evidence end up about two commits that differ by exactly the
+change nobody checked. A reader has no way to tell: the report names a sha, the
+CI run names a sha, they agree, and the sha is not the one the reader is looking
+at.
+
+**This hole was in every prior phase report.** Phase 7's is the clearest: its
+report was added in `2a1adc3`, and that commit's own message says *"the preflight
+that passed on 600845e"* — a different tree — while the report's header names no
+commit at all, so the claim was not tied to a tree in the first place. Six phases
+reported that way, each one green, each one certifying something other than
+itself.
+
+**The repair is to run the preflight again on the commit that contains the
+report**, and to say in the report which commit that is. It costs one CI cycle
+and it is the only arrangement where the sentence "this passed" has a referent
+the reader can check. 7b.11 did this and recorded that the second run is the one
+that counts.
+
+The residue is unavoidable and worth naming rather than hiding: the *final*
+commit — the one that records "the preflight was re-run" — is itself unverified
+by that run. The recursion has to stop somewhere. It stops at a commit that
+changes only prose about the preflight, and the report says which one, so the
+unverified delta is stated instead of silent. **A known one-line gap beats an
+unknown one, and the difference is entirely whether it is written down.**
+
+### 13.50 The mechanism that tracks what was forgotten will itself be forgotten
+
+The findings register exists because things were being lost between phases. It
+is the project's memory, and in Phase 7b it silently stopped reflecting what it
+tracks.
+
+Rows 6 and 7 — §10's observability surface and `/health/ready` — were delivered
+by 7b.1 and 7b.2 and **read as open for nine tasks afterwards.** Worse than
+untidy: 7b.10 spent real effort on row 33 on the basis that it was *"blocked on
+row 6"*, when row 6 had landed eight tasks earlier. The register did not merely
+fail to record progress; it actively misdirected the work that read it.
+
+Nothing about this is a lapse in care. Closing a row is a manual act performed
+at the end of a task, with the next one already in mind — **the moment of
+maximum distraction**, which §13.43 says is exactly when a rule phrased as care
+does not hold. It did not hold twice, in the same phase, for the same reason.
+
+> **A mechanism whose purpose is to survive forgetting cannot be maintained by
+> remembering.**
+
+So it is a gate. `scripts/check-register.sh` runs in the preflight and in CI,
+and fails in both directions:
+
+- **Every row a completed phase's breakdown claims to deliver must be settled** —
+  closed, or saying in its own words why it is still open. This is the direction
+  that caught nothing for nine tasks. "Still open" has to be a sentence somebody
+  wrote, never a default, which is why a bare phase number counts as unsettled.
+- **Every row that names the task which settled it must name a task that
+  exists**, where that task's phase has a breakdown in the repository. A register
+  pointing at nothing is the same failure arriving from the other side.
+
+A phase counts as complete when its report exists, so the gate needs no list of
+finished phases kept in step by hand — which would be the very thing it exists
+to prevent.
+
+Two notes from building it. Its first version parsed register rows by *shape*
+and picked up §11's phase table, reporting three disagreements that did not
+exist; the fix is a structural anchor — the register's own heading — because
+guessing a table from its rows is how that went wrong. And it must be checked
+against the state it was built for: reinstating rows 6 and 7 exactly as they
+read for those nine tasks makes it fail, naming both. A gate nobody has watched
+fail is §13.19.

@@ -327,8 +327,19 @@ jobs:
       # deliberately malformed fixture, so a gate that stopped rejecting would
       # fail rather than go quiet.
       - name: Breakdown fields
-        run: ./scripts/check-breakdown.sh
-
+  register:
+    name: §13.50's register, agreeing with the breakdowns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # §13.50: rows 6 and 7 read open for nine tasks after shipping, and 7b.10
+      # then spent real effort on row 33 being "blocked on row 6" when row 6 had
+      # landed eight tasks earlier. The register is the project's memory, and a
+      # mechanism whose purpose is to survive forgetting cannot be maintained by
+      # remembering. It self-tests against a fixture it must reject, so a gate
+      # that stopped rejecting fails rather than going quiet.
+      - name: Register agrees with the breakdowns
+        run: ./scripts/check-register.sh
   seeding:
     name: §12's no-seeding rule, on both harnesses
     runs-on: ubuntu-latest

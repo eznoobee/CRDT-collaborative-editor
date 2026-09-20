@@ -216,13 +216,24 @@ report is a preflight that never saw the report. The register edits closing rows
 preflight whose subject is one commit behind the thing being reported is the
 category of mistake it exists to catch.
 
-**One thing the preflight got wrong about its own environment**, recorded
-because it will recur: three local gates — `tests`, `interop`, `e2e` — failed on
-the first run for want of `EDITOR_TEST_POSTGRES` and `EDITOR_TEST_REDIS`, and
-reported only "FAILED (rerun it directly to see why)". Each passes when the
-variables are exported. A gate that cannot distinguish "this is broken" from "I
-was not told where Postgres is" spends a cycle every time, and the fix belongs
-with the next phase's process work rather than inside a report.
+**Two things the preflight got wrong about itself, both now fixed.**
+
+Three local gates — `tests`, `interop`, `e2e` — failed on the first run for want
+of `EDITOR_TEST_POSTGRES` and `EDITOR_TEST_REDIS`, reporting only "FAILED (rerun
+it directly to see why)". That is **§13.23** — a harness that cannot explain its
+own failure — where a missing variable and a real regression produce the
+identical sentence. Fixed at the source: the variables are checked by name
+before any gate runs, so an unconfigured run stops in a second rather than
+twenty minutes, and a gate that does fail now prints its last twelve lines.
+
+And the **register gate** is new here: `scripts/check-register.sh`, in the
+preflight and in CI. Rows 6 and 7 read open for nine tasks after shipping, and
+7b.10 spent real effort on row 33 being "blocked on row 6" when row 6 had landed
+eight tasks earlier. Closing a row is a manual act at the moment of maximum
+distraction, which §13.43 says will not hold — and it did not, twice in one
+phase. The gate fails in both directions and is checked against the state it was
+built for: reinstating rows 6 and 7 as they actually read makes it name both.
+**§13.50.**
 
 ---
 

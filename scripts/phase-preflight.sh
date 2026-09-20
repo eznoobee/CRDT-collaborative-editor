@@ -71,6 +71,34 @@ fail() {
   exit 1
 }
 
+# §13.23: a harness that cannot explain its own failure. The first version of
+# this said only "FAILED (rerun it directly to see why)", and three gates failed
+# their first 7b.11 run because EDITOR_TEST_POSTGRES was not exported — which is
+# indistinguishable, in that sentence, from a genuinely broken test. A missing
+# variable and a real regression produced the identical output, so every failure
+# cost a full rerun to classify.
+#
+# Two fixes, both at the source rather than the symptom. The variables the gates
+# need are checked ONCE, up front, by name — an unconfigured run stops before it
+# spends twenty minutes discovering that. And a gate that fails keeps its last
+# lines, so the output says what broke rather than that something did.
+require_environment() {
+  local missing=()
+  for variable in EDITOR_TEST_POSTGRES EDITOR_TEST_REDIS; do
+    [[ -n "${!variable:-}" ]] || missing+=("$variable")
+  done
+
+  if (( ${#missing[@]} )); then
+    fail "unset: ${missing[*]}.
+The tests, interop and e2e gates need a Postgres and a Redis to run against. A
+preflight that reported them FAILED for want of a variable would be saying
+'broken' when it means 'not told where Postgres is' (§13.23), so it stops here
+instead — before spending twenty minutes to reach the same place. Export them
+and rerun."
+  fi
+}
+
+
 if [[ -z "$status_file" ]]; then
   fail "no CI status file given. Query the jobs of the newest completed run on
 this branch head, save them as JSON, and pass the path. Reporting a phase
@@ -228,6 +256,8 @@ CHECK_CI
 
 echo "    CI is green for this exact commit"
 echo
+require_environment
+
 echo "==> Local gates"
 
 failures=()
@@ -235,13 +265,17 @@ failures=()
 run_gate() {
   local name=$1
   shift
+  local log
+  log=$(mktemp)
   echo "--- $name"
-  if "$@" >/dev/null 2>&1; then
+  if "$@" >"$log" 2>&1; then
     echo "    ok"
   else
-    echo "    FAILED (rerun it directly to see why)"
+    echo "    FAILED — last lines:"
+    tail -n 12 "$log" | sed 's/^/        /'
     failures+=("$name")
   fi
+  rm -f -- "$log"
 }
 
 # First, because a workflow GitHub cannot parse means the job table above came
@@ -250,6 +284,7 @@ run_gate() {
 run_gate "workflows" ./scripts/check-workflows.sh
 run_gate "format" dotnet format --verify-no-changes
 run_gate "breakdown" ./scripts/check-breakdown.sh
+run_gate "register" ./scripts/check-register.sh
 run_gate "sabotage" ./scripts/sabotage.sh --self-test
 run_gate "seeding" ./scripts/check-seeding.sh
 run_gate "tests" ./scripts/run-tests.sh
