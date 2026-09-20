@@ -114,6 +114,8 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
 
             entity.Property(e => e.LastTruncatedAt).HasColumnName("last_truncated_at");
 
+            entity.Property(e => e.TruncatedThrough).HasColumnName("truncated_through");
+
             // The truncation sweep's queue: documents whose collection actually
             // removed elements since the last truncation. Indexed on the stamp
             // it orders by; last_truncated_at is only ever compared, never

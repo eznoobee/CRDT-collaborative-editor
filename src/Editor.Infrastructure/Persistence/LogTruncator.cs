@@ -203,6 +203,18 @@ public sealed class LogTruncator : ILogTruncator
         }
 
         var removed = await RemoveAsync(documentId, gone, cancellationToken).ConfigureAwait(false);
+
+        // Recorded before the count is reported, and never moved backwards.
+        // Catch-up refuses the delta path below this point, because a removed
+        // row is a hole in a dense sequence and a replay stops at the hole
+        // (§5). A truncation that removed rows without recording how far would
+        // leave every new client on this document buffering forever.
+        if (serverSeq > document.TruncatedThrough)
+        {
+            document.TruncatedThrough = serverSeq;
+            await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         _metrics.LogRowsTruncated.Add(removed);
         return removed;
     }

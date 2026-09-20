@@ -99,7 +99,7 @@ public sealed class CatchUpReader
     {
         ArgumentNullException.ThrowIfNull(known);
 
-        if (!forceSnapshot)
+        if (!forceSnapshot && await DeltaIsSafeAsync(documentId, known, cancellationToken).ConfigureAwait(false))
         {
             var delta = await ReadDeltaAsync(documentId, known, cancellationToken).ConfigureAwait(false);
             if (delta is { } operations)
@@ -120,6 +120,120 @@ public sealed class CatchUpReader
             SnapshotBinary.Encode(replica.Export(), replica.VersionVector),
             OperationBinary.Encode([]),
             await HighWaterMarkAsync(documentId, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Whether a delta can answer <paramref name="known"/> at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A truncated log cannot serve a client that is behind its snapshot.</b>
+    /// §5 makes a replica's sequence dense and readiness refuses an operation
+    /// that skips one, so a removed row is a hole a replay stops at — whatever
+    /// the row was, and however carefully it was chosen. Truncation removes only
+    /// the rows of elements collection collected, which keeps every *reference*
+    /// resolvable, and that is a different property from keeping the sequence
+    /// dense. 7b.8 established the first and assumed the second.
+    /// </para><para>
+    /// What it looked like: a client opening a truncated document for the first
+    /// time received every surviving row, applied operations up to the hole, and
+    /// buffered the rest — including the deletes — in the pending set forever,
+    /// showing text with deleted characters still in it while reporting itself
+    /// current. Found by asking what a walk step would observe (row 33), which
+    /// is the one client nothing else in the suite models: every other test
+    /// catches up a replica that was already nearly current.
+    /// </para><para>
+    /// The test is the snapshot's own version vector rather than a server_seq,
+    /// because the client's cursor is a vector: it is behind if the snapshot
+    /// knows of any operation it does not. Only consulted for documents that
+    /// have actually been truncated, so a document that has never been through a
+    /// sweep keeps §8's behaviour exactly — a client one keystroke behind gets
+    /// two operations and not five megabytes.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> DeltaIsSafeAsync(
+        Guid documentId,
+        IReadOnlyDictionary<ReplicaId, ulong> known,
+        CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(
+            """
+            SELECT d.truncated_through, s.version_vector
+            FROM documents AS d
+            LEFT JOIN LATERAL (
+                SELECT version_vector FROM document_snapshots
+                WHERE document_id = d.id
+                ORDER BY server_seq DESC
+                LIMIT 1
+            ) s ON TRUE
+            WHERE d.id = $1;
+            """);
+
+        command.Parameters.AddWithValue(documentId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        if (reader.IsDBNull(0) || reader.GetInt64(0) == 0)
+        {
+            // Never truncated: every row the log ever held is still there.
+            return true;
+        }
+
+        if (reader.IsDBNull(1))
+        {
+            // Truncated with no snapshot to fall back on should be impossible —
+            // the truncator refuses a document whose snapshot it cannot read —
+            // but if it happened, the delta is the only answer available and
+            // refusing it would leave the client with nothing at all.
+            return true;
+        }
+
+        var covered = reader.GetString(1);
+        return CoversSnapshot(known, covered);
+    }
+
+    /// <summary>Whether <paramref name="known"/> holds everything the snapshot does.</summary>
+    private static bool CoversSnapshot(
+        IReadOnlyDictionary<ReplicaId, ulong> known, string versionVector)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(versionVector);
+        if (!document.RootElement.TryGetProperty("versionVector", out var vector))
+        {
+            return false;
+        }
+
+        foreach (var entry in vector.EnumerateObject())
+        {
+            if (!Guid.TryParse(entry.Name, out var replica))
+            {
+                return false;
+            }
+
+            // §6: 64-bit counts travel as decimal strings, because JSON numbers
+            // are doubles and stop round-tripping above 2^53.
+            if (!ulong.TryParse(
+                    entry.Value.GetString(),
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var count))
+            {
+                return false;
+            }
+
+            if (!known.TryGetValue(ReplicaIdConversion.FromGuid(replica), out var held)
+                || held < count)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -64,4 +64,26 @@ public sealed class Document
     public DateTimeOffset? LastReclaimableAt { get; set; }
 
     public DateTimeOffset? LastTruncatedAt { get; set; }
+
+    /// <summary>
+    /// The snapshot <c>server_seq</c> truncation has removed rows at or below.
+    /// </summary>
+    /// <remarks>
+    /// <b>Catch-up reads this, and without it a truncated document strands
+    /// every new client.</b> §5 makes a replica's sequence dense, and readiness
+    /// refuses any operation that skips one — so removing a row punches a hole
+    /// that stops a replay dead at the gap, whatever the row was. A client
+    /// catching up from an empty vector is served a delta of surviving rows,
+    /// reaches the hole, and buffers everything after it in the pending set
+    /// forever while believing it is current.
+    /// <para>
+    /// So the delta path is valid only for a client already at or past the
+    /// snapshot that truncation verified against; everyone else is served that
+    /// snapshot. Zero means never truncated, which keeps the delta path exactly
+    /// as it was for every document that has not been through a sweep — §8's
+    /// rule that a client one keystroke behind gets two operations rather than
+    /// five megabytes.
+    /// </para>
+    /// </remarks>
+    public long TruncatedThrough { get; set; }
 }
