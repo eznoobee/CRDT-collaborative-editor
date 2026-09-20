@@ -1,7 +1,7 @@
 # Phase 7b — the register, worked
 
 Tasks 7b.0 through 7b.11. Branch `phase-4-react-client`, head
-`146e3f97003e2421e014f6e16d32b3fe5d7bb236`.
+`684d4df6f1a366518ab35175d689c80a27fcf63a`.
 
 Phase 7b had no new feature. Its subject was the findings register itself: the
 rows earlier phases had opened and deferred, each of which had been written down
@@ -194,8 +194,8 @@ this exact commit. The job table it verified:
 
 | Workflow | Run | Jobs | Conclusion |
 |---|---|---|---|
-| CI | 35507504724 | 12 | success |
-| Mutation | 35507504726 | 1 | success |
+| CI | 35518900362 | 12 | success |
+| Mutation | 35518900360 | 1 | success |
 
 The expected job set is derived from `.github/workflows/` rather than taken from
 the status file, because a status file cannot be asked whether it is complete.
@@ -205,7 +205,16 @@ All eleven local gates passed on the same head: `workflows`, `format`,
 `breakdown`, `sabotage`, `seeding`, `tests`, `client`, `conformance`, `interop`,
 `e2e`, `mutation`.
 
-    PREFLIGHT PASSED for 146e3f97003e2421e014f6e16d32b3fe5d7bb236.
+    PREFLIGHT PASSED for 684d4df6f1a366518ab35175d689c80a27fcf63a.
+
+**It was run twice, and the second run is the one that counts.** The first
+passed on `146e3f9`, the head the phase's code landed on — but committing this
+report moved the head, and a preflight that verified the commit before the
+report is a preflight that never saw the report. The register edits closing rows
+6 and 7 are in that commit too. So the whole thing was re-run against
+`684d4df`: same two workflows, thirteen jobs, all eleven local gates. A
+preflight whose subject is one commit behind the thing being reported is the
+category of mistake it exists to catch.
 
 **One thing the preflight got wrong about its own environment**, recorded
 because it will recur: three local gates — `tests`, `interop`, `e2e` — failed on
