@@ -43,6 +43,11 @@ public sealed class InfrastructureMetrics
             "editor.snapshots.written",
             unit: "{snapshot}",
             description: "§6's periodic snapshots taken by the background sweep.");
+
+        LogRowsTruncated = meter.CreateCounter<long>(
+            "editor.gc.log_rows_truncated",
+            unit: "{row}",
+            description: "Operation-log rows removed for elements §5 collection had already collected.");
     }
 
     /// <summary>
@@ -65,4 +70,17 @@ public sealed class InfrastructureMetrics
     /// while age climbs says which.
     /// </remarks>
     public Counter<long> SnapshotsWritten { get; }
+
+    /// <summary>
+    /// Operation-log rows reclaimed behind a collected snapshot.
+    /// </summary>
+    /// <remarks>
+    /// The pair for <see cref="ElementsCollected"/>, and the one that says
+    /// whether collection reclaimed anything. Collection shrinks a snapshot,
+    /// which is a cache; until the rows go, nothing has actually been given
+    /// back. Elements collected climbing while this stays at zero means the
+    /// truncation sweep is not running or is finding no snapshot to verify
+    /// against — a state that reads as healthy on every other signal.
+    /// </remarks>
+    public Counter<long> LogRowsTruncated { get; }
 }

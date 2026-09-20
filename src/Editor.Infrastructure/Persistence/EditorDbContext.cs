@@ -109,6 +109,16 @@ public sealed class EditorDbContext(DbContextOptions<EditorDbContext> options)
             // The collector's batch order. Nulls first, so a document that has
             // never been collected is examined before one that has.
             entity.HasIndex(e => e.LastCollectedAt);
+
+            entity.Property(e => e.LastReclaimableAt).HasColumnName("last_reclaimable_at");
+
+            entity.Property(e => e.LastTruncatedAt).HasColumnName("last_truncated_at");
+
+            // The truncation sweep's queue: documents whose collection actually
+            // removed elements since the last truncation. Indexed on the stamp
+            // it orders by; last_truncated_at is only ever compared, never
+            // sorted on.
+            entity.HasIndex(e => e.LastReclaimableAt);
         });
 
         modelBuilder.Entity<DocumentMember>(entity =>

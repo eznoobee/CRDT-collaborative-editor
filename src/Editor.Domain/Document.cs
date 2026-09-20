@@ -41,4 +41,27 @@ public sealed class Document
     /// it records that the document was looked at.
     /// </remarks>
     public DateTimeOffset? LastCollectedAt { get; set; }
+
+    /// <summary>When a truncation sweep last examined this document.</summary>
+    /// <remarks>
+    /// Separate from <see cref="LastCollectedAt"/> and rotated the same way.
+    /// Two stamps rather than one because the two sweeps are allowed to run at
+    /// different rates: collection is the correctness half and can be
+    /// frequent, truncation is irreversible and reads a whole snapshot back
+    /// before it acts.
+    /// </remarks>
+    /// <summary>When collection last actually removed elements from this document.</summary>
+    /// <remarks>
+    /// <b>Not <see cref="LastCollectedAt"/>, and the difference is what makes
+    /// the truncation sweep terminate.</b> That one records that a sweep
+    /// <i>looked</i>, and is stamped whether or not anything was collected,
+    /// because that is what rotates the collector's batch. Truncation can only
+    /// remove what collection removed, so a queue keyed on "was looked at"
+    /// refills itself every collection sweep with documents that have nothing
+    /// to give — and the sweep spends every batch decoding their snapshots and
+    /// never reaches the documents that do.
+    /// </remarks>
+    public DateTimeOffset? LastReclaimableAt { get; set; }
+
+    public DateTimeOffset? LastTruncatedAt { get; set; }
 }

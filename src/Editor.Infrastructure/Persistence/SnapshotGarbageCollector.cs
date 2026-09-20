@@ -145,6 +145,14 @@ public sealed class SnapshotGarbageCollector : ISnapshotGarbageCollector
             .SaveCollectedSnapshotAsync(documentId, replica, serverSeq, cancellationToken)
             .ConfigureAwait(false);
 
+        // Stamped only here, after elements actually went, and deliberately not
+        // beside LastCollectedAt above: that one says a sweep looked, this one
+        // says there is something for truncation to reclaim. Writing both in
+        // the same place would collapse the distinction the truncation sweep's
+        // queue depends on.
+        document.LastReclaimableAt = _time.GetUtcNow();
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
         // Counted here, after the write, rather than by the caller: the count
         // and the bytes move together or the count is a lie, and a metric on
         // the hosted service would miss every other caller.

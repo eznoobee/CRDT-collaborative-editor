@@ -174,6 +174,24 @@ public static class PersistenceExtensions
         services.AddSingleton<TombstoneCollector>();
         services.AddHostedService(provider => provider.GetRequiredService<TombstoneCollector>());
 
+        // Row 30: collection's second half. Collection shrinks a snapshot,
+        // which is a cache of the replay; nothing is actually reclaimed until
+        // the rows go, and this is what removes them.
+        services.AddScoped<ILogTruncator, LogTruncator>();
+
+        services.AddOptions<LogTruncationOptions>()
+            .BindConfiguration(LogTruncationOptions.Section)
+            .Validate(
+                options => options.BatchSize > 0,
+                "A truncation sweep with an empty batch examines no documents and reports success.")
+            .Validate(
+                options => options.Interval > TimeSpan.Zero,
+                "A truncation sweep with a non-positive interval spins.")
+            .ValidateOnStart();
+
+        services.AddSingleton<LogTruncationSweeper>();
+        services.AddHostedService(provider => provider.GetRequiredService<LogTruncationSweeper>());
+
         // §6's periodic snapshot. Register row 28: the policy and the writer
         // were built and nothing called them, so these three lines are the
         // subsystem — everything below them already existed.
