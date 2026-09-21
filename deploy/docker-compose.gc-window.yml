@@ -1,0 +1,30 @@
+# §5's collection and §6's truncation, observable within a test's lifetime
+# (register row 33).
+#
+# Same reasoning as deploy/docker-compose.offline-window.yml and a different set
+# of timers. Collection cannot run until every replica that ever touched the
+# document is either up to date or retired, so this stack must retire quickly
+# as well as sweep quickly — a fast collector against a seven-day T_retire would
+# never collect anything, and would look exactly like collection not working.
+#
+# WHAT IS CHANGED. Five intervals and one threshold, all of them cadence rather
+# than behaviour. §5's four collection conditions, the truncation rule and the
+# catch-up decision are the product's and are untouched. Nothing here disables a
+# check or supplies an answer to one.
+services:
+  api:
+    environment:
+      # Retirement, so the stability frontier can advance past the clients this
+      # test connects and disconnects.
+      ReplicaRetirement__Retire: "00:00:15"
+      ReplicaRetirement__Heartbeat: "00:00:05"
+      ReplicaRetirement__Interval: "00:00:03"
+
+      # A snapshot has to exist before a log can be truncated past it, and
+      # before catch-up has anything to answer with.
+      Snapshots__OperationsPerSnapshot: "8"
+      Snapshots__Interval: "00:00:03"
+
+      # The two sweeps whose product-visible effect this suite observes.
+      TombstoneCollection__Interval: "00:00:03"
+      LogTruncation__Interval: "00:00:03"

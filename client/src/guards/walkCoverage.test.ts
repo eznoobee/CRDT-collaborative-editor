@@ -50,6 +50,7 @@ describe('the suites that run against Compose', () => {
     'vitest.walk.config.ts': { script: 'test:walk', runner: 'walk.sh' },
     'vitest.deployment.config.ts': { script: 'test:deployment', runner: 'deployment.sh' },
     'vitest.offline.config.ts': { script: 'test:offline', runner: 'offline-window.sh' },
+    'vitest.gc.config.ts': { script: 'test:gc', runner: 'gc-window.sh' },
   };
 
   /**
@@ -63,7 +64,7 @@ describe('the suites that run against Compose', () => {
    * is what stops the walk's `src/walk/**` include from swallowing it — which
    * is exactly how §7's deployment suite came to run inside the walk's job.
    */
-  const directories = ['src/walk', 'src/offline'];
+  const directories = ['src/walk', 'src/offline', 'src/gc'];
 
   function includesOf(config: string): string[] {
     const source = readFileSync(join(root, config), 'utf8');

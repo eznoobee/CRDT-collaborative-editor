@@ -6096,3 +6096,58 @@ here, by the same author two phases on, who wrote a Phase 9 task to implement
 the proposed remedy. Record what was measured and what was inferred from it as
 two different things, so the second can be re-examined without re-deriving the
 first.
+
+### 13.57 A gate written from one failure checks that failure, not its class
+
+`scripts/check-workflows.sh` exists because 3b.1 left two `working-directory:`
+keys on one step and every push from 3b.1 through 3b.8 was a startup failure —
+eight jobs' worth of checks not running for seven consecutive tasks, with
+nothing local going red. Its own header says so. It checks for duplicate
+mapping keys.
+
+**7b.12 broke the same workflow a different way and the gate said `ok`.**
+Splicing a new job in took the `run:` line of the step above it, leaving
+
+```yaml
+      - name: Breakdown fields
+  register:
+```
+
+a step with a name and no command. PyYAML parses that without complaint. GitHub
+does not: **every push from 7b.12 through 9.6 produced a run with zero jobs**,
+and the only visible tell is that the run list shows the workflow's *path*
+instead of its `name:`. Five tasks and two phase-level gates ran nowhere. The
+mutation workflow, which was untouched, kept running throughout — so the account
+was fine, the daemon was fine, and the failure was silent in the one place that
+matters.
+
+> **The gate was named for the class and written for the instance.** "Rejects a
+> workflow file GitHub's parser would reject" is its first line. What it
+> implemented was "rejects duplicate mapping keys", which is one member of that
+> class, and the member that had already happened.
+
+This is §13.19's shape — what defeats this guard without matching its pattern —
+asked about a guard rather than about production code, and not asked. The repair
+is two-part and only the second part generalises.
+
+**First, the missing checks:** every job has `runs-on` and a non-empty `steps`,
+and every step is exactly one of `run` or `uses`. That covers what has broken
+this repository twice and the adjacent shapes.
+
+**Second, and the part worth keeping: the gate now self-tests against both
+failures, kept as fixtures.** It refuses to run at all if either is accepted.
+A gate that silently stops rejecting is worse than no gate, because the green it
+prints is read as evidence — and this one printed `ok ci.yml: 15 jobs`, a number
+that sounds like it was counted from something checked.
+
+**The general rule for a gate written after an incident.** The incident gives
+the class, not the check. Before the gate is finished, ask what else GitHub — or
+whatever the authority is — would reject that this would accept, and write the
+fixture for it. And give the gate a self-test, because the failure mode of a
+check is not "it is wrong" but "it is silent", and nothing else in the build
+distinguishes a check that passes from one that no longer looks.
+
+**The cost here was verification, not correctness.** Nothing shipped broken; the
+work of five tasks was simply never confirmed by CI, and two phase reports would
+have certified a commit no job had examined. That is the failure §13.49 was
+written about, arriving through a different door.

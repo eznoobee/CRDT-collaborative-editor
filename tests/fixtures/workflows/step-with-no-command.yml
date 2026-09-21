@@ -1,0 +1,15 @@
+# 7b.12's failure, kept exactly (PROJECT_SPEC.md §12, §13.57).
+#
+# A job was spliced in above and took the `run:` line of the step before it.
+# GitHub rejects this: the run has zero jobs, no failing step to read, and its
+# name changes from the workflow's `name:` to its path. PyYAML parses it
+# happily, which is why scripts/check-workflows.sh printed "ok" for five tasks
+# while nothing ran.
+name: A step that lost its command
+on: [push]
+jobs:
+  breakdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Breakdown fields

@@ -161,6 +161,37 @@ export class InteropClient {
     return encodeOperations(operations);
   }
 
+  /**
+   * Builds a batch tombstoning the first `count` visible elements.
+   *
+   * @remarks
+   * Deletes rather than inserts because §5's collection rules only ever reach a
+   * tombstone, so a document with none is one where garbage collection is
+   * correctly a no-op — and register row 33's claim is about what collection
+   * does, which needs something to collect.
+   *
+   * The targets come from this replica's own visible order rather than from ids
+   * the caller remembered, so they are whatever the document actually contains
+   * at the moment of the call. The sequence numbers continue this replica's own
+   * counter, because §5's density rule admits no gaps.
+   */
+  buildDeletes(count: number): Uint8Array {
+    const replica = parseReplicaId(this.negotiated.replicaId);
+    const targets = this.current.visibleIds.slice(0, count);
+    if (targets.length < count) {
+      throw new Error(
+        `asked to delete ${count} elements but only ${targets.length} are visible; `
+        + 'the document is not what this test thinks it is',
+      );
+    }
+
+    return encodeOperations(targets.map((target) => ({
+      kind: 'delete' as const,
+      id: { replica, seq: this.seq++ },
+      target,
+    })));
+  }
+
   submit(batch: Uint8Array): Promise<SubmitResult> {
     return this.connection.invoke<SubmitResult>('SubmitAsync', {
       DocumentId: this.negotiated.documentId,

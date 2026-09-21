@@ -22,6 +22,8 @@ export default defineConfig({
       'src/walk/**',
       // Register row 31's suite, which brings up a stack of its own.
       'src/offline/**',
+      // Register row 33's, likewise.
+      'src/gc/**',
 
       // §8's measurements, which start a server, a browser and a thousand
       // sockets and take twenty minutes. `scripts/load.sh` runs them; nothing

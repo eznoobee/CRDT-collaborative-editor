@@ -349,6 +349,35 @@ jobs:
       - name: Offline-window discard
         run: ./scripts/offline-window.sh
 
+  gc-window:
+    name: §5's collection, seen through the product
+    runs-on: ubuntu-latest
+
+    # Register row 33. §10's counters for collection and truncation are served
+    # on an admin port the proxy deliberately does not forward, and publishing
+    # it to make a test possible would undo a §7 control in the artefact that
+    # ships. So this observes the consequence a client can see instead: once the
+    # log a delta would have been made of is collected and truncated, the same
+    # first-open request has to be answered with a snapshot.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      - name: Collection through the product
+        run: ./scripts/gc-window.sh
+
   breakdown:
     name: §12's required fields in every breakdown
     runs-on: ubuntu-latest
@@ -361,6 +390,8 @@ jobs:
       # deliberately malformed fixture, so a gate that stopped rejecting would
       # fail rather than go quiet.
       - name: Breakdown fields
+        run: ./scripts/check-breakdown.sh
+
   register:
     name: §13.50's register, agreeing with the breakdowns
     runs-on: ubuntu-latest

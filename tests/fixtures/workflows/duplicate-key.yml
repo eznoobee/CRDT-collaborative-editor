@@ -1,0 +1,14 @@
+# 3b.1's failure, kept (PROJECT_SPEC.md §12).
+#
+# Two `working-directory:` keys on one step. Every YAML library in common use
+# accepts this with the last value winning; GitHub Actions does not, and every
+# push from 3b.1 through 3b.8 was a startup failure.
+name: A step with a duplicate key
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci
+        working-directory: client
+        working-directory: server
