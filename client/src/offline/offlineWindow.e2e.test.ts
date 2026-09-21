@@ -120,48 +120,88 @@ describe("§9's offline-window discard, seen by a person", () => {
    * an in-flight request.
    *
    * @remarks
+   * <p>
    * Not a name this suite invented and not a class: it is the one `errorText`
    * Chromium emits for that condition, and it is what row 40's instrumentation
-   * finally named — `GET /me — net::ERR_NETWORK_CHANGED` on the first load,
-   * with the API serving throughout (its retirement sweep is in the same run's
-   * logs). A GitHub runner brings Docker's bridge network up while this suite's
-   * stack starts, and a request in flight across that moment dies here.
+   * named. Twice, on two different requests:
+   * </p>
+   * <pre>
+   * bdbf784  GET  /me         — net::ERR_NETWORK_CHANGED
+   * 7be8c7a  POST /documents  — net::ERR_NETWORK_CHANGED   (nginx logged 499)
+   * </pre>
+   * <p>
+   * <b>The second one corrected the first reading.</b> `bdbf784` was explained
+   * as a runner bringing up Docker's bridge network while this suite's stack
+   * starts, and a repair scoped to the sign-in prologue followed from that.
+   * `7be8c7a` got past the prologue — `GET /me` and `GET /documents` both
+   * answered 200 — and died on the next request, with nginx recording a 499
+   * because the client had gone. The stack was not still starting; it had been
+   * serving for a second.
+   * </p><p>
+   * <b>What both have in common is the browser, not the stack.</b> Each failure
+   * landed within the first two seconds of the browser's first navigation, and
+   * the API answered every request either side of it. That is the observable
+   * pattern, and it is as far as the evidence goes: why a GitHub runner's
+   * network changes at that moment is not something this repository can see.
+   * </p>
    */
   const NETWORK_CHANGED = 'net::ERR_NETWORK_CHANGED';
 
   /**
-   * Signs in, retrying only a load that died because the runner's network
-   * changed.
+   * How many times the arrangement may be rebuilt after a network change.
+   *
+   * @remarks
+   * The largest legitimate use is one — a single network change during a single
+   * arrangement. Three leaves two spare; a fourth would be a suite waiting on
+   * something that is not going to resolve.
+   */
+  const ATTEMPTS = 3;
+
+  function blames(error: unknown): boolean {
+    return failures.some((failure) => failure.includes(NETWORK_CHANGED))
+      || String(error).includes(NETWORK_CHANGED);
+  }
+
+  /**
+   * Everything up to the moment the link is taken away, retried only when the
+   * runner's network changed under it.
    *
    * @remarks
    * <p>
-   * <b>The narrowest thing that makes row 40's failure survivable</b>, and
-   * deliberately not a retry of the test. §13.29: name the specific thing you
-   * are trusting, never widen the class. Three conditions, all required — the
-   * failure is the sign-in prologue, before a single claim about §9 has been
-   * made; the browser recorded exactly `NETWORK_CHANGED`; and there have been
-   * fewer than three attempts. Any other error, or the same error anywhere
-   * after this point, fails the suite as before.
+   * <b>The boundary is `setOffline`, and it is a principled one rather than the
+   * line the last failure happened to be on.</b> Everything here is arrangement:
+   * sign in, make a document, reach `live`, type something and watch it drain.
+   * A failure in any of it means the property was never exercised. Everything
+   * after it — the offline transition, the wait past `T_retire`, the
+   * reconnection, §9's sentence — is the property, and a retry there could hide
+   * a real discard regression behind a second attempt. Nothing after this
+   * function retries, for any reason.
    * </p><p>
-   * <b>Why not further.</b> Everything after this line is the property under
-   * test — the offline transition, the wait past `T_retire`, the reconnection —
-   * and a retry there could hide a real discard failure behind a second
-   * attempt. This prologue asserts nothing; it gets a signed-in page or it does
-   * not.
+   * <b>The first attempt at this was scoped to the sign-in prologue</b>, because
+   * the one failure then on record was in the prologue. It was scoped to the
+   * evidence rather than to a boundary that means something, and the next CI run
+   * failed four requests later. Widening it now is not widening the class — the
+   * error is still exactly `NETWORK_CHANGED`, still required to have been
+   * reported by the browser, still bounded (§13.29). What changed is the span
+   * that counts as "the test has not started yet", which is a fact about this
+   * test and not about the failure.
    * </p><p>
-   * <b>It tolerates; it does not fix.</b> The cause is the runner's network,
-   * which this repository does not control. Recorded that way in row 40 rather
-   * than as a repair.
+   * <b>A fresh context per attempt</b>, so a retry is an arrangement rather than
+   * a continuation: a half-signed-in browser carrying a document that may or may
+   * not have been created is not a state any assertion below should run against.
    * </p>
    */
-  async function signIn(
-    page: Awaited<ReturnType<Walk['browsing']['open']>>['page'],
-    attempts = 3,
-  ): Promise<void> {
+  async function arrange(): Promise<{
+    context: Awaited<ReturnType<Walk['browsing']['open']>>['context'];
+    page: Awaited<ReturnType<Walk['browsing']['open']>>['page'];
+  }> {
     for (let attempt = 1; ; attempt++) {
-      // Cleared per attempt, so a stale entry from a previous one cannot
-      // authorise a retry for a cause that is no longer happening.
+      const { context, page } = await walk.browsing.open();
+
+      // Cleared per attempt, so a stale entry cannot authorise a retry for a
+      // cause that has stopped happening.
       failures.length = 0;
+      watch(page);
 
       try {
         await page.goto(walk.baseUrl);
@@ -172,17 +212,39 @@ describe("§9's offline-window discard, seen by a person", () => {
           () => document.querySelector('[data-testid="create"]') !== null,
           'the signed-in home page to offer a Create button');
 
-        return;
-      } catch (error) {
-        const blamed = failures.some((failure) => failure.includes(NETWORK_CHANGED))
-          || String(error).includes(NETWORK_CHANGED);
+        await page.fill('[data-testid="new-title"]', 'Written before the link went');
+        await page.click('[data-testid="create"]');
 
-        if (!blamed || attempt >= attempts) {
+        await until(
+          page,
+          () => /\/d\/[0-9a-fA-F-]{36}$/.test(window.location.pathname),
+          'the application to navigate to the document it created');
+
+        // The first vacuity guard: a session that was never established has
+        // nothing to lose, and its screen is indistinguishable from one that
+        // lost work silently.
+        await until(
+          page,
+          () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
+          "the session to reach 'live'");
+
+        await page.click('textarea');
+        await page.keyboard.type('sent while connected');
+
+        await until(
+          page,
+          () => document.querySelector('[data-testid="backlog"]') === null,
+          'the outbox to drain while connected');
+
+        return { context, page };
+      } catch (error) {
+        if (!blames(error) || attempt >= ATTEMPTS) {
           throw error;
         }
 
         console.warn(
-          `sign-in attempt ${attempt} died on ${NETWORK_CHANGED}; retrying (row 40).`);
+          `arrangement attempt ${attempt} died on ${NETWORK_CHANGED}; rebuilding it (row 40).`);
+        await context.close();
       }
     }
   }
@@ -200,33 +262,10 @@ describe("§9's offline-window discard, seen by a person", () => {
 
   it('tells the user what was lost, after being away longer than the window', async () => {
     walk.oidc.accounts.add('offline-walker');
-    const { context, page } = await walk.browsing.open();
-    watch(page);
 
-    await signIn(page);
-    await page.fill('[data-testid="new-title"]', 'Written before the link went');
-    await page.click('[data-testid="create"]');
-
-    await until(
-      page,
-      () => /\/d\/[0-9a-fA-F-]{36}$/.test(window.location.pathname),
-      'the application to navigate to the document it created');
-
-    // The first vacuity guard: a session that was never established has nothing
-    // to lose, and its screen is indistinguishable from one that lost work
-    // silently.
-    await until(
-      page,
-      () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
-      "the session to reach 'live'");
-
-    await page.click('textarea');
-    await page.keyboard.type('sent while connected');
-
-    await until(
-      page,
-      () => document.querySelector('[data-testid="backlog"]') === null,
-      'the outbox to drain while connected');
+    // Everything the property needs to be in place, and the last point at which
+    // a retry is legitimate. See `arrange`.
+    const { context, page } = await arrange();
 
     // The link goes. Not the server, and not the document: this is a person on
     // a train, and everything about the deployment stays up.

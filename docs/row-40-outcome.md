@@ -5,10 +5,11 @@ Row 40 was opened with a closing condition written before the answer was known:
 > Closes when that instrumentation has named the failing request and the cause
 > is either fixed or explained — not when a run happens to be green.
 
-It has named it. This is the explanation, and the part of it that is *not*
-fixed.
+It has named it, twice. **The second naming corrected the first explanation and
+the repair built on it**, which is why this document has two findings in it and
+why the row is not closed.
 
-## The evidence
+## Finding 1 — `bdbf784`: `GET /me`
 
 Commit `bdbf784` produced four CI runs (two workflows × the `push` and
 `pull_request` events). Thirty-one of thirty-two jobs passed. The one failure
@@ -21,76 +22,98 @@ The instrumentation added in 9.6's sixth iteration reported this:
 
 ```
 Error: waiting for the signed-in home page to offer a Create button timed out after 60000 ms.
---- url ---
-https://10.1.0.246:8444/
 --- requests the browser could not make ---
 GET https://10.1.0.246:8444/me — net::ERR_NETWORK_CHANGED
-console: Failed to load resource: net::ERR_NETWORK_CHANGED
 --- what the page showed ---
 Collaborative Editor
 
 Failed to fetch
 ```
 
-Everything before that line had been a guess. "Failed to fetch" is what a page
-says when a request did not complete; it names neither the request nor the
-reason, and two previous cycles were spent on the hypothesis that the stack was
-not up.
+`net::ERR_NETWORK_CHANGED` is Chromium's error for the host's network
+configuration changing underneath an in-flight request — not a timeout, not a
+refusal, not a TLS failure. The connection was live and the ground moved.
 
-## What it says
+**The reading taken at the time:** the suite brings up its own Compose stack on
+a GitHub runner while the runner's Docker creates a bridge network for it, and a
+request in flight across that moment dies here. A repair followed from that
+reading, scoped to the sign-in prologue, on the grounds that the prologue is
+where the failure was.
 
-**Three facts, all in that block.**
+## Finding 2 — `7be8c7a`: `POST /documents`, and the first reading was wrong
 
-1. **The request that failed is `GET /me`** — the identity call `bootstrap`
-   makes after the token is in hand. Not the document, not the hub, not the
-   issuer.
-2. **The reason is `net::ERR_NETWORK_CHANGED`.** That is Chromium's error for
-   the host's network configuration changing underneath an in-flight request —
-   an interface appearing or disappearing, a route table rewritten. It is not a
-   timeout, not a refusal, and not a TLS failure; the connection was live and
-   the ground moved.
-3. **The stack was serving.** The same failure block carries the API's own log,
-   and its retirement sweep is running throughout — one `UPDATE
-   document_replicas` per tick, for the whole window. And the page shell itself
-   had loaded from that same origin: the browser rendered "Collaborative
-   Editor" before the XHR died. A stack that is down does not serve the HTML
-   and then fail one request.
+The very next CI run failed again. The prologue passed this time; the retry was
+never needed:
 
-**The reading.** This suite brings up its own Compose stack on a GitHub runner,
-with its own overlay and its own port, while the runner's Docker is creating the
-bridge network for it. A request in flight across that moment is exactly what
-`ERR_NETWORK_CHANGED` describes. It is a property of the environment the suite
-starts in, not of §9's discard path — which is the part of the suite that has
-never once failed, on any run.
+```
+proxy-1 | "GET /"           200
+proxy-1 | "GET /assets/…js" 200
+proxy-1 | "GET /callback?…" 200
+proxy-1 | "GET /me"         200
+proxy-1 | "GET /documents"  200
+proxy-1 | "POST /documents" 499
+```
 
-**What would falsify it.** A recurrence carrying a different `errorText`, or one
-whose failed request is not on the prologue, is a different fault and belongs in
-a new row. The instrumentation now says which, without costing a cycle; that is
-what it was for.
+```
+Error: waiting for the application to navigate to the document it created timed out after 60000 ms.
+--- requests the browser could not make ---
+POST https://10.1.0.138:8444/documents — net::ERR_NETWORK_CHANGED
+```
+
+**Two things fall out of that, and both matter more than the first finding.**
+
+**The explanation was too tidy.** "Docker's bridge network coming up while the
+stack starts" makes the fault belong to startup, and the stack had been serving
+successfully for a second — five requests, all 200 — before this one died.
+nginx logged `499`, which is its code for the client going away mid-request: the
+server was there, waiting, and the browser left.
+
+**The repair was scoped to the evidence rather than to a boundary.** "The
+sign-in prologue" was not a line in this test's design; it was the place the one
+failure on record had happened. That is §13.65, and it is the more useful of the
+two findings: a scope chosen from the last stack trace looks principled, cites
+§13.29 correctly, and covers exactly one sample.
+
+## What actually survives both
+
+The API answered every request on either side of each failure. Both failures
+landed **within the first two seconds of the browser's first navigation** —
+`bdbf784` on request four, `7be8c7a` on request six, roughly one second apart in
+wall-clock terms. That is the observable pattern, and it is as far as the
+evidence reaches.
+
+**Why the runner's network changes at that moment is not visible from this
+repository.** The honest record stops there rather than keeping the tidier
+sentence, because the tidier sentence has already been falsified once.
+
+**What would falsify what is left:** a failure carrying a different `errorText`,
+or one landing well after the browser has settled, is a different fault and
+belongs in a new row.
 
 ## What was done
 
-`signIn` in `client/src/offline/offlineWindow.e2e.test.ts` retries the sign-in
-prologue, under three conditions, all required:
+`arrange` in `client/src/offline/offlineWindow.e2e.test.ts` now rebuilds the
+**whole arrangement** — a fresh context, sign in, create the document, reach
+`live`, type and watch the outbox drain — at most three times, and only when the
+browser recorded exactly `net::ERR_NETWORK_CHANGED`, with the recorded failures
+cleared per attempt so a stale one cannot authorise a retry.
 
-- the failure is in the prologue — `goto`, the account chooser, and the wait for
-  a Create button — which asserts nothing about §9;
-- the browser recorded exactly `net::ERR_NETWORK_CHANGED`, with the recorded
-  failures cleared per attempt so a stale one cannot authorise a retry; and
-- fewer than three attempts have been made.
+**The boundary is `setOffline`, and it can be defended without reference to
+which request failed last.** Everything before it is arrangement, and a failure
+there means the property was never exercised. Everything after it — the offline
+transition, the wait past `T_retire`, the reconnection, §9's sentence — is the
+property, and **nothing there retries for any reason**. That is the difference
+between a span and a memory (§13.65).
 
-Anything else fails as before, and so does the same error anywhere after the
-prologue. §13.29: name the specific thing you are trusting, never widen the
-class. A bare retry of the test — or of `until` — would have covered this
-failure and also covered a real discard regression, which is the trade this
-project does not make.
+The error is still named, still required to have been reported by the browser,
+still bounded at three attempts. Widening *the span* is not widening *the class*.
 
-## What was not done, and is now row 41
+## What was not done, and is row 41
 
 **This tolerates the fault; it does not fix it, and the product does not
 tolerate it at all.**
 
-The log shows the page settling on "Failed to fetch" and staying there.
+Both logs show the page settling on "Failed to fetch" and staying there.
 `bootstrap` (`client/src/app/bootstrap.ts`) wraps the whole sequence in one
 `try` and returns `{ kind: 'failed', message }`; nothing retries, and the
 composed app offers no way back except a manual reload. A user whose connection
@@ -98,13 +121,21 @@ blips during the two seconds after sign-in sees a dead end with the API healthy
 behind it.
 
 Nobody was looking for that. It fell out of a log line collected to explain a
-flaky test, and it is the more interesting of the two findings.
+flaky test.
 
-It is **not** fixed here. Phase 9 is the close-out and a new recovery path in the
-bootstrap sequence is product work with its own failure modes — a retry that
-loops on a genuine 401, a reload that re-enters the PKCE exchange. Row 41
-records it with the evidence attached.
+It is **not** fixed here. A new recovery path in the bootstrap sequence is
+product work with its own failure modes — a retry that loops on a genuine 401, a
+reload that re-enters the PKCE exchange. Row 41 records it with the evidence
+attached.
 
-The honest summary of the pair: **the suite now survives a transient network
-fault; the product still does not, and the suite's retry is not evidence that it
-does.** (§13.64.)
+## Why the row is still open
+
+The closing condition allows "explained". It is explained as far as the evidence
+goes, and the suite now tolerates it.
+
+**Closing it here would still be wrong.** The explanation on record twenty
+minutes ago was falsified by the next CI run, and a row closed on a reading with
+that track record, in a phase whose whole complaint about this suite was
+green-red-green, would be the thing the row exists to prevent. It closes when
+the rescoped suite has survived CI — or it names a third site and is written up
+honestly a third time.

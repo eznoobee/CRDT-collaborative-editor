@@ -177,14 +177,14 @@ breakdown and workflow gates. **The CI result for this commit is in the addendum
 below and is not asserted here**, because a report cannot state the outcome of a
 run on the commit that contains it before that run exists.
 
-**Row 31's suite was intermittent; 9.9 below says what it was.** It went green
-on the iteration that closed the row and failed on later commits at an earlier
-point, with the page reporting `Failed to fetch` while the API was demonstrably
-serving. That was never a reason to call the row open again — the run that
-closed it exercised the whole path and reported §9's sentence off the screen —
-but it was a reason not to claim a stable suite. The instrumentation has since
-named the cause, and the instability was in reaching the application rather than
-in anything §9 specifies.
+**Row 31's suite is intermittent; 9.9 below says what the instrumentation
+found.** It went green on the iteration that closed row 31 and failed on later
+commits at earlier points, with the page reporting `Failed to fetch` while the
+API was demonstrably serving. That was never a reason to call row 31 open again
+— the run that closed it exercised the whole path and read §9's sentence off the
+screen — but it is a reason not to claim a stable suite, and row 40 is still
+open. The instability is in arranging the test rather than in anything §9
+specifies; that much has held across every failure.
 
 Two new CI jobs, each with its own stack and its own config, because only a
 suite with a job of its own can be required by the preflight. The coverage gate
@@ -204,56 +204,72 @@ existing job — a guard passing while the new suite did not run.
   measured, not started.
 - **The unsent-work line's threshold and wording**, implemented and flagged.
 - **Row 38**, measured with its reversal condition, deliberately not fixed.
+- **Row 40**, still open: named twice, explained as far as the evidence reaches,
+  and not closed on a reading that the next CI run had already falsified once.
 - **Row 41**, opened by 9.9 below: a transient failure during `bootstrap` leaves
   the user on a dead page. Found in a CI log, not fixed here.
 - **Presence**, out of scope in §2.
 
 ---
 
-## 9.9 — row 40 closed, and the product gap its log line exposed
+## 9.9 — row 40, named twice, and still open
 
 Row 40 was the one row this phase opened, and it was opened with a closing
 condition that forbade the easy exit: *the instrumentation names the failing
 request and the cause is fixed or explained — not when a run happens to be
 green.*
 
-**It has named it.** `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for
-the host's network configuration changing underneath an in-flight request, with
-the page shell already rendered from that same origin and the API's retirement
-sweep in the same log block. A runner bringing up Docker's bridge network while
-the suite's own Compose stack starts. `bdbf784` isolates it about as cleanly as
-this can be isolated: **the same job passed in one run of that commit and failed
-in another** — identical tree, identical workflow, different event.
+**It has named it twice, and the second naming corrected the first.**
 
-Three cycles had been spent on the hypothesis that the stack was not up. It was
-up in every one of them.
+`bdbf784`: `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for the host's
+network configuration changing underneath an in-flight request. That commit
+isolates the intermittency about as cleanly as it can be isolated — **the same
+job passed in one run of it and failed in another**. The reading taken was that
+a runner brings up Docker's bridge network while the suite's own Compose stack
+starts, and a repair followed, scoped to the sign-in prologue.
 
-**The repair is in the suite and it is deliberately narrow.** `signIn` retries
-the sign-in prologue at most three times, and only when the browser recorded
-exactly that `errorText` — cleared per attempt, so a stale entry cannot
-authorise a retry for a cause that is no longer happening. The prologue asserts
-nothing about §9; the same error anywhere after it still fails the suite. A
-retry around `until`, or around the test, would have covered this and also
-covered a real discard regression (§13.29).
+`7be8c7a`, the very next run: `POST /documents — net::ERR_NETWORK_CHANGED`, with
+`GET /`, the bundle, `/callback`, `GET /me` and `GET /documents` all answered
+200 first and nginx logging a `499` because the client had gone. **The stack had
+been serving for a second.** The tidy explanation was wrong, and the repair
+built on it never fired.
 
-**And the log line answered a question nobody asked.** The page said
-`Failed to fetch` and stayed there for the full sixty seconds. `bootstrap`
-wraps sign-in, the token exchange, `GET /me` and the document open in one `try`
-and returns `{ kind: 'failed', message }`; nothing retries, and the app offers
-no way back but a manual reload. A user whose connection blips for one request
-gets a dead page with a healthy API behind it.
+> **§13.65 is the finding, and it is worth more than the fix.** The error was
+> named; the *span* was not. "The sign-in prologue" was never a line in this
+> test's design — it was the place the one failure on record had happened.
+> Scoping a repair to where the last failure landed looks principled, cites
+> §13.29 correctly, and covers exactly one sample.
 
-That is **row 41**, and it is not fixed here. A retry inside the bootstrap
-sequence has its own failure modes — looping on a genuine 401, re-entering the
-PKCE exchange on reload — and it needs a test that tells those apart, not a
-patch on the close-out day.
+The repair now covers **the arrangement** — a fresh context, sign in, create the
+document, reach `live`, type and watch the outbox drain — rebuilt at most three
+times, on exactly that `errorText`. The boundary is `setOffline`, and it can be
+defended without reference to which request failed last: before it the property
+has not been exercised; after it, nothing retries for any reason.
 
-> The pairing is the finding, and it is §13.64. The suite now survives a
-> transient network fault. The product still does not. A green suite is evidence
-> about the suite.
+**What survives of the explanation** is narrower and less satisfying than what
+was written first. Both failures land within the first two seconds of the
+browser's first navigation, and the API answers on either side of each. Why a
+runner's network changes there is not visible from this repository, and the
+record says so rather than keeping the better sentence.
 
-`docs/row-40-outcome.md` carries the evidence, the reading, and what would
-falsify it.
+**And the log answered a question nobody asked.** Both times the page said
+`Failed to fetch` and stayed there. `bootstrap` wraps sign-in, the token
+exchange, `GET /me` and the document open in one `try` and returns
+`{ kind: 'failed', message }`; nothing retries, and the app offers no way back
+but a manual reload. A user whose connection blips for one request gets a dead
+page with a healthy API behind it. That is **row 41**, deliberately not fixed on
+the close-out day — a retry inside the bootstrap sequence can loop on a genuine
+401 or re-enter the PKCE exchange, and it needs a test that tells those apart
+(§13.64).
+
+**Row 40 is not closed.** The explanation on record before `7be8c7a` was
+falsified by the next CI run, and a row closed on a reading with that record — in
+a phase whose complaint about this suite was precisely green-red-green — would
+be the thing the row exists to prevent. It closes when the rescoped suite has
+survived CI, or it is written up honestly a third time.
+
+`docs/row-40-outcome.md` carries both findings, the evidence for each, and what
+would falsify what is left.
 
 ---
 
@@ -282,11 +298,12 @@ than an unknown one. Everything the report asserts about code, measurements and
 register rows is in `82c92de` and was verified there.
 
 **One qualification, stated because it would otherwise be read out of the green.**
-Row 31's suite was green, red, green across its first four runs. 9.9 above says
-what that was — `net::ERR_NETWORK_CHANGED` on the first `GET /me`, from the
-runner's network rather than from anything §9 specifies — and the prologue now
-retries on exactly that error and nothing else. **What this does not do is prove
-the suite stable.** The retry is narrow by design, so a recurrence carrying a
-different `errorText` is a different fault and will fail loudly, which is the
-intended behaviour and not a regression in this one. The instrumentation will
-name it.
+Row 31's suite has been intermittent since it was written, and **row 40 is still
+open**. 9.9 above says what the instrumentation found —
+`net::ERR_NETWORK_CHANGED`, twice, on two different requests, both within the
+first two seconds of the browser's first navigation and both with the API
+answering on either side. The arrangement now rebuilds on exactly that error and
+nothing else. **What this does not do is prove the suite stable**, and the first
+version of this paragraph claimed more than that on an explanation the next CI
+run falsified. A recurrence carrying a different `errorText` is a different
+fault and will fail loudly, which is intended. The instrumentation will name it.

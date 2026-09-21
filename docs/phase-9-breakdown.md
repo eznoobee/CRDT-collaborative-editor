@@ -499,14 +499,23 @@ and hides the finding.** A retry makes the red go away, and a red that has gone
 away is indistinguishable from a fault that has been understood. Three guards,
 all structural rather than intentions:
 
-1. The retry names one `errorText` and one phase of the test. A retry of `until`
+1. The retry names one `errorText` and one span of the test. A retry of `until`
    would cover a real discard regression, which is the property the suite
    exists for (§13.29).
-2. The recorded failures are cleared per attempt, so a stale entry cannot
+2. The span is a boundary rather than a memory. **The first attempt at this got
+   it wrong**: it retried the sign-in prologue, because the prologue was where
+   the one failure on record had landed, and the next CI run failed four
+   requests later. The span is now everything before `setOffline` — the
+   arrangement — which can be defended without reference to which request failed
+   last (§13.65).
+3. The recorded failures are cleared per attempt, so a stale entry cannot
    authorise a retry for a cause that has stopped happening.
-3. The explanation is written before the repair is committed, with a stated
+4. The explanation is written before the repair is committed, with a stated
    falsifier, so a different `errorText` later is a new fault rather than more
    of this one.
+5. **The row does not close on the explanation.** It closes when the rescoped
+   suite has survived CI. An explanation that the next run falsifies is exactly
+   what happened once already.
 
 **Second risk, and it is what the task actually found.** The evidence for the
 flake is also evidence about the product, and only one of the two is red. The
@@ -518,8 +527,8 @@ row 41 would have moved that out of view rather than out of the system (§13.64)
 whose network blips once during sign-in. They are the reason row 41 exists: the
 suite now retries for them and the product does not.
 
-**§12 Q2 — does anything invoke this, or only the test?** `signIn` is the
-suite's own prologue and is invoked by the case. The product path it exercises —
+**§12 Q2 — does anything invoke this, or only the test?** `arrange` is the
+suite's own setup and is invoked by the case. The product path it exercises —
 `bootstrap`, `GET /me` — is the one the application runs on every load.
 
 **§12 Q3 — in this comparison, does each side decide for itself?** The retry
@@ -527,9 +536,12 @@ condition is Chromium's `errorText`, reported by the browser, not a string this
 suite chose from its own failure. The explanation is checked against the API's
 own log in the same block, which the suite does not write.
 
-**§12 Q4 — lifecycle.** The retry's attempt counter is bounded at three and
-resets nothing across cases; each case opens its own context.
+**§12 Q4 — lifecycle.** The attempt counter is bounded at three and resets
+nothing across cases. Each attempt opens a **fresh** browser context and closes
+the one it is abandoning, so a retry is an arrangement rather than a
+continuation — a half-signed-in browser holding a document that may or may not
+exist is not a state the assertions below should run against.
 
 **§12 Q5 — limit.** Three attempts. The largest legitimate use is one: a single
-network change during a single page load. Three is two spare, and a fourth would
-be a suite waiting on something that is not going to resolve.
+network change during a single arrangement. Three is two spare, and a fourth
+would be a suite waiting on something that is not going to resolve.
