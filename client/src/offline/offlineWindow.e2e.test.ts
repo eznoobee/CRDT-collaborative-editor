@@ -108,7 +108,10 @@ describe("§9's offline-window discard, seen by a person", () => {
     await page.goto(walk.baseUrl);
     await pick(page, 'offline-walker');
 
-    await page.waitForSelector('[data-testid="create"]', { timeout: 60_000 });
+    await until(
+      page,
+      () => document.querySelector('[data-testid="create"]') !== null,
+      'the signed-in home page to offer a Create button');
     await page.fill('[data-testid="new-title"]', 'Written before the link went');
     await page.click('[data-testid="create"]');
 

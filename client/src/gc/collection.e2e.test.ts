@@ -150,11 +150,15 @@ describe("§5's collection, seen by a client that was not there", () => {
 
     // AFTER. The operations the delta was made of are gone, so the same
     // question has to be answered differently.
+    // §13.23 on a remote runner: "it did not happen" costs an iteration and
+    // teaches nothing. The three sweepers log what they did, so the failure
+    // carries their lines — which of retirement, snapshotting, collection and
+    // truncation stopped is then readable from the run rather than guessed at.
     expect(
       after.snapshot ?? null,
       `after ${attempt} probes ${probeEvery / 1000}s apart, a first-open client was still `
       + 'answered with a delta — collection or truncation did not happen, or did not reach '
-      + 'this document',
+      + `this document.\n--- what the stack logged ---\n${walk.logs().slice(-6_000)}`,
     ).not.toBeNull();
 
     // And the document is the same document. A snapshot of state collection has

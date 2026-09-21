@@ -684,7 +684,11 @@ describe("§5's pending-set bound, overflowed (register row 36)", () => {
 
     expect(sync.state).toBe('stopped');
     expect(sync.problem?.code).toBe(REJECTION.pendingOverflow);
-  });
+    // Twice past a bound of ten thousand is twenty thousand operations built,
+    // encoded and decoded, which is seconds of real work rather than a hang.
+    // vitest's default five is enough on a quiet machine and not on a shared
+    // runner; the assertions are untouched.
+  }, 30_000);
 });
 
 describe("§5's pending-set bound in seconds (register row 36, second half)", () => {
