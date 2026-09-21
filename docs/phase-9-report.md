@@ -182,9 +182,10 @@ found.** It went green on the iteration that closed row 31 and failed on later
 commits at earlier points, with the page reporting `Failed to fetch` while the
 API was demonstrably serving. That was never a reason to call row 31 open again
 — the run that closed it exercised the whole path and read §9's sentence off the
-screen — but it is a reason not to claim a stable suite, and row 40 is still
-open. The instability is in arranging the test rather than in anything §9
-specifies; that much has held across every failure.
+screen — but it was a reason not to claim a stable suite. Row 40 closed on the
+rebuild being exercised, not on a green run (9.9). The instability is in
+arranging the test rather than in anything §9 specifies; that much has held
+across every failure.
 
 Two new CI jobs, each with its own stack and its own config, because only a
 suite with a job of its own can be required by the preflight. The coverage gate
@@ -204,15 +205,13 @@ existing job — a guard passing while the new suite did not run.
   measured, not started.
 - **The unsent-work line's threshold and wording**, implemented and flagged.
 - **Row 38**, measured with its reversal condition, deliberately not fixed.
-- **Row 40**, still open: named twice, explained as far as the evidence reaches,
-  and not closed on a reading that the next CI run had already falsified once.
 - **Row 41**, opened by 9.9 below: a transient failure during `bootstrap` leaves
   the user on a dead page. Found in a CI log, not fixed here.
 - **Presence**, out of scope in §2.
 
 ---
 
-## 9.9 — row 40, named twice, and still open
+## 9.9 — row 40: three wrong answers, each found by running something
 
 Row 40 was the one row this phase opened, and it was opened with a closing
 condition that forbade the easy exit: *the instrumentation names the failing
@@ -262,14 +261,40 @@ the close-out day — a retry inside the bootstrap sequence can loop on a genuin
 401 or re-enter the PKCE exchange, and it needs a test that tells those apart
 (§13.64).
 
-**Row 40 is not closed.** The explanation on record before `7be8c7a` was
-falsified by the next CI run, and a row closed on a reading with that record — in
-a phase whose complaint about this suite was precisely green-red-green — would
-be the thing the row exists to prevent. It closes when the rescoped suite has
-survived CI, or it is written up honestly a third time.
+**And then the rescoped repair went green without ever running.** `01db35b`
+passed all four runs, thirty-two jobs. The offline job took its usual eighty
+seconds and its log carried no `arrangement attempt` warning:
+`net::ERR_NETWORK_CHANGED` did not occur that time, which is what green means on
+an intermittent fault most of the time.
 
-`docs/row-40-outcome.md` carries both findings, the evidence for each, and what
-would falsify what is left.
+> **§13.66.** Two runs of evidence that the fault was *absent* were about to be
+> written up as evidence that the repair *works*. The closing condition this row
+> carried — "closes when the rescoped suite has survived CI" — could not tell
+> those apart. 7.5 has the precedent: `SyncController` emptied the outbox and
+> reported nothing, because the branch that reported correctly had been
+> unreachable since Phase 4 while every suite around it passed. An unfired retry
+> is that shape in another costume.
+
+So the decision moved to `client/src/offline/networkChange.ts`, where the
+**default** client suite can make it fire. Nine cases, and the two carrying the
+weight are not the happy path: a *different* error must not be absorbed — else
+every other assertion is satisfied by a function that retries unconditionally,
+which would also absorb a real regression in §9's discard — and the attempt cap
+must be real, because "it recovered" alone is satisfied by `while (true)`. Three
+sabotages confirmed each guard fails on its own.
+
+**That took the directory exclusion with it.** `src/offline/**` was excluded
+from the default run because the suite there brings up a stack; these tests need
+nothing. Leaving them excluded would have been §13.52 exactly — the committed
+conformance traces, lost for nine phases because they shared a directory with
+the generated ones. The pattern now names the e2e file.
+
+**Row 40 is closed**, on the repair being exercised rather than on a green run —
+the green run is what exposed the gap. Three things were wrong along the way and
+every one was found by running something rather than by reading it: the
+explanation, the scope, and the closing condition.
+
+`docs/row-40-outcome.md` carries all three findings with their evidence.
 
 ---
 
@@ -298,12 +323,12 @@ than an unknown one. Everything the report asserts about code, measurements and
 register rows is in `82c92de` and was verified there.
 
 **One qualification, stated because it would otherwise be read out of the green.**
-Row 31's suite has been intermittent since it was written, and **row 40 is still
-open**. 9.9 above says what the instrumentation found —
-`net::ERR_NETWORK_CHANGED`, twice, on two different requests, both within the
-first two seconds of the browser's first navigation and both with the API
-answering on either side. The arrangement now rebuilds on exactly that error and
-nothing else. **What this does not do is prove the suite stable**, and the first
-version of this paragraph claimed more than that on an explanation the next CI
-run falsified. A recurrence carrying a different `errorText` is a different
-fault and will fail loudly, which is intended. The instrumentation will name it.
+9.9 above says what the instrumentation found — `net::ERR_NETWORK_CHANGED`,
+twice, on two different requests, both within the first two seconds of the
+browser's first navigation and both with the API answering on either side. The
+arrangement now rebuilds on exactly that error and nothing else, and the default
+suite proves the rebuild does what it claims. **What none of that does is prove
+the suite stable.** Two earlier versions of this paragraph claimed more than the
+evidence carried — once on an explanation the next run falsified, once on green
+runs that never exercised the repair. A recurrence carrying a different
+`errorText` is a different fault and will fail loudly, which is intended.

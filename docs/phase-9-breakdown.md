@@ -513,9 +513,14 @@ all structural rather than intentions:
 4. The explanation is written before the repair is committed, with a stated
    falsifier, so a different `errorText` later is a new fault rather than more
    of this one.
-5. **The row does not close on the explanation.** It closes when the rescoped
-   suite has survived CI. An explanation that the next run falsifies is exactly
-   what happened once already.
+5. **The row does not close on the explanation, and it does not close on a
+   green run either.** Both were tried. The explanation was falsified by the
+   next run; the green run after the rescope never executed the rebuild, so it
+   proved the fault absent rather than the repair working (§13.66). It closes
+   when the rebuild itself is exercised by a suite that can make it fire.
+6. **The rebuild's decision is reachable from the default suite.** An unfired
+   retry is 7.5's unreachable reporting branch in another costume, and the
+   directory exclusion that would have hidden it is §13.52's.
 
 **Second risk, and it is what the task actually found.** The evidence for the
 flake is also evidence about the product, and only one of the two is red. The

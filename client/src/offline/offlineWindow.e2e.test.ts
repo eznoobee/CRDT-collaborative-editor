@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startWalk, type Walk } from '../walk/harness';
 import { pick } from '../e2e/browser';
+import { NETWORK_CHANGED, rebuildingOnNetworkChange } from './networkChange';
 
 /**
  * §9's offline-window discard, in a browser, against the deployed stack
@@ -116,54 +117,7 @@ describe("§9's offline-window discard, seen by a person", () => {
   }
 
   /**
-   * Chromium's error when the host's network configuration changes underneath
-   * an in-flight request.
-   *
-   * @remarks
-   * <p>
-   * Not a name this suite invented and not a class: it is the one `errorText`
-   * Chromium emits for that condition, and it is what row 40's instrumentation
-   * named. Twice, on two different requests:
-   * </p>
-   * <pre>
-   * bdbf784  GET  /me         — net::ERR_NETWORK_CHANGED
-   * 7be8c7a  POST /documents  — net::ERR_NETWORK_CHANGED   (nginx logged 499)
-   * </pre>
-   * <p>
-   * <b>The second one corrected the first reading.</b> `bdbf784` was explained
-   * as a runner bringing up Docker's bridge network while this suite's stack
-   * starts, and a repair scoped to the sign-in prologue followed from that.
-   * `7be8c7a` got past the prologue — `GET /me` and `GET /documents` both
-   * answered 200 — and died on the next request, with nginx recording a 499
-   * because the client had gone. The stack was not still starting; it had been
-   * serving for a second.
-   * </p><p>
-   * <b>What both have in common is the browser, not the stack.</b> Each failure
-   * landed within the first two seconds of the browser's first navigation, and
-   * the API answered every request either side of it. That is the observable
-   * pattern, and it is as far as the evidence goes: why a GitHub runner's
-   * network changes at that moment is not something this repository can see.
-   * </p>
-   */
-  const NETWORK_CHANGED = 'net::ERR_NETWORK_CHANGED';
-
-  /**
-   * How many times the arrangement may be rebuilt after a network change.
-   *
-   * @remarks
-   * The largest legitimate use is one — a single network change during a single
-   * arrangement. Three leaves two spare; a fourth would be a suite waiting on
-   * something that is not going to resolve.
-   */
-  const ATTEMPTS = 3;
-
-  function blames(error: unknown): boolean {
-    return failures.some((failure) => failure.includes(NETWORK_CHANGED))
-      || String(error).includes(NETWORK_CHANGED);
-  }
-
-  /**
-   * Everything up to the moment the link is taken away, retried only when the
+   * Everything up to the moment the link is taken away, rebuilt only when the
    * runner's network changed under it.
    *
    * @remarks
@@ -173,37 +127,57 @@ describe("§9's offline-window discard, seen by a person", () => {
    * sign in, make a document, reach `live`, type something and watch it drain.
    * A failure in any of it means the property was never exercised. Everything
    * after it — the offline transition, the wait past `T_retire`, the
-   * reconnection, §9's sentence — is the property, and a retry there could hide
-   * a real discard regression behind a second attempt. Nothing after this
+   * reconnection, §9's sentence — is the property, and a rebuild there could
+   * hide a real discard regression behind a second attempt. Nothing after this
    * function retries, for any reason.
    * </p><p>
    * <b>The first attempt at this was scoped to the sign-in prologue</b>, because
    * the one failure then on record was in the prologue. It was scoped to the
    * evidence rather than to a boundary that means something, and the next CI run
-   * failed four requests later. Widening it now is not widening the class — the
+   * failed four requests later. Widening it is not widening the class — the
    * error is still exactly `NETWORK_CHANGED`, still required to have been
-   * reported by the browser, still bounded (§13.29). What changed is the span
-   * that counts as "the test has not started yet", which is a fact about this
-   * test and not about the failure.
+   * reported by the browser, still bounded (§13.29, §13.65).
    * </p><p>
-   * <b>A fresh context per attempt</b>, so a retry is an arrangement rather than
-   * a continuation: a half-signed-in browser carrying a document that may or may
-   * not have been created is not a state any assertion below should run against.
+   * <b>The decision lives in `./networkChange`</b>, which the default suite
+   * exercises. Two CI runs went green after this was written without ever
+   * executing it, and an unfired retry is 7.5's unreachable reporting branch in
+   * another costume.
    * </p>
    */
   async function arrange(): Promise<{
     context: Awaited<ReturnType<Walk['browsing']['open']>>['context'];
     page: Awaited<ReturnType<Walk['browsing']['open']>>['page'];
   }> {
-    for (let attempt = 1; ; attempt++) {
-      const { context, page } = await walk.browsing.open();
+    type Opened = Awaited<ReturnType<Walk['browsing']['open']>>;
 
-      // Cleared per attempt, so a stale entry cannot authorise a retry for a
-      // cause that has stopped happening.
-      failures.length = 0;
-      watch(page);
+    return rebuildingOnNetworkChange<Opened, Opened>({
+      open: async () => {
+        const opened = await walk.browsing.open();
+        watch(opened.page);
+        return opened;
+      },
 
-      try {
+      recorded: () => failures,
+
+      // Without this a single early network change would authorise a rebuild
+      // for every later failure of any kind.
+      reset: () => {
+        failures.length = 0;
+      },
+
+      // A fresh context per attempt, so a rebuild is an arrangement rather than
+      // a continuation: a half-signed-in browser holding a document that may or
+      // may not exist is not a state the assertions below should run against.
+      abandon: (opened) => opened.context.close(),
+
+      note: (attempt, total) => {
+        console.warn(
+          `arrangement attempt ${attempt} of ${total} died on ${NETWORK_CHANGED}; rebuilding it (row 40).`);
+      },
+
+      build: async (opened) => {
+        const { page } = opened;
+
         await page.goto(walk.baseUrl);
         await pick(page, 'offline-walker');
 
@@ -236,17 +210,9 @@ describe("§9's offline-window discard, seen by a person", () => {
           () => document.querySelector('[data-testid="backlog"]') === null,
           'the outbox to drain while connected');
 
-        return { context, page };
-      } catch (error) {
-        if (!blames(error) || attempt >= ATTEMPTS) {
-          throw error;
-        }
-
-        console.warn(
-          `arrangement attempt ${attempt} died on ${NETWORK_CHANGED}; rebuilding it (row 40).`);
-        await context.close();
-      }
-    }
+        return opened;
+      },
+    });
   }
 
   beforeAll(async () => {

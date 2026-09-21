@@ -21,7 +21,15 @@ export default defineConfig({
       'src/e2e/**',
       'src/walk/**',
       // Register row 31's suite, which brings up a stack of its own.
-      'src/offline/**',
+      //
+      // THE FILE, NOT THE DIRECTORY — §13.52's lesson, applied before it cost
+      // nine phases this time. `networkChange.ts` is row 40's bounded rebuild,
+      // and two CI runs went green without ever executing it. Excluding its
+      // tests along with the stack-bearing suite beside them would leave the
+      // default run with no opinion about whether the repair works, which is
+      // exactly how the committed traces were lost. Do not widen this back to
+      // `src/offline/**`.
+      'src/offline/offlineWindow.e2e.test.ts',
       // Register row 33's, likewise.
       'src/gc/**',
 

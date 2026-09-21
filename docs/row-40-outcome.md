@@ -5,9 +5,14 @@ Row 40 was opened with a closing condition written before the answer was known:
 > Closes when that instrumentation has named the failing request and the cause
 > is either fixed or explained — not when a run happens to be green.
 
-It has named it, twice. **The second naming corrected the first explanation and
-the repair built on it**, which is why this document has two findings in it and
-why the row is not closed.
+It has named it, twice — and then a green CI run exposed a third problem in the
+closing condition itself. **Three findings, in the order they arrived**: the
+first explanation was falsified by the second sighting, the first repair was
+scoped to the last stack trace rather than to a boundary (§13.65), and the first
+two green runs proved the fault absent rather than the repair working (§13.66).
+
+The row is closed at the end of this document, on the repair being exercised —
+not on a run that happened to be green.
 
 ## Finding 1 — `bdbf784`: `GET /me`
 
@@ -128,14 +133,60 @@ product work with its own failure modes — a retry that loops on a genuine 401,
 reload that re-enters the PKCE exchange. Row 41 records it with the evidence
 attached.
 
-## Why the row is still open
+## Finding 3 — `01db35b` was green, and that proved nothing
 
-The closing condition allows "explained". It is explained as far as the evidence
-goes, and the suite now tolerates it.
+The rescoped rebuild went out as `01db35b`. All four CI runs passed;
+thirty-two jobs, nothing red.
 
-**Closing it here would still be wrong.** The explanation on record twenty
-minutes ago was falsified by the next CI run, and a row closed on a reading with
-that track record, in a phase whose whole complaint about this suite was
-green-red-green, would be the thing the row exists to prevent. It closes when
-the rescoped suite has survived CI — or it names a third site and is written up
-honestly a third time.
+**The rebuild never fired.** The offline job took its usual eighty seconds and
+its log carries no `arrangement attempt` warning — `net::ERR_NETWORK_CHANGED`
+did not happen that time, which is what green means on an intermittent fault
+most of the time.
+
+> Two runs of evidence that the fault was **absent** were about to be written up
+> as evidence that the repair **works**. The closing condition this row carried
+> — "closes when the rescoped suite has survived CI" — could not tell those
+> apart, and was satisfied by a run that demonstrated neither.
+
+That is §13.66, and it has a precedent on file in this project: 7.5 found
+`SyncController` emptying the outbox and reporting nothing, because the branch
+that reported correctly had been unreachable since Phase 4 while every suite
+around it passed. An unfired retry is the same shape.
+
+## What finally closed it
+
+The decision moved to `client/src/offline/networkChange.ts`, where the
+**default** client suite can create the conditions on demand. Nine cases, and
+the two that carry the weight are not the happy path:
+
+- **a different error is not absorbed** — without this, every other assertion is
+  satisfied by a function that retries unconditionally, which would also absorb
+  a real regression in §9's discard, the one thing this suite exists to catch;
+- **the attempt cap is real** — "it recovered" alone is satisfied by
+  `while (true)`;
+- and recorded failures are forgotten between attempts, so one early network
+  change cannot authorise a rebuild for every later failure of any kind.
+
+Three sabotages confirmed each guard fails on its own: retrying
+unconditionally breaks two cases, dropping the reset breaks one, removing the
+cap breaks the third.
+
+**The directory exclusion came with it.** `src/offline/**` was excluded from the
+default run because the suite there brings up a stack of its own; these tests
+need nothing. Leaving them excluded alongside it would have been §13.52 exactly
+— the committed conformance traces, lost for nine phases because they shared a
+directory with the generated ones. The pattern now names the e2e file.
+
+The e2e suite composes the same module rather than holding a second copy.
+
+## Row 40 is closed
+
+Named, explained as far as the evidence reaches, repaired, and **the repair
+itself exercised by a suite that can make it fire**. Not closed on a green run;
+the green run is what exposed the gap.
+
+Three things were wrong along the way and each was found by running something
+rather than by reading it: the explanation (falsified by the second sighting),
+the scope (§13.65), and the closing condition (§13.66).
+
+**Row 41 remains open**, and is the finding worth more than the flake.
