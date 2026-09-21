@@ -67,21 +67,29 @@ public sealed class PeriodicSnapshotTests
         Assert.Equal(0, sweeper.Sweeps);
         Assert.Equal(0, await SnapshotSeqAsync(factory, documentId));
 
-        // Repeatedly, not once. A sweep takes a bounded batch ranked by how far
-        // behind each document is, and this database holds every other test's
-        // documents too — so one tick is not guaranteed to reach this one.
-        // Each sweep closes the gaps it writes, so successive ticks get here.
+        // WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT (register row
+        // 37). The claim here is §13.41's: the hosted service ticks on its own
+        // and writes snapshots that nobody asked for. It is NOT that *this*
+        // document is one of them.
+        //
+        // It used to be. `SnapshotSweeper` ranks laggards globally and sweeps a
+        // bounded batch, this database is shared with every other test's
+        // documents, and so "my document was swept" is really "no other test
+        // left `BatchSize` documents further behind" — a claim about the rest of
+        // the suite, asserted by this one. It was held up by widening the batch
+        // to 64, which is tuning a control until the red goes away (§13.37), and
+        // 7b.7's large documents turned it red once and green on a re-run, which
+        // is the signature.
+        //
+        // The batch override is gone with it: nothing here depends on the batch
+        // being wide, so the test runs against the product's own default.
+        // Whether a *given* document reaches head is asserted by
+        // `A_due_document_is_snapshotted_at_head`, through the scoped entry
+        // point, where no ranking is involved.
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-        long snapshotSeq = 0;
         while (DateTime.UtcNow < deadline)
         {
-            // Both, not either. The row is written inside the sweep and the
-            // counter is incremented after it returns, so breaking on the row
-            // alone catches the window in between and reads a counter that is
-            // still zero — which looks exactly like the defect this exists to
-            // catch.
-            snapshotSeq = await SnapshotSeqAsync(factory, documentId);
-            if (snapshotSeq > 0 && sweeper.Written > 0)
+            if (sweeper.Written > 0)
             {
                 break;
             }
@@ -91,15 +99,44 @@ public sealed class PeriodicSnapshotTests
         }
 
         Assert.True(sweeper.Sweeps > 0, "the sweeper never ran on its own timer");
+
+        // `Written` counts writes, not documents examined, and the sweep stops
+        // at the first document that is not due — so a non-zero count means the
+        // timer reached a due document and snapshotted it without being asked.
+        // This test contributes such a document itself, so the pool is non-empty
+        // by construction whatever else the suite left behind.
         Assert.True(
-            snapshotSeq > 0,
-            $"swept {sweeper.Sweeps} times and wrote {sweeper.Written} snapshots, "
-            + "none of them for this document");
+            sweeper.Written > 0,
+            $"the sweeper ran {sweeper.Sweeps} times on its own timer and wrote nothing");
+    }
+
+    [Fact]
+    public async Task A_due_document_is_snapshotted_at_head()
+    {
+        // The other half of what the timer test used to claim, with the ranking
+        // taken out: one named document, the scoped entry point, no batch and
+        // no competition. Nothing about this can be changed by what another test
+        // left in the shared database.
+        _fixture.RequireBoth();
+        await using var factory = Configured();
+
+        var documentId = await BehindAsync(factory, "snap-head-owner", "snap-head");
+
+        Assert.Equal(0, await SnapshotSeqAsync(factory, documentId));
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var snapshotter = scope.ServiceProvider.GetRequiredService<IPeriodicSnapshotter>();
+
+        Assert.True(
+            await snapshotter.SnapshotDocumentAsync(documentId, TestContext.Current.CancellationToken),
+            "a document past the threshold was not snapshotted");
 
         // At the head of the log, not somewhere behind it. A snapshot stamped
         // at a sequence its state does not contain drops every operation in
         // between, silently, and only on the next load.
-        Assert.Equal(await HeadSeqAsync(factory, documentId), snapshotSeq);
+        Assert.Equal(
+            await HeadSeqAsync(factory, documentId),
+            await SnapshotSeqAsync(factory, documentId));
     }
 
     [Fact]
@@ -110,10 +147,21 @@ public sealed class PeriodicSnapshotTests
 
         var documentId = await BehindAsync(factory, "snap-same-owner", "snap-same");
 
-        var written = await factory.Services.GetRequiredService<SnapshotSweeper>()
-            .SweepAsync(TestContext.Current.CancellationToken);
-
-        Assert.True(written > 0, "the sweep wrote nothing, so this compares two replays");
+        // Through the scoped entry point, not the ranked sweep (register row
+        // 37). What this test is about is whether a snapshot loads the document
+        // a replay does; which documents a bounded global sweep happens to
+        // select is a different claim, made by
+        // `The_sweeper_snapshots_on_its_own_timer_without_anyone_calling_it`,
+        // and importing it here made this test's result depend on how far
+        // behind every other test's documents were.
+        await using (var sweepScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(
+                await sweepScope.ServiceProvider
+                    .GetRequiredService<IPeriodicSnapshotter>()
+                    .SnapshotDocumentAsync(documentId, TestContext.Current.CancellationToken),
+                "nothing was snapshotted, so this compares two replays");
+        }
 
         // Asserted BEFORE the comparison. Without a snapshot, LoadAsync replays
         // the log and agrees with the replay below for reasons that have
@@ -151,6 +199,54 @@ public sealed class PeriodicSnapshotTests
             SnapshotSerializer.Serialize(replayed),
             SnapshotSerializer.Serialize(throughSnapshot));
         Assert.Equal(0, throughSnapshot.PendingCount);
+    }
+
+    [Fact]
+    public async Task A_due_document_is_snapshotted_even_when_the_batch_is_full_of_worse_ones()
+    {
+        // REGISTER ROW 37, MADE DETERMINISTIC. The row says these tests depended
+        // on what other tests happened to leave in the shared database: the
+        // sweep ranks laggards globally and takes a bounded batch, so a document
+        // was snapshotted only if fewer than `BatchSize` others were further
+        // behind. That condition arrived by accident in 7b.7 — red once, green
+        // on a re-run — and the fix at the time was to widen the batch.
+        //
+        // So it is constructed here rather than waited for. Enough documents to
+        // fill the product's default batch, each left further behind than the
+        // one under test, and the claim still has to hold. Under the old
+        // arrangement this is precisely the shape that failed.
+        _fixture.RequireBoth();
+        await using var factory = Configured();
+
+        var documentId = await BehindAsync(factory, "snap-crowd-owner", "snap-crowd");
+        var mine = await HeadSeqAsync(factory, documentId);
+
+        // One more than the default batch, each with a longer log than mine, so
+        // every one of them outranks it.
+        for (var i = 0; i < 17; i++)
+        {
+            var other = await DocumentSetup.DocumentAsync(factory, $"snap-crowd-{i}-owner");
+            await DocumentSetup.GrantAsync(factory, other, $"snap-crowd-{i}", Role.Editor);
+
+            await using var client = await DocumentClient.JoinAsync(factory, $"snap-crowd-{i}", other);
+            Assert.Null((await client.SubmitAsync(
+                client.Writer.Type(new string('b', Threshold * 4)))).Code);
+
+            Assert.True(
+                await HeadSeqAsync(factory, other) > mine,
+                "the competing document is not further behind, so this proves nothing");
+        }
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var snapshotter = scope.ServiceProvider.GetRequiredService<IPeriodicSnapshotter>();
+
+        Assert.True(
+            await snapshotter.SnapshotDocumentAsync(documentId, TestContext.Current.CancellationToken),
+            "a due document went unsnapshotted because other documents were further behind");
+
+        Assert.Equal(
+            await HeadSeqAsync(factory, documentId),
+            await SnapshotSeqAsync(factory, documentId));
     }
 
     [Fact]
@@ -206,11 +302,12 @@ public sealed class PeriodicSnapshotTests
             {
                 ["Snapshots:OperationsPerSnapshot"] = Threshold.ToString(System.Globalization.CultureInfo.InvariantCulture),
 
-                // Wider than the collector's, because this database is shared
-                // with every other test's documents and the sweep is ranked
-                // rather than rotated: a narrow batch would spend every tick on
-                // whichever documents happen to be furthest behind.
-                ["Snapshots:BatchSize"] = "64",
+                // No `BatchSize` override. It used to be widened to 64 so that
+                // a ranked sweep over a shared database would reach this test's
+                // own document — which is tuning a control until a test stops
+                // failing (§13.37's second half), and register row 37 is what it
+                // cost. Nothing here depends on the batch width any more, so the
+                // product's own default is what runs.
             },
             configure: clock is null ? null : services => services.AddSingleton<TimeProvider>(clock));
 
