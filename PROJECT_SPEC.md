@@ -6053,3 +6053,46 @@ it is that thing rather than assuming — and if the mechanism can be exhibited
 deterministically, exhibit it. Where it cannot be, §13.53's rule applies
 instead: measure the baseline, because a failure that was already there is not
 evidence about the change that revealed it.
+
+### 13.56 A remedy proposed from a diagnosis inherits the diagnosis
+
+7b.4 measured target 2 and found that 54% of a typist's keystrokes never reached
+the server. It localised the shortfall correctly — three parties, writer 1000,
+server 457, reader 456, so the text was in the writer's outbox — and then
+explained it: `SyncController.drain` submits one batch at a time and awaits each,
+so a client's send rate is capped at one batch per round trip, and with §8's
+50 ms batching window inside every round trip that cap falls below eight
+characters a second. It proposed coalescing queued batches, and recorded the
+remedy as not taken because §8 requires a decision rather than a reflex.
+
+**Everything in that paragraph is true except the last inference, and the remedy
+came from the part that was wrong.** 9.4 removed the 50 ms window, which by that
+reasoning should have raised the cap fivefold. Target 2 got *worse*: 275 of 1,000
+instead of 457, while the latency of the keystrokes that did arrive improved from
+a p50 of 94 ms to 24 ms.
+
+A discriminator settled it — hold the writer, the typing rate and the serial
+`drain` fixed, remove only the background load, and **1,000 of 1,000 arrive with
+a p99 of 30 ms**. The send loop was never a cap. The constraint is that the
+writer's browser applies every peer's operations at a cost that grows with the
+document, on the same thread that would run the send loop's continuations.
+
+> **A remedy is not evidence about the problem, and it is much easier to check
+> than the diagnosis it came from.** "Coalesce the batches" is concrete, cheap
+> and reviewable, and it would have been implemented, measured, found not to
+> help, and then explained — probably by looking for a second bottleneck rather
+> than by doubting the first.
+
+**What would have caught it earlier is what caught it now: varying one thing.**
+7b.4 reported a single load shape. Target 1 already had the habit — its "one
+document each" run exists precisely to separate two explanations of one number —
+and target 2 had no counterpart. A measurement that runs at one point on the
+curve cannot distinguish "this component is the limit" from "this box, running
+this arrangement, is".
+
+**The corollary for a register.** Row entries carry explanations, and those
+explanations get read later as established fact by whoever picks the row up —
+here, by the same author two phases on, who wrote a Phase 9 task to implement
+the proposed remedy. Record what was measured and what was inferred from it as
+two different things, so the second can be re-examined without re-deriving the
+first.

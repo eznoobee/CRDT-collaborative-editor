@@ -56,12 +56,49 @@ public sealed class DocumentLoadMeasurement(PostgresFixture fixture, ITestOutput
 
     /// <summary>Cold loads measured.</summary>
     /// <remarks>
+    /// <para>
     /// §8 states a threshold rather than a percentile for this target, so what
     /// is reported is the distribution over repeated cold loads with the count
-    /// attached. Twenty is few — the p99 of twenty is the worst of twenty, and
-    /// the report says so rather than dressing it as a tail.
+    /// attached.
+    /// </para><para>
+    /// <b>Twenty until 9.5, which is not enough to choose a statistic with.</b>
+    /// 7b.4 reported p50 432 ms inside the target and p95 979 ms outside it, and
+    /// said plainly that a p99 of twenty is the worst of twenty. The decision
+    /// §8 now needs — whether this target is read at p50, p95 or max — cannot be
+    /// taken on a p95 with one observation above it. Two hundred puts ten above
+    /// the p95, which is the standard target 1's thousand-sample runs already
+    /// use, and the deciles below show the shape rather than three points on it.
+    /// </para><para>
+    /// Overridable so a slower machine can still run the suite; the default is
+    /// what the reported figure uses.
+    /// </para>
     /// </remarks>
-    private const int Loads = 20;
+    private static readonly int Loads =
+        int.TryParse(Environment.GetEnvironmentVariable("EDITOR_LOAD_DOCUMENT_LOADS"), out var configured)
+            && configured > 0
+            ? configured
+            : 200;
+
+    /// <summary>Every tenth percentile, so the distribution's shape is visible.</summary>
+    /// <remarks>
+    /// Three percentiles describe a distribution only if you already know its
+    /// shape. The choice between reading this target at p50, p95 or max turns on
+    /// whether the tail is a few outliers or a second mode, and those look
+    /// identical from p50/p95/p99 alone.
+    /// </remarks>
+    private static string Deciles(List<double> samples)
+    {
+        var sorted = samples.Order().ToArray();
+        var parts = new List<string>();
+        for (var decile = 0; decile <= 10; decile++)
+        {
+            var at = Math.Min(sorted.Length - 1, (int)Math.Round((decile / 10.0) * (sorted.Length - 1)));
+            parts.Add(string.Create(
+                CultureInfo.InvariantCulture, $"p{decile * 10}={sorted[at]:F0}"));
+        }
+
+        return string.Join(' ', parts);
+    }
 
     private void Report(string line)
     {
@@ -198,6 +235,7 @@ public sealed class DocumentLoadMeasurement(PostgresFixture fixture, ITestOutput
             $"  document   {StressElements:N0} elements, {live:N0} live, "
             + $"{StressElements - live:N0} tombstones, {TailOperations} operations of tail"));
         Report($"  load ms    {loads}");
+        Report($"  deciles ms {Deciles(samples)}");
         Report($"  gc pause   {Percentiles.Of(pauses)}");
         Report($"  generator  {utilisation}");
         Report(string.Create(

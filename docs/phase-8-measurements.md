@@ -284,14 +284,152 @@ count is asserted inside the loop, which is what caught it.
 
 ---
 
+## Targets 2 and 4, re-measured for 9.5's decisions
+
+### Target 2 · **still missed, and 7b.4's explanation was wrong**
+
+`Release · f2c79cd · node v22.22.2 · Xeon 2.10GHz × 4 · 15.7 GiB`
+
+| | keystrokes reaching the server | matched p50 | p95 | p99 | host busy |
+|---|---|---|---|---|---|
+| 7b.4, 50 ms window | 457 / 1000 | 94 ms | 9,540 ms | 31,801 ms | not measured |
+| 9.4's adaptive flushing | **275 / 1000** | **24 ms** | 2,581 ms | 51,164 ms | 71 % of 4 cores |
+| 9.5 discriminator, 4 editors | **1000 / 1000** | 16 ms | 26 ms | **30 ms** | 23 % of 4 cores |
+
+**The prediction was that a faster round trip would raise the send rate. It
+fell.** The server got faster on every axis and fewer keystrokes reached it —
+275 against 457 — while the latency of those that did improved sharply. That
+pair only makes sense if the constraint is not where 7b.4 put it.
+
+**7b.4's recorded explanation:** *at 20 concurrent editors, one client cannot
+submit as fast as a person types, because `SyncController.drain` submits one
+batch at a time and awaits each.* It proposed coalescing queued batches as the
+remedy.
+
+**The discriminator disproves it.** Hold the writer, the typing rate, the
+keystroke count and the serial `drain` fixed, and remove only the background
+load: **1,000 of 1,000 arrive, p99 30 ms, five times inside a target that was
+missed by two orders of magnitude.** The same one-batch-per-round-trip loop is
+not a cap at all. What changed is how much work the writer's own browser was
+doing for everyone else.
+
+**Where it actually goes.** The writer's browser applies every peer's
+operations — nineteen editors at eight a second is about 150 a second — and
+`Replica.text` walks the whole document (`inOrder()`) on every change, which the
+editor then re-renders. The document grows past 20,000 elements during the run,
+so per-operation cost grows with it. The main thread that would run `drain`'s
+continuations is the one doing that work.
+
+Two things follow that are worth stating separately.
+
+**The p50 of 24 ms is conditioned on arrival and is not evidence of health.**
+Only keystrokes that reached the reader have a latency at all; the 725 that
+never left the outbox contribute nothing to the percentile. The distribution
+improves as the failure worsens, which is the shape §13.22 warns about in a
+different setting.
+
+**The host figure exists now because §8 required it and this harness never had
+it.** 71 % of four cores is not saturation, so it does not by itself indict the
+box — and it cannot see a single browser main thread pegged at one core, which
+is what the discriminator says is happening. It is reported because §8's second
+rule says a result without it is not one, not because it settles this.
+
+#### Decided, and rejected
+
+**Rejected: coalescing queued batches in `drain`.** It was the remedy 7b.4
+proposed and the measurement says it addresses nothing — the serial loop
+delivers 1,000 of 1,000 when the browser has capacity. It would also complicate
+§9's byte-identical retry rule for a refused batch, which is a real constraint,
+in exchange for no measured gain.
+
+**Rejected: raising the target, or narrowing its scenario.** Nothing here shows
+150 ms to be unreachable; the discriminator shows 30 ms at four editors.
+
+**Recorded as missed, with the cause corrected**, and the remaining work named:
+the client's per-operation cost is a function of document size, and the fix is
+incremental rendering rather than a change to the sync loop. That is a project,
+not a close-out task — §8 allows a recorded miss with a decision, and this is
+one.
+
+**Implemented and flagged for decision: the unsent-work line.** §8's own report
+carried the sentence *the UI says `live`, with no problem, the whole time*. A
+person typing would see their own text and nothing to say that most of it was
+going nowhere. `backlogMessage` now names the backlog once it passes eight
+queued batches — past anything ordinary typing produces, because `drain` keeps
+one or two queued at a time, and not zero because an indicator that flickers
+constantly is one people stop reading. **The threshold and the wording are the
+part to review.**
+
+---
+
+### Target 4 · **the distribution, and what it argues**
+
+`Release · f2c79cd · .NET 10.0.11 · Xeon 2.10GHz × 4 · 10 GiB`, 600,000
+elements (100,000 live, 500,000 tombstones), snapshot plus 480 operations of
+tail.
+
+```
+load ms    n=200 min=176.43 p50=308.84 p95=557.86 p99=745.21 max=763.08
+deciles ms p0=176 p10=209 p20=240 p30=267 p40=286 p50=310 p60=326
+           p70=350 p80=384 p90=490 p100=763
+gc pause   n=200 min=0.00 p50=101.36 p95=261.55 p99=432.99 max=518.21
+```
+
+**n = 200, against 7b.4's 20**, because the decision asked for is which
+statistic to read and a p95 over twenty samples has one observation above it.
+Two hundred puts ten there, the same standard target 1's runs already use.
+
+**The numbers improved by raising the count**, which is worth naming: p50 432 →
+309, p95 979 → 558, p99 1,917 → 745. Nothing about the code changed. Twenty cold
+loads were substantially measuring JIT and pool warm-up and amortising it over
+twenty samples; two hundred amortises it over two hundred. §8's third rule is
+usually read as "a small sample makes the tail meaningless"; this is the other
+half of it — a small sample can make the whole distribution wrong.
+
+**The shape argues for p95, which is where the prior already was.** The deciles
+rise smoothly from 176 to 384 through the first eighty per cent and then turn:
+490 at p90, 763 at the worst. That is one mode with a right tail, not two
+populations, so there is no second cluster for a max to be picking out and no
+hidden bimodality for a p50 to be hiding. The case for reading it elsewhere
+would have to come from the shape and the shape does not make it.
+
+- **p50 (309 ms)** passes with room and describes a load most users get.
+- **p90 (490 ms)** passes by ten milliseconds.
+- **p95 (558 ms)** **misses by 12 %**.
+- **max (763 ms)** is the worst of two hundred and is not a stable number: it
+  moves with whatever else the box is doing.
+
+**So adopting the prior turns 7b.4's "qualified pass" into a recorded miss**,
+which is the honest direction for a stricter statistic to move a result. About
+nine loads in ten are inside 500 ms; one in twenty is beyond 558 ms.
+
+GC pause is measured rather than guessed and remains about a third of a typical
+load at p50. It does not explain the tail: the worst pause is 518 ms against a
+worst load of 763 ms, and the p90 knee sits where no pause figure does.
+
+---
+
 ## What this leaves
 
 | Target | Result | The decision it needs |
 |---|---|---|
-| 1 · receive → broadcast p99 | missed, 234 ms vs 25 ms | §8's target or §8's 50 ms batching window — they contradict |
-| 2 · keystroke → render p99 | missed; 54% never sent | whether `drain` coalesces, and whether the UI shows a backlog |
+| 1 · receive → broadcast p99 | 234 ms → **54.7 ms** after 9.4's adaptive flushing; still missed against 25 ms, p50 now 10.1 ms | **taken:** §8's batching becomes adaptive. **open:** whether the target reads at p95, where it passes and where this harness can support the claim |
+| 2 · keystroke → render p99 | missed; 72% never sent, and 7b.4's explanation of why was wrong | **taken:** coalescing rejected — the discriminator shows the send loop is not the cap. **open:** the unsent-work line's threshold and wording, implemented and flagged |
 | 3 · 1,000 connections | passed, 285 MiB | none |
-| 4 · document load | p50 in, tail out | whether the target is a p50 or a max |
+| 4 · document load | at n=200: p50 309 ms in, **p95 558 ms out by 12 %** | **recommended:** read it at p95, which the prior held and the distribution's single mode supports — making this a recorded miss rather than 7b.4's qualified pass |
+
+**That paragraph was written after 7b.4 and 9.5 disproved half of it.** It is
+kept rather than edited, with the correction beneath, because a superseded
+conclusion that quietly vanishes leaves no record that it was ever believed —
+and this one was acted on.
+
+> **The correction.** The window did sit inside the measured segment, and
+> removing it moved target 1 from 234 ms to 54.7 ms. It did *not* cap the
+> client's send loop: with the window gone, target 2 got worse, and a
+> discriminator holding everything fixed but the background load delivered
+> 1,000 of 1,000 keystrokes through the same serial loop. Target 2's constraint
+> is the writer's own browser applying everyone else's operations at a cost that
+> grows with the document. The two targets were not one finding.
 
 Targets 1 and 2 are one architectural finding: **the batching window sits inside
 both the measured segment and the client's serial send loop.** Neither is a bug

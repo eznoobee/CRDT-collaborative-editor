@@ -1,0 +1,14 @@
+§8 target 2 — p99 client keystroke → remote client render < 150 ms
+  build      Release · f2c79cd · node v22.22.2 · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 15.7 GiB
+  load       20 editors (2 browsers, 18 protocol clients at 8/s)
+  typed      1000 keystrokes over 125.0s
+  arrived    writer holds 1000 marks, reader holds 274 of 1000 typed
+  writer     state=live problem=(none)
+  reader     state=live problem=(none)
+  server     holds 275 of 1000 marks, read by a third client catching up from scratch
+  api log    (nothing notable)
+  matched    275 of 1000 keystrokes seen at both ends
+  latency ms n=275 min=9.00 p50=24.00 p95=2581.00 p99=51164.00 max=330131.00
+  host       71 % of 4 cores busy while typing
+  generator  4 % of 4 cores in this process (server and browsers are not in it)
+  error bar  reader polls every 2 ms, so each sample carries up to +2 ms

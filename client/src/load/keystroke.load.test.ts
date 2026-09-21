@@ -49,7 +49,19 @@ import { cpuBetween, describe as describeProvenance, percentiles, provenance, sa
  */
 describe("§8's keystroke-to-render target", () => {
   /** §8's stated load. */
-  const EDITORS = 20;
+  /**
+   * §8's twenty, overridable for one discriminator and nothing else.
+   *
+   * @remarks
+   * 9.5 needed to tell two explanations apart for a shortfall that got *worse*
+   * after the server got faster: the send loop's one-batch-per-round-trip cap,
+   * or the writer browser's main thread being consumed applying everyone else's
+   * broadcasts. Holding the writer, the rate and the keystroke count fixed and
+   * removing only the background load separates them — the same trick target 1
+   * uses with one document per editor. §8's own figure is the default and the
+   * override is not used by `scripts/load.sh`.
+   */
+  const EDITORS = Number(process.env.EDITOR_LOAD_EDITORS ?? 20);
 
   /** Of those, the ones that are real browsers. */
   const BROWSERS = 2;

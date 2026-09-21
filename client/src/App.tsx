@@ -6,6 +6,7 @@ import { SignOut } from './app/SignOut';
 import type { DocumentApi, Identity } from './app/api';
 import { Editor } from './editor/Editor';
 import { describeWindow, offlineWindow } from './editor/offlineWindow';
+import type { SyncState } from './editor/SyncController';
 import type { Bootstrap } from './app/bootstrap';
 import type { OpenDocument } from './app/openDocument';
 
@@ -94,6 +95,54 @@ function Shell(props: { children: React.ReactNode }): React.JSX.Element {
   );
 }
 
+/**
+ * Queued batches at which the outbox is worth mentioning (§8 target 2, §13.13).
+ *
+ * @remarks
+ * <p>
+ * <b>The measurement that asked for this.</b> §8's target 2 run has a person
+ * typing at eight characters a second alongside nineteen other editors, and
+ * 725 of their 1,000 keystrokes never reached the server — they sat in this
+ * outbox. The line the report carries is the reason this exists: <i>the UI says
+ * `live`, with no problem, the whole time</i>. A person would see their own
+ * text, because local edits apply locally, and nothing at all to say that most
+ * of it was going nowhere.
+ * </p><p>
+ * <b>Eight, because a healthy outbox is nearly empty.</b> `SyncController.drain`
+ * sends one batch per round trip and a round trip is tens of milliseconds, so
+ * even a fast typist leaves at most a batch or two queued at any moment. Eight
+ * is past anything ordinary typing produces and far below the point at which
+ * the backlog is minutes of work. It is deliberately not zero: an indicator
+ * that flickers on every keystroke is one people learn to ignore, which would
+ * make it worse than nothing.
+ * </p><p>
+ * <b>Shown only while `live`.</b> Offline already says so, and has its own
+ * window countdown; a second message about unsent work there would be saying
+ * the same thing twice.
+ * </p><p>
+ * This is a report, not a fix. What 9.5 measured is that the backlog builds
+ * because the writer's own browser cannot keep up with applying everyone else's
+ * operations, and telling the user is the part that belongs in a close-out.
+ * </p>
+ */
+const VISIBLE_BACKLOG = 8;
+
+/**
+ * What to tell the user about unsent work, or null to say nothing.
+ *
+ * @remarks
+ * A function rather than a condition inside the JSX so the rule can be tested
+ * without rendering the whole document view. The rule is the part with a
+ * decision in it; the `<p>` is not.
+ */
+export function backlogMessage(state: SyncState, queued: number): string | null {
+  if (state !== 'live' || queued < VISIBLE_BACKLOG) {
+    return null;
+  }
+
+  return `${queued} edits not sent yet.`;
+}
+
 /** The editor and everything the user has to be told (§9, §13.13). */
 function Document(props: {
   open: OpenDocument;
@@ -124,6 +173,10 @@ function Document(props: {
       {sync.problem === null
         ? null
         : <p role="alert" data-testid="problem">{describe(sync.problem.code, sync.problem.lost)}</p>}
+      {(() => {
+        const backlog = backlogMessage(sync.state, sync.pending.length);
+        return backlog === null ? null : <p data-testid="backlog">{backlog}</p>;
+      })()}
       {sync.state === 'offline' && syncedAt !== null
         ? (
           <p data-testid="offline-window">
