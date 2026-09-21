@@ -175,12 +175,116 @@ public sealed class PropagationLatencyMeasurement
         }
     }
 
-    private async Task MeasureAsync(
+    /// <summary>
+    /// Samples per run for the repeatability measurement.
+    /// </summary>
+    /// <remarks>
+    /// Twenty editors × 500 batches is ten thousand, which puts a hundred
+    /// observations above the p99 instead of twelve. That is the whole of the
+    /// fix: 9.4 measured 36.6 ms and 71.4 ms for the same code minutes apart,
+    /// a spread wider than the distance to the target, and a percentile drawn
+    /// from twelve points is a sample of the worst twelve rather than a
+    /// description of the tail.
+    /// </remarks>
+    private const int BatchesPerEditorForRepeatability = 500;
+
+    /// <summary>Runs whose agreement is required before the target is judged.</summary>
+    private const int RepeatedRuns = 5;
+
+    /// <summary>
+    /// The tolerance, stated before the measurement rather than after it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Repeated runs agree when the spread of their p99s — highest minus lowest
+    /// — is at most this fraction of the median p99. Twenty per cent is chosen
+    /// against what the number is for: §8 asks whether a p99 is under 25 ms, and
+    /// a measurement whose own spread is a fifth of its value can answer that
+    /// wherever it sits, except within a fifth of the threshold. What it cannot
+    /// do is what 9.4's did, where the spread was larger than the quantity.
+    /// </para><para>
+    /// <b>Written down before the run, deliberately.</b> A tolerance chosen after
+    /// seeing the numbers is not a tolerance; it is a description of them.
+    /// </para>
+    /// </remarks>
+    private const double AgreementTolerance = 0.20;
+
+    /// <summary>
+    /// §8's target 1, judged only once repeated runs agree about it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists.</b> 9.4 reported target 1 as missed at 54.7 ms and
+    /// could not support the claim: two runs of the same code minutes apart gave
+    /// 36.6 ms and 71.4 ms at the same offered rate. §8's own third rule is that
+    /// a percentile needs enough samples to mean what it says, and twelve
+    /// observations above the p99 is not enough. The response to that is not to
+    /// read a different percentile — the p95 was stable, and reading it would
+    /// have turned a miss into a pass, which is choosing the statistic after
+    /// seeing which one passes. It is to measure the p99 properly.
+    /// </para><para>
+    /// So: five runs, ten thousand samples each, and the target is judged only
+    /// if the runs agree within <see cref="AgreementTolerance"/>. If they do
+    /// not, this says so and judges nothing, because a number that will not
+    /// repeat cannot be compared to a threshold.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Receive_to_broadcast_enqueue_p99_repeated_until_it_agrees()
+    {
+        var runs = new List<Percentiles>(RepeatedRuns);
+        for (var run = 1; run <= RepeatedRuns; run++)
+        {
+            runs.Add(await MeasureAsync(
+                string.Create(CultureInfo.InvariantCulture, $"repeatability {run} of {RepeatedRuns}"),
+                PacedBatchesPerSecondPerEditor,
+                assertTarget: false,
+                batchesPerEditor: BatchesPerEditorForRepeatability));
+        }
+
+        var p99s = runs.Select(r => r.P99).Order().ToArray();
+        var lowest = p99s[0];
+        var highest = p99s[^1];
+        var median = p99s[p99s.Length / 2];
+        var spread = (highest - lowest) / median;
+
+        Report("§8 target 1 — repeatability of the p99");
+        Report(string.Create(
+            CultureInfo.InvariantCulture,
+            $"  runs       {RepeatedRuns} × {Editors} editors × {BatchesPerEditorForRepeatability} batches "
+            + $"at {PacedBatchesPerSecondPerEditor}/s each"));
+        Report(string.Create(
+            CultureInfo.InvariantCulture,
+            $"  p99 ms     {string.Join(", ", p99s.Select(v => v.ToString("F1", CultureInfo.InvariantCulture)))}"));
+        Report(string.Create(
+            CultureInfo.InvariantCulture,
+            $"  spread     {spread * 100:F0} % of the median ({median:F1} ms), tolerance {AgreementTolerance * 100:F0} %"));
+
+        var agree = spread <= AgreementTolerance;
+        Report(agree
+            ? string.Create(CultureInfo.InvariantCulture,
+                $"  verdict    the runs agree; §8's target 1 is "
+                + $"{(median < 25 ? "MET" : "MISSED")} at a median p99 of {median:F1} ms against 25 ms")
+            : "  verdict    the runs do not agree, so nothing is judged (§8's third rule)");
+
+        // Reported, not asserted. §8: a missed target is a recorded miss and a
+        // decision. What IS asserted is that the measurement is one — a spread
+        // wider than the tolerance means this cannot answer the question, and
+        // that is a defect in the harness rather than a result about the server.
+        Assert.True(
+            agree,
+            $"the p99 does not repeat: {string.Join(", ", p99s.Select(v => v.ToString("F1", CultureInfo.InvariantCulture)))} ms, "
+            + $"a spread of {spread * 100:F0} % against a tolerance of {AgreementTolerance * 100:F0} %. "
+            + "A percentile that will not repeat cannot be compared to a threshold.");
+    }
+
+    private async Task<Percentiles> MeasureAsync(
         string label,
         double batchesPerSecondPerEditor,
         bool assertTarget,
         bool documentPerEditor = false,
-        int? windowMs = null)
+        int? windowMs = null,
+        int? batchesPerEditor = null)
     {
         LoadGate.Require();
         _fixture.RequireBoth();
@@ -239,7 +343,8 @@ public sealed class PropagationLatencyMeasurement
 
             await Task.WhenAll(clients.Select(async client =>
             {
-                for (var batch = 0; batch < BatchesPerEditor; batch++)
+                var batches = batchesPerEditor ?? BatchesPerEditor;
+                for (var batch = 0; batch < batches; batch++)
                 {
                     // Paced against the start of the run rather than by sleeping
                     // after each submission: sleeping adds the server's own
@@ -273,7 +378,7 @@ public sealed class PropagationLatencyMeasurement
             Report($"  build      {provenance}");
             Report(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  load       {Editors} editors × {BatchesPerEditor} batches on "
+                $"  load       {Editors} editors × {batchesPerEditor ?? BatchesPerEditor} batches on "
                 + $"{(documentPerEditor ? $"{Editors} documents" : "one document")}, "
                 + $"{(interval > TimeSpan.Zero ? $"{batchesPerSecondPerEditor:F0}/s each" : "unthrottled")}"));
             Report($"  latency ms {latency}");
@@ -313,6 +418,8 @@ public sealed class PropagationLatencyMeasurement
                     latency.P99 < 25,
                     $"§8's target is p99 < 25 ms; measured {latency}");
             }
+
+            return latency;
         }
         finally
         {

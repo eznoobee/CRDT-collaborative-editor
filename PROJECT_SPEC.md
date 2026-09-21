@@ -1832,7 +1832,7 @@ measurement point is not a falsifiable claim.
 
 | Target | Measured |
 |---|---|
-| p99 < 25 ms, server-side `receive → broadcast enqueue` | 20 concurrent editors on one document |
+| p99 < 25 ms, server-side `receive → broadcast enqueue` | 20 concurrent editors on one document. **Judged only over runs that agree**: five runs of 10,000 samples, with the spread of their p99s at most 20% of the median. A p99 over twelve observations is not a measurement (§13.61) |
 | p99 < 150 ms, client keystroke → remote client render | 20 concurrent editors, loopback network |
 | 1,000 concurrent connections per instance at < 2 GB RSS | connections spread over 100 documents, 10 each |
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
@@ -6273,3 +6273,86 @@ against the historical failure before trusting it.** The data is there —
 52b8769 gives `2 1 1`, 82c92de gives `2 16 0` — and it takes one command. A gate
 validated only against a healthy present is a gate whose first real test is the
 next outage.
+
+### 13.61 Choosing the statistic after seeing which one passes
+
+Phase 9 measured §8's targets 1 and 4 and made two recommendations about how to
+read them. Target 1's p99 was unstable, its p95 was stable, and the
+recommendation was to state that target at **p95** — where it passes. Target 4's
+distribution was a single mode with a right tail, and the recommendation was to
+read it at **p95** — where it fails, turning an earlier qualified pass into a
+miss by 12%.
+
+Each was argued on its own and each argument was sound. Together they are a
+different thing.
+
+> **Statistics chosen after the results are in are not measurements of the
+> system, they are descriptions of the sample.** It does not matter that the
+> reasons differ, or that one recommendation is *stricter* than what it
+> replaced. What makes it goalpost-moving is the order: results first, statistic
+> second.
+
+The self-serving direction is easy to spot and was not what happened here — the
+target 4 recommendation cost a pass. That is the part worth recording, because
+it is what made the pair look principled: a project that only checks for
+convenient revisions will accept a set of individually reasonable choices that
+collectively amount to fitting the criteria to the data.
+
+**The finding underneath was real, and survived.** A p99 over twelve
+observations above it is not a measurement — 9.4 recorded 36.6 ms and 71.4 ms
+for the same code minutes apart, a spread wider than the distance to the
+threshold. That is a defect in the measurement, and the repair is to measure
+properly: ten thousand samples per run, five runs, and a tolerance for their
+agreement written into the source *before* the runs. The p99s came back 25.5,
+26.0, 28.0, 28.7 and 29.9 ms — a 16% spread against a 20% tolerance — and target
+1 is missed at 28.0 ms, in every one of the five runs.
+
+**The rule.** Fix the instrument, not the threshold. When a number will not
+repeat, that is a fact about the harness; reading a different percentile of the
+same unstable sample changes which fact is hidden, not whether one is. And when
+a statistic does have to change, record that the change came after the results,
+so the next reader can weigh it.
+
+### 13.62 A delta on a global aggregate is not a measurement of your own change
+
+Register row 37 was about `PeriodicSnapshotTests` depending on what other tests
+left in the shared database. 9.3 closed it. The same shape then appeared three
+more times in the same phase, in three unrelated files:
+
+- **`LogTruncationTests`** waited for this document's row count to drop and then
+  asserted its own sweeper had run — but every test in the process has a sweeper
+  against the same database, so the count can drop because somebody else's timer
+  got there first, leaving this instance's counter at zero.
+- **`EditorMetricsTests`** compared a process-wide gauge before and after, and
+  `Observe` pulls one sample per live host, so `Latest` returned a different
+  host's value (§13.55).
+- **`StateReadingTests`** read §10's silent-replica gauge before and after and
+  asserted an exact delta. §10 filters on `last_seen_at > cutoff`, so a replica
+  leaves that count **by ageing out of the window** — nothing has to happen for
+  the number to move. Hundreds of replicas created at once by a load run put
+  enough of them near the boundary that the count drifted mid-test.
+
+> **The pattern: `before`, do a thing, assert `after == before + 1`.** It reads
+> like a controlled experiment and is not one, because the quantity is global
+> and the experiment is not the only thing touching it. Every instance passed
+> for months. Each was found by an unrelated change altering the timing or the
+> volume — which means the ones still present are the ones nothing has disturbed
+> yet.
+
+**The repair is the same every time: scope the claim.** Assert on the rows this
+test caused, identified by the document or the host it created, and keep a
+separate, drift-proof assertion that exercises the global mechanism —
+`gauge >= 1` rather than `gauge == before + 1`. The first is what the test is
+about; the second stops the gauge being a constant zero. Neither depends on what
+anything else is doing.
+
+**And the tell is available without a failure.** A test that reads a number it
+did not produce, twice, is making an assumption about exclusive access to a
+shared resource. Grep for the shape — a `before`, a mutation, an equality on
+`before` — and check each one against the question *what else writes this?*
+Four of the four found here would have been visible that way.
+
+**Run at the close-out, and it found no others.** Every remaining `before` in
+the suites is scoped to something the test owns — one document's rows, one
+user's connections, one factory's own counter — which is what the repair above
+produces and what the shape should look like.

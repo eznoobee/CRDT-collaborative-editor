@@ -118,7 +118,58 @@ at 32 batches a second per editor, adaptive sustains 630/s against the window's
 326/s, and saturated it reaches 1,884/s. The window is a rate ceiling of roughly
 one flush per 50 ms per document.
 
-### The honest statement about the p99, which is that this data cannot settle it
+### Re-measured until it repeated · **target 1 is MISSED at a p99 of 28.0 ms**
+
+`5 × 20 editors × 500 batches at 8/s each`, n = 10,000 per run.
+
+```
+p99 ms     25.5, 26.0, 28.0, 28.7, 29.9
+spread     16 % of the median (28.0 ms), tolerance 20 %
+verdict    the runs agree; §8's target 1 is MISSED at 28.0 ms against 25 ms
+```
+
+**The tolerance was written down before the runs**, in the source: repeated runs
+agree when the spread of their p99s is at most 20% of the median. A tolerance
+chosen after seeing the numbers is not a tolerance, it is a description of them.
+
+**The fix was sample count, not statistic.** Ten thousand samples puts a hundred
+observations above the p99 where twelve hundred put twelve. The spread falls
+from *wider than the quantity* — 36.6 against 71.4 ms — to 16%, and the five
+runs now sit in a 4.4 ms band.
+
+**Every one of the five runs missed**, which is a stronger statement than the
+median: the verdict does not depend on which run is called typical, and it does
+not depend on the tolerance either. The closest run, 25.5 ms, is still above
+25 ms.
+
+**What is still not attributed** is the far tail. One run recorded a maximum of
+673 ms against a p99 of 29.9; at n = 10,000 a single excursion like that moves
+the p99 barely at all, which is precisely why the p99 is now usable and equally
+why it says nothing about that excursion. Attributing it needs the generator off
+the box, which is what target 3's out-of-process harness has and this does not.
+
+---
+
+### The p95 proposal, and why it was rejected
+
+**This is recorded because the proposal came after seeing the results.** 9.4
+observed that the p95 was stable where the p99 was not, and suggested stating
+target 1 at p95 — where it passes. In the same phase, 9.5 recommended reading
+target 4 at p95, where it *fails*.
+
+> **Choosing each target's statistic after seeing which one passes is
+> goalpost-moving, whatever the reasons given for each choice separately.** The
+> two recommendations were locally defensible and jointly indefensible, and what
+> makes them so is the order: results first, statistic second.
+
+Target 1 keeps its p99. The finding underneath the p95 proposal was real and
+survives as a finding about the *measurement* — a p99 over twelve observations
+is not one — and it has been fixed by measuring properly rather than by reading
+a different number. §13.61.
+
+---
+
+### The earlier statement, kept because it was acted on
 
 The two runs of this curve disagree about the p99 by more than the distance to
 the target. At 8/s adaptive: **36.6 ms** in the first run, **71.4 ms** in the
@@ -413,7 +464,7 @@ worst load of 763 ms, and the p90 knee sits where no pause figure does.
 
 | Target | Result | The decision it needs |
 |---|---|---|
-| 1 · receive → broadcast p99 | 234 ms → **54.7 ms** after 9.4's adaptive flushing; still missed against 25 ms, p50 now 10.1 ms | **taken:** §8's batching becomes adaptive. **open:** whether the target reads at p95, where it passes and where this harness can support the claim |
+| 1 · receive → broadcast p99 | 234 ms → **28.0 ms**, measured until it repeated; missed against 25 ms, and missed in all five runs | **taken:** §8's batching becomes adaptive, the target keeps its p99, and the measurement was fixed rather than the statistic (§13.61) |
 | 2 · keystroke → render p99 | missed; 72% never sent, and 7b.4's explanation of why was wrong | **taken:** coalescing rejected — the discriminator shows the send loop is not the cap. **open:** the unsent-work line's threshold and wording, implemented and flagged |
 | 3 · 1,000 connections | passed, 285 MiB | none |
 | 4 · document load | at n=200: p50 309 ms in, **p95 558 ms out by 12 %** | **recommended:** read it at p95, which the prior held and the distribution's single mode supports — making this a recorded miss rather than 7b.4's qualified pass |

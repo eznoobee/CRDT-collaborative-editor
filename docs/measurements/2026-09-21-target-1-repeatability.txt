@@ -1,0 +1,50 @@
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [repeatability 1 of 5]
+  build      Release · fdebadb+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.80GHz × 4 · 10 GiB
+  load       20 editors × 500 batches on one document, 8/s each
+  latency ms n=10000 min=3.31 p50=9.80 p95=16.09 p99=25.54 max=144.98
+  generator  6 % of 4 cores (16.0s CPU over 62.4s)
+  editor.validate    n=10000 min=0.35 p50=1.98 p95=3.60 p99=5.32 max=129.54
+  editor.persist     n=10000 min=1.57 p50=5.38 p95=8.57 p99=13.72 max=35.98
+  editor.broadcast   n=10000 min=0.11 p50=0.67 p95=2.10 p99=7.66 max=30.13
+  throughput 160 batches/s over 62.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [repeatability 2 of 5]
+  build      Release · fdebadb+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.80GHz × 4 · 10 GiB
+  load       20 editors × 500 batches on one document, 8/s each
+  latency ms n=10000 min=3.81 p50=9.46 p95=15.89 p99=29.95 max=673.24
+  generator  5 % of 4 cores (12.0s CPU over 62.4s)
+  editor.validate    n=10000 min=0.38 p50=1.91 p95=3.36 p99=4.70 max=27.63
+  editor.persist     n=10000 min=1.62 p50=5.31 p95=8.03 p99=22.12 max=660.38
+  editor.broadcast   n=10000 min=0.15 p50=0.61 p95=1.24 p99=7.68 max=21.29
+  throughput 160 batches/s over 62.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [repeatability 3 of 5]
+  build      Release · fdebadb+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.80GHz × 4 · 10 GiB
+  load       20 editors × 500 batches on one document, 8/s each
+  latency ms n=10000 min=3.73 p50=9.20 p95=13.72 p99=25.96 max=48.37
+  generator  4 % of 4 cores (9.3s CPU over 62.4s)
+  editor.validate    n=10000 min=0.37 p50=1.81 p95=3.12 p99=5.28 max=29.36
+  editor.persist     n=10000 min=1.53 p50=5.25 p95=7.45 p99=13.48 max=23.79
+  editor.broadcast   n=10000 min=0.15 p50=0.57 p95=1.11 p99=7.14 max=38.04
+  throughput 160 batches/s over 62.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [repeatability 4 of 5]
+  build      Release · fdebadb+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.80GHz × 4 · 10 GiB
+  load       20 editors × 500 batches on one document, 8/s each
+  latency ms n=10000 min=3.95 p50=9.54 p95=13.95 p99=28.66 max=47.85
+  generator  4 % of 4 cores (9.6s CPU over 62.4s)
+  editor.validate    n=10000 min=0.41 p50=1.93 p95=3.16 p99=4.20 max=32.96
+  editor.persist     n=10000 min=1.59 p50=5.43 p95=7.46 p99=15.61 max=27.47
+  editor.broadcast   n=10000 min=0.11 p50=0.60 p95=1.14 p99=7.70 max=21.67
+  throughput 160 batches/s over 62.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [repeatability 5 of 5]
+  build      Release · fdebadb+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.80GHz × 4 · 10 GiB
+  load       20 editors × 500 batches on one document, 8/s each
+  latency ms n=10000 min=3.08 p50=9.50 p95=16.23 p99=27.97 max=43.85
+  generator  4 % of 4 cores (8.7s CPU over 62.4s)
+  editor.validate    n=10000 min=0.39 p50=1.93 p95=3.27 p99=4.44 max=38.57
+  editor.persist     n=10000 min=1.63 p50=5.34 p95=7.86 p99=14.22 max=29.40
+  editor.broadcast   n=10000 min=0.14 p50=0.59 p95=1.23 p99=8.84 max=23.87
+  throughput 160 batches/s over 62.4s
+§8 target 1 — repeatability of the p99
+  runs       5 × 20 editors × 500 batches at 8/s each
+  p99 ms     25.5, 26.0, 28.0, 28.7, 29.9
+  spread     16 % of the median (28.0 ms), tolerance 20 %
+  verdict    the runs agree; §8's target 1 is MISSED at a median p99 of 28.0 ms against 25 ms

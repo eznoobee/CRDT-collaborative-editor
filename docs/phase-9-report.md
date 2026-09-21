@@ -43,8 +43,9 @@ rule: an incident gives a gate its class, not its check.
 | Row 39 — a placement oracle the client's default suite runs | **Closed (9.1).** The fixture existed already; the fix was a split. §13.52 |
 | Row 36 — §5's pending-set bound, never set by the product | **Closed (9.2), and the bound had two halves.** §13.54 |
 | Row 37 — `PeriodicSnapshotTests`' global-ranking dependency | **Closed (9.3).** The condition is now constructed, not waited for |
-| §8 target 1 — adaptive flushing, measured | **Decided (9.4).** §8's batching rule amended; 234 ms → 54.7 ms |
+| §8 target 1 — adaptive flushing, measured | **Decided (9.4).** §8's batching rule amended; 234 ms → **28.0 ms**, re-measured until it repeated |
 | §8 targets 2 and 4 — the decisions | **Decided (9.5), and 7b.4's explanation of target 2 was wrong.** §13.56 |
+| Row 40 — row 31's suite is intermittent | **Opened**, rather than left as a sentence in this report |
 | Row 31 — the offline-window discard in a browser | **Closed (9.6),** five CI iterations of ten |
 | Row 33 — GC's product-visible effect on the deployed stack | **Closed (9.7),** four CI iterations of ten |
 | Presence (row 14) | Out of scope in §2, as decided — not deferred |
@@ -101,11 +102,19 @@ costing a flat 50 ms at every rate rather than a shrinking one, and becoming a
 throughput ceiling past 16 batches a second per editor (630/s against 326/s). No
 cliff, because there is no threshold to cross.
 
-**Target 1 is still missed** at 54.7 ms against 25 ms, and this harness cannot
-settle the p99: two runs of the same code minutes apart gave 36.6 and 71.4 ms at
-the same rate, a spread wider than the distance to the target. The p95 is stable
-at 12–20 ms across both runs and all six rates. **Whether target 1 should be
-stated at p95 is a decision about §8 and is left open.**
+**Target 1 is still missed, and the measurement was fixed rather than the
+statistic.** 9.4 reported 54.7 ms and could not support it: two runs of the same
+code minutes apart gave 36.6 and 71.4 ms, a spread wider than the distance to
+the threshold. The p95 was stable, and stating the target at p95 would have made
+it pass — while the same phase recommended p95 for target 4, where it fails.
+Two locally sound arguments that jointly amount to choosing each statistic after
+seeing which one passes (§13.61).
+
+So the p99 stays and the sample count changes: five runs of 10,000 samples, with
+the agreement tolerance written into the source before the runs. The p99s came
+back **25.5, 26.0, 28.0, 28.7, 29.9 ms** — a 16% spread against a 20% tolerance.
+**Target 1 is missed at 28.0 ms against 25 ms, in every one of the five runs**,
+which is a verdict that does not depend on which run is called typical.
 
 **Target 2 — coalescing rejected, and 7b.4's diagnosis with it.** The prediction
 was that a shorter round trip would raise the client's send rate; it fell, 275
@@ -117,9 +126,15 @@ operations a second while `Replica.text` walks the whole document on every
 change. Recorded as missed with the cause corrected; the remaining work is
 incremental rendering, which is a project and not a close-out task.
 
-**The unsent-work line is implemented and flagged.** §8's own report carried
-*the UI says `live`, with no problem, the whole time*. It now names the backlog
-past eight queued batches. **The threshold and the wording are for review.**
+**The unsent-work line is an age, not a count.** §8's own report carried *the UI
+says `live`, with no problem, the whole time*. The first version fired past eight
+queued batches, which is wrong twice over: "edits" is ambiguous when one pasted
+paragraph is hundreds of operations, and `DocumentSession` splits a paste at §7's
+ingest cap, so eight batches is what a normal paste looks like while it drains.
+An indicator that appears when nothing is wrong is one people learn to ignore.
+The question is *is my work stuck*, which is about age — five seconds, against a
+p50 round trip near ten milliseconds. The wording and the count in the sentence
+are unchanged.
 
 **Target 4 — p95 recommended, which makes it a miss.** Raised from 20 samples to
 200, because a p95 over twenty has one observation above it. The numbers
@@ -181,8 +196,10 @@ existing job — a guard passing while the new suite did not run.
 
 ## What this leaves
 
-- **§8 target 1's statistic.** p95 passes and is stable; p99 is not measurable
-  on this harness. A decision about §8's wording.
+- **§8 target 1's remaining 3 ms.** Missed at 28.0 ms against 25 ms, repeatably.
+  The far tail is still unattributed — one run's maximum was 673 ms — and
+  attributing it needs the generator off the box, which target 3's harness has
+  and this one does not.
 - **§8 target 2's remaining work.** Incremental rendering in the client. Named,
   measured, not started.
 - **The unsent-work line's threshold and wording**, implemented and flagged.
