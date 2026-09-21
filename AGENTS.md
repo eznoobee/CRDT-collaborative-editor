@@ -224,6 +224,23 @@ is the binary format's best case, a fragmented document, and §8's own case of
 never the chain alone — a format whose headline number comes from its best case
 is a format nobody has measured.
 
+## Pushing
+
+**Push with `./scripts/push.sh`, not `git push`.** It pushes and then confirms
+that a run with jobs appeared for that exact commit, and fails loudly if not.
+
+CI has silently stopped verifying this repository four times — a duplicate YAML
+key, a run cancelled by the concurrency group, a step left with a name and no
+command — and every one was found at phase end by a preflight, long after the
+work it should have checked. The common shape is not in the workflow file and
+cannot be checked there: what is observable, immediately and every time, is
+whether the push produced a run with jobs.
+
+**Every run must have jobs, not the total across them.** There are two
+workflows; the 7b.12 outage left one healthy, so those commits report two runs
+and one job. A total that is not zero while the workflow that matters ran
+nothing is exactly the reading that let it survive five tasks.
+
 ## Commits
 
 Conventional commits, one logical change each, and every commit leaves the build

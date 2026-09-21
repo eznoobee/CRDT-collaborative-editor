@@ -96,36 +96,37 @@ function Shell(props: { children: React.ReactNode }): React.JSX.Element {
 }
 
 /**
- * Queued batches at which the outbox is worth mentioning (§8 target 2, §13.13).
+ * How long unsent work may sit before the user is told about it (§8, §13.13).
  *
  * @remarks
  * <p>
  * <b>The measurement that asked for this.</b> §8's target 2 run has a person
  * typing at eight characters a second alongside nineteen other editors, and
- * 725 of their 1,000 keystrokes never reached the server — they sat in this
+ * 725 of their 1,000 keystrokes never reached the server — they sat in the
  * outbox. The line the report carries is the reason this exists: <i>the UI says
  * `live`, with no problem, the whole time</i>. A person would see their own
- * text, because local edits apply locally, and nothing at all to say that most
- * of it was going nowhere.
+ * text, because local edits apply locally, and nothing to say that most of it
+ * was going nowhere.
  * </p><p>
- * <b>Eight, because a healthy outbox is nearly empty.</b> `SyncController.drain`
- * sends one batch per round trip and a round trip is tens of milliseconds, so
- * even a fast typist leaves at most a batch or two queued at any moment. Eight
- * is past anything ordinary typing produces and far below the point at which
- * the backlog is minutes of work. It is deliberately not zero: an indicator
- * that flickers on every keystroke is one people learn to ignore, which would
- * make it worse than nothing.
+ * <b>An age, not a count, and the count was wrong twice over.</b> "Edits" is
+ * ambiguous — one pasted paragraph is hundreds of operations and several
+ * batches, because `DocumentSession` splits at §7's ingest cap — so a threshold
+ * of eight batches fires on every paste while the chunks drain normally. An
+ * indicator that appears when nothing is wrong is one people learn to ignore,
+ * which makes it worse than nothing on the day it is right.
  * </p><p>
- * <b>Shown only while `live`.</b> Offline already says so, and has its own
- * window countdown; a second message about unsent work there would be saying
- * the same thing twice.
+ * The question a person actually has is <i>is my work stuck</i>, and that is
+ * about age. Five seconds is far longer than a healthy round trip — §8's own
+ * receive-to-broadcast p50 is about ten milliseconds and the client sends one
+ * batch per round trip — and short enough to appear while someone is still
+ * looking at the screen they typed on.
  * </p><p>
- * This is a report, not a fix. What 9.5 measured is that the backlog builds
- * because the writer's own browser cannot keep up with applying everyone else's
- * operations, and telling the user is the part that belongs in a close-out.
+ * <b>The count stays in the sentence.</b> It is what the user needs once told,
+ * and it is what §9's discard message reports if the work is later lost, so the
+ * two agree.
  * </p>
  */
-const VISIBLE_BACKLOG = 8;
+const STUCK_AFTER_MS = 5_000;
 
 /**
  * What to tell the user about unsent work, or null to say nothing.
@@ -135,8 +136,12 @@ const VISIBLE_BACKLOG = 8;
  * without rendering the whole document view. The rule is the part with a
  * decision in it; the `<p>` is not.
  */
-export function backlogMessage(state: SyncState, queued: number): string | null {
-  if (state !== 'live' || queued < VISIBLE_BACKLOG) {
+export function backlogMessage(
+  state: SyncState,
+  queued: number,
+  oldestUnsentMs: number,
+): string | null {
+  if (state !== 'live' || queued === 0 || oldestUnsentMs < STUCK_AFTER_MS) {
     return null;
   }
 
@@ -164,7 +169,17 @@ function Document(props: {
   // The window is a countdown, so it is read from a clock that ticks rather
   // than from one read during render. Rendering `Date.now()` would also be
   // impure — the same output twice from the same inputs is what React assumes.
-  const now = useClock(sync.state === 'offline' && syncedAt !== null);
+  //
+  // It ticks for the unsent-work line too, and faster when that is what it is
+  // for: that line turns on when work has been waiting five seconds, and
+  // nothing else re-renders while an outbox sits still — the store snapshot
+  // above is keyed on the queue's *length*, which is exactly what does not
+  // change while work is stuck. A minute's resolution would mean an indicator
+  // about five seconds arriving up to a minute late.
+  const unsent = sync.pending.length > 0;
+  const now = useClock(
+    unsent || (sync.state === 'offline' && syncedAt !== null),
+    unsent ? 1_000 : 60_000);
 
   return (
     <>
@@ -174,7 +189,7 @@ function Document(props: {
         ? null
         : <p role="alert" data-testid="problem">{describe(sync.problem.code, sync.problem.lost)}</p>}
       {(() => {
-        const backlog = backlogMessage(sync.state, sync.pending.length);
+        const backlog = backlogMessage(sync.state, sync.pending.length, sync.oldestUnsentMs);
         return backlog === null ? null : <p data-testid="backlog">{backlog}</p>;
       })()}
       {sync.state === 'offline' && syncedAt !== null
@@ -198,7 +213,7 @@ function Document(props: {
 
 
 /**
- * Epoch milliseconds, refreshed each minute while `active`.
+ * Epoch milliseconds, refreshed every `everyMs` while `active`.
  *
  * @remarks
  * An external store rather than state set from an effect. The clock is not
@@ -206,7 +221,7 @@ function Document(props: {
  * exactly what `useSyncExternalStore` is for, and reading `Date.now()` during
  * render would make the render impure.
  */
-function useClock(active: boolean): number {
+function useClock(active: boolean, everyMs = 60_000): number {
   return useSyncExternalStore(
     useCallback(
       (notify: () => void) => {
@@ -214,13 +229,13 @@ function useClock(active: boolean): number {
           return () => {};
         }
 
-        const tick = setInterval(notify, 60_000);
+        const tick = setInterval(notify, everyMs);
         return () => clearInterval(tick);
       },
-      [active],
+      [active, everyMs],
     ),
-    () => minute(),
-    () => minute(),
+    () => quantised(everyMs),
+    () => quantised(everyMs),
   );
 }
 
@@ -228,12 +243,14 @@ function useClock(active: boolean): number {
  * The current minute, as epoch milliseconds.
  *
  * @remarks
- * Rounded because `useSyncExternalStore` compares snapshots by identity and
- * calls this more than once per render: a raw `Date.now()` returns a different
- * number each call and React would report an infinite loop.
+ * Rounded to the tick interval because `useSyncExternalStore` compares
+ * snapshots by identity and calls this more than once per render: a raw
+ * `Date.now()` returns a different number each call and React would report an
+ * infinite loop. Rounding to the same interval the timer uses also means the
+ * snapshot changes exactly once per tick.
  */
-function minute(): number {
-  return Math.floor(Date.now() / 60_000) * 60_000;
+function quantised(everyMs: number): number {
+  return Math.floor(Date.now() / everyMs) * everyMs;
 }
 
 /**

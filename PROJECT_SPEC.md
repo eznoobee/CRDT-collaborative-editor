@@ -2645,6 +2645,7 @@ written, not done).
 | 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **CLOSED (9.3)** | `SnapshotSweeper` ranks laggards **globally** and sweeps a bounded batch, so a test asserting that *its* document was swept was asserting that no other test had left `BatchSize` documents further behind. The repair is the one the row proposed: the two claims are separated rather than the batch widened. The hosted timer's test now asserts only what does not depend on ranking — that it ticked and wrote *something*, which is §13.41's claim and the reason that test exists — and whether a given document reaches head is asserted through `SnapshotDocumentAsync`, where no batch is involved. The `BatchSize = 64` override is gone, so these tests run against the product's own default; widening it was tuning a control until the red went away (§13.37). **The condition is now constructed rather than waited for**: a test fills the default batch with seventeen documents each further behind than its own and requires the claim to hold anyway, which is exactly the shape that failed in 7b.7 and then passed on a re-run | §8, §13.31, §13.37, §12 |
 | 38 | An interior placeholder is never collected, and the fraction grows without bound | **MEASURED (7b.8) — left as a measurement by decision, not fixed** | 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages. Row 29's measurement was asked about payloads and answered about positions: a placeholder costs about one byte, so this is a §5 correctness question about whether one can be spliced out by rewiring its child's parent while preserving Definition 4 for a concurrent insert naming it as a right origin — **not** to be attempted by relaxing rule 2, which 7.3 settled. Left deliberately at the close-out: it may not be resolvable, and starting without finishing would be worse than the measured, explained state it is in. **Reversal condition:** take it if §5's collection rules are reopened for another reason, or if a document's tombstone fraction is observed causing a real load problem. Numbers in `docs/gc-reclamation.md` | §5, §8, §13.46 |
 | 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
+| 40 | Row 31's offline-window suite is intermittent | **9** | It has gone green, red, green across four CI runs, failing at the point of reaching the application: the page reports `Failed to fetch` while the API is demonstrably serving — its own retirement sweep is in the stack's logs from the same run. The run that closed row 31 exercised the whole path and read §9's sentence off the screen, and the preflight run is green, so the row's claim is verified; **four runs is not a stable suite**, and a suite that goes green-red-green is one people learn to re-run rather than read. Opened rather than left as a note in a phase report for exactly that reason. Instrumentation added in 9.6's sixth iteration records the method, URL and reason of every request the browser could not make, so the next failure names it instead of costing a cycle. **Closes when that instrumentation has named the failing request and the cause is either fixed or explained** — not when a run happens to be green | §9, §12, §13.23, §13.55 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -6232,3 +6233,43 @@ and it cannot be hidden by a rule about some other state.
 ask what makes it pass, and satisfy yourself that something can. If the guard
 reads a different surface from the assertion it protects, that surface has its
 own rules — and those rules were written for a reader, not for a test.
+
+### 13.60 Check the push, not the workflow file
+
+CI has silently stopped verifying this repository four times: 3b.1's duplicate
+`working-directory:` key (seven tasks), run 79 cancelled by the concurrency
+group (six pushes), and 7b.12's step with a name and no command (five tasks,
+during which 9.0's own report stated the workflows gate was green). Each was
+found at phase end, by a preflight, long after the work it should have checked.
+
+§13.57 fixed the last instance and hardened the file check. **It cannot fix the
+class.** A workflow can fail to start for reasons that are not in the file — it
+can be disabled, the quota can be spent, a run can be cancelled, a `paths:`
+filter can exclude the change, a ref can have no workflow on it at all. A file
+checker cannot see any of those, and three of the four outages were things a
+file checker either did see or could not have.
+
+> **What every one of them has in common is observable in one place at one
+> moment: after a push, is there a run with jobs for this exact commit?** That
+> question needs no knowledge of why, costs one API call, and is answerable
+> immediately rather than at phase end.
+
+So `scripts/push.sh` pushes and then asks it, and refuses to finish if the
+answer is no — §13.43's rule that a habit needs a script that refuses, not a
+sentence that asks for care. It is the same arrangement as `scripts/sabotage.sh`
+for the same reason.
+
+**The gate nearly shipped with the flaw it was built for.** The first version
+counted jobs across all runs for the commit and required the total to be
+non-zero. Checked against the outage rather than reasoned about: every commit
+from 7b.12 to 9.6 reports **two runs and one job**, because this repository has
+two workflows and the mutation one was untouched. The total was never zero. The
+check has to be that *no run* is empty, and the difference is invisible until
+you run it against the failure.
+
+**Which is the rule worth carrying.** §13.57 says an incident gives a gate its
+class rather than its check. This is the operational half: **run the new gate
+against the historical failure before trusting it.** The data is there —
+52b8769 gives `2 1 1`, 82c92de gives `2 16 0` — and it takes one command. A gate
+validated only against a healthy present is a gate whose first real test is the
+next outage.

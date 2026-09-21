@@ -846,3 +846,80 @@ describe("§5's pending-set bound in seconds (register row 36, second half)", ()
     expect(harness.sync.problem?.code).toBe(REJECTION.pendingOverflow);
   });
 });
+
+describe('how long unsent work has been waiting (§8 target 2)', () => {
+  it('is zero when nothing is queued', () => {
+    const transport = new FakeTransport();
+    const { sync } = controller(transport);
+
+    expect(sync.oldestUnsentMs).toBe(0);
+  });
+
+  it('measures the oldest entry, not the newest', async () => {
+    // The distinction the indicator turns on. A queue that keeps taking work
+    // while the front of it never moves is exactly the stuck case, and a
+    // measurement keyed on the most recent arrival would read it as healthy —
+    // it would reset on every keystroke the user typed while waiting.
+    const transport = new FakeTransport();
+    transport.submitResults = [new Error('offline')];
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    harness.sync.enqueue(encodeOperations([]));
+    harness.advance(9_000);
+    harness.sync.enqueue(encodeOperations([]));
+
+    expect(harness.sync.pending).toHaveLength(2);
+    expect(harness.sync.oldestUnsentMs).toBe(9_000);
+  });
+
+  it('falls back to the next entry when the oldest is accepted', async () => {
+    // Every path that adds to, removes from or clears the outbox has to carry
+    // the timestamp with it. This is the removal one: the age has to drop to
+    // the age of what is now at the front, not to zero and not stay where it
+    // was.
+    //
+    // The reconnection reports `resumed: true`, because a server that refuses
+    // the resumption discards the whole outbox — §9's offline-window discard,
+    // which is a different mechanism and the one this test is not about.
+    const transport = new FakeTransport();
+    transport.submitResults = [new Error('offline')];
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    harness.sync.enqueue(encodeOperations([]));
+    await settle();
+    harness.advance(9_000);
+    harness.sync.enqueue(encodeOperations([]));
+    await settle();
+    harness.advance(1_000);
+
+    expect(harness.sync.pending).toHaveLength(2);
+    expect(harness.sync.oldestUnsentMs).toBe(10_000);
+
+    // The connection comes back and takes exactly one batch.
+    transport.connectResults = [{ replicaId: ID, resumed: true }];
+    transport.submitResults = [{ code: null }, new Error('offline')];
+    await harness.sync.start();
+    await settle();
+
+    expect(harness.sync.pending).toHaveLength(1);
+    expect(harness.sync.oldestUnsentMs).toBe(1_000);
+  });
+
+  it('is zero again once the queue empties', async () => {
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    harness.sync.enqueue(encodeOperations([]));
+    await settle();
+    harness.advance(60_000);
+
+    expect(harness.sync.pending).toHaveLength(0);
+    expect(harness.sync.oldestUnsentMs).toBe(0);
+  });
+});

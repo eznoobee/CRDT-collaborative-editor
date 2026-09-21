@@ -194,7 +194,16 @@ export class SyncController {
   private lastReported: string | null = null;
   private readonly listeners = new Set<() => void>();
 
-  private outbox: Uint8Array[] = [];
+  /**
+   * Batches authored and not yet accepted, with when each was queued.
+   *
+   * @remarks
+   * The timestamp rides on the entry rather than in a parallel array, because a
+   * second array indexed in lockstep with this one is a thing to keep in step —
+   * and there are five places that add to, remove from or clear the outbox.
+   * Carrying it here means none of them can forget.
+   */
+  private outbox: { operations: Uint8Array; queuedAt: number }[] = [];
   private replicaId: string | null;
   private current: SyncState = 'offline';
   private stopped = false;
@@ -243,7 +252,16 @@ export class SyncController {
     this.sessionState = null;
     this.transport = transport;
     this.replicaId = replicaId;
-    this.outbox = [...outbox];
+
+    // Before the outbox, which stamps its entries with it.
+    this.now = options.now ?? (() => Date.now());
+
+    // Restored batches were queued before this page existed and their real age
+    // is unknown and older than this. Stamping them `now` therefore understates
+    // it, which delays the unsent-work line after a reload and can never raise
+    // it spuriously — the safe direction for an indicator whose whole value is
+    // that people believe it.
+    this.outbox = outbox.map((operations) => ({ operations, queuedAt: this.now() }));
     this.backoff = new Backoff(options.backoff ?? DEFAULT_BACKOFF, options.random);
     this.schedule = options.schedule ?? ((run, delay) => setTimeout(run, delay));
 
@@ -252,7 +270,6 @@ export class SyncController {
     // days, and a report frequent enough that an ordinary session contributes
     // many of them costs one small message a minute per open tab.
     this.acknowledgeEveryMs = options.acknowledgeEveryMs ?? 30_000;
-    this.now = options.now ?? (() => Date.now());
 
     transport.onBroadcast((operations) => {
       // A broadcast can land before this client has a session — the server
@@ -305,7 +322,21 @@ export class SyncController {
 
   /** Batches authored and not yet accepted, oldest first. */
   get pending(): readonly Uint8Array[] {
-    return this.outbox;
+    return this.outbox.map((entry) => entry.operations);
+  }
+
+  /**
+   * How long the oldest unsent batch has been waiting, in milliseconds.
+   *
+   * @remarks
+   * Zero when there is nothing unsent. This is what answers the question a
+   * person actually has — *is my work stuck* — which a count cannot: one paste
+   * is hundreds of operations and several batches, and a queue that is eight
+   * deep for a moment while it drains is healthy.
+   */
+  get oldestUnsentMs(): number {
+    const oldest = this.outbox[0];
+    return oldest === undefined ? 0 : Math.max(0, this.now() - oldest.queuedAt);
   }
 
   /** How many times a connection has failed since the last success. */
@@ -320,7 +351,7 @@ export class SyncController {
 
   /** Queues a batch the session authored. */
   enqueue(operations: Uint8Array): void {
-    this.outbox.push(operations);
+    this.outbox.push({ operations, queuedAt: this.now() });
     this.changed();
 
     if (this.current === 'live') {
@@ -700,7 +731,7 @@ export class SyncController {
         && !this.stopped
         && !this.readOnlyState
       ) {
-        const batch = this.outbox[0]!;
+        const batch = this.outbox[0]!.operations;
 
         let outcome: SubmitOutcome;
         try {
