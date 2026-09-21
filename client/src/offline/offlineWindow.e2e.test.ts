@@ -66,6 +66,29 @@ describe("§9's offline-window discard, seen by a person", () => {
    * actually showed and what the stack logged, so an iteration buys a diagnosis
    * rather than a guess.
    */
+  /**
+   * Every request the browser failed to make, newest last.
+   *
+   * @remarks
+   * "Failed to fetch" is what a page says; it is not what went wrong. Two of
+   * three CI runs died on that string with the API demonstrably up — its own
+   * retirement sweep was in the stack's logs — so the question is which request
+   * failed and why, and only the browser knows. Playwright reports it; nothing
+   * was listening.
+   */
+  const failures: string[] = [];
+
+  function watch(page: Awaited<ReturnType<Walk['browsing']['open']>>['page']): void {
+    page.on('requestfailed', (request) => {
+      failures.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'no reason given'}`);
+    });
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        failures.push(`console: ${message.text()}`);
+      }
+    });
+  }
+
   async function until(
     page: Awaited<ReturnType<Walk['browsing']['open']>>['page'],
     predicate: () => boolean,
@@ -82,6 +105,8 @@ describe("§9's offline-window discard, seen by a person", () => {
       throw new Error(
         `waiting for ${describeWait} timed out after ${timeout} ms.\n`
         + `--- url ---\n${page.url()}\n`
+        + `--- requests the browser could not make ---\n${
+          failures.length === 0 ? '(none)' : failures.slice(-15).join('\n')}\n`
         + `--- what the page showed ---\n${text.slice(0, 2_000)}\n`
         + `--- what the stack logged ---\n${walk.logs().slice(-4_000)}\n`
         + `--- the original error ---\n${String(error)}`,
@@ -104,6 +129,7 @@ describe("§9's offline-window discard, seen by a person", () => {
   it('tells the user what was lost, after being away longer than the window', async () => {
     walk.oidc.accounts.add('offline-walker');
     const { context, page } = await walk.browsing.open();
+    watch(page);
 
     await page.goto(walk.baseUrl);
     await pick(page, 'offline-walker');

@@ -156,9 +156,20 @@ does not arise between two suites on the same ref.
 
 ## What the suites say
 
-Fifteen CI jobs, all green, on the commit this report is about. Locally: the
-.NET suite, the client suite, the conformance harness, `dotnet format`, and the
-register, breakdown and workflow gates.
+Locally on the commit containing this report: the .NET suite (403 tests), the
+client suite (245), the conformance harness, `dotnet format`, and the register,
+breakdown and workflow gates. **The CI result for this commit is in the addendum
+below and is not asserted here**, because a report cannot state the outcome of a
+run on the commit that contains it before that run exists.
+
+**Row 31's suite is intermittent and the addendum says where that stands.** It
+went green on the iteration that closed the row and failed on the next commit at
+an earlier point, with the page reporting `Failed to fetch` while the API was
+demonstrably serving — its own retirement sweep is in the stack's logs from the
+same run. That is not a reason to call the row open again: the run that closed
+it exercised the whole path and reported §9's sentence off the screen. It is a
+reason not to claim a stable suite, and the instability is in reaching the
+application rather than in anything §9 specifies.
 
 Two new CI jobs, each with its own stack and its own config, because only a
 suite with a job of its own can be required by the preflight. The coverage gate
