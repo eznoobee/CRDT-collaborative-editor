@@ -1,0 +1,135 @@
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 1/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 1/s each
+  latency ms n=1200 min=4.71 p50=11.38 p95=20.32 p99=117.06 max=118.51
+  generator  4 % of 4 cores (8.4s CPU over 59.0s)
+  editor.validate    n=1200 min=0.49 p50=2.11 p95=4.48 p99=99.35 max=102.14
+  editor.persist     n=1200 min=1.89 p50=6.29 p95=10.41 p99=11.94 max=12.96
+  editor.broadcast   n=1200 min=0.16 p50=0.86 p95=2.38 p99=5.33 max=7.67
+  throughput 20 batches/s over 59.0s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 1/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 1/s each
+  latency ms n=1200 min=50.45 p50=61.25 p95=64.22 p99=65.23 max=65.77
+  generator  1 % of 4 cores (3.1s CPU over 59.1s)
+  editor.validate    n=1200 min=0.45 p50=2.66 p95=4.59 p99=17.85 max=26.82
+  editor.persist     n=1200 min=36.68 p50=55.66 p95=58.48 p99=59.30 max=59.80
+  editor.broadcast   n=1200 min=0.29 p50=0.94 p95=1.45 p99=1.63 max=2.07
+  throughput 20 batches/s over 59.1s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 2/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 2/s each
+  latency ms n=1200 min=4.87 p50=11.70 p95=16.13 p99=42.39 max=47.46
+  generator  4 % of 4 cores (5.0s CPU over 29.5s)
+  editor.validate    n=1200 min=0.51 p50=2.56 p95=4.60 p99=18.38 max=32.07
+  editor.persist     n=1200 min=1.93 p50=6.49 p95=9.31 p99=11.21 max=12.81
+  editor.broadcast   n=1200 min=0.17 p50=0.70 p95=1.37 p99=3.11 max=6.46
+  throughput 41 batches/s over 29.5s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 2/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 2/s each
+  latency ms n=1200 min=51.18 p50=60.79 p95=64.96 p99=65.76 max=66.10
+  generator  1 % of 4 cores (1.6s CPU over 29.6s)
+  editor.validate    n=1200 min=0.47 p50=2.52 p95=4.69 p99=17.40 max=27.45
+  editor.persist     n=1200 min=32.89 p50=55.50 p95=58.69 p99=59.66 max=60.00
+  editor.broadcast   n=1200 min=0.20 p50=0.96 p95=1.43 p99=1.66 max=1.85
+  throughput 41 batches/s over 29.6s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 4/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 4/s each
+  latency ms n=1200 min=5.88 p50=11.35 p95=14.98 p99=29.71 max=92.35
+  generator  5 % of 4 cores (2.7s CPU over 14.8s)
+  editor.validate    n=1200 min=0.53 p50=2.47 p95=4.60 p99=13.89 max=26.11
+  editor.persist     n=1200 min=2.01 p50=6.30 p95=9.16 p99=11.55 max=14.82
+  editor.broadcast   n=1200 min=0.19 p50=0.68 p95=1.42 p99=1.91 max=3.43
+  throughput 81 batches/s over 14.8s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 4/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 4/s each
+  latency ms n=1200 min=53.65 p50=61.06 p95=64.99 p99=69.77 max=70.20
+  generator  2 % of 4 cores (1.1s CPU over 14.8s)
+  editor.validate    n=1200 min=0.55 p50=2.46 p95=3.99 p99=15.66 max=27.44
+  editor.persist     n=1200 min=30.93 p50=55.96 p95=59.31 p99=63.33 max=65.30
+  editor.broadcast   n=1200 min=0.38 p50=0.94 p95=1.47 p99=1.65 max=1.81
+  throughput 81 batches/s over 14.8s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 8/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 8/s each
+  latency ms n=1200 min=5.89 p50=10.90 p95=14.44 p99=71.42 max=74.16
+  generator  4 % of 4 cores (1.1s CPU over 7.4s)
+  editor.validate    n=1200 min=0.50 p50=2.42 p95=3.91 p99=20.34 max=32.35
+  editor.persist     n=1200 min=2.12 p50=6.18 p95=8.54 p99=19.80 max=69.72
+  editor.broadcast   n=1200 min=0.15 p50=0.66 p95=1.26 p99=3.88 max=63.01
+  throughput 162 batches/s over 7.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 8/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 8/s each
+  latency ms n=1200 min=52.09 p50=61.23 p95=64.30 p99=143.31 max=148.13
+  generator  4 % of 4 cores (1.1s CPU over 7.4s)
+  editor.validate    n=1200 min=0.52 p50=2.63 p95=3.92 p99=13.34 max=27.21
+  editor.persist     n=1200 min=28.93 p50=55.63 p95=58.46 p99=71.53 max=137.84
+  editor.broadcast   n=1200 min=0.31 p50=0.90 p95=1.43 p99=5.42 max=84.02
+  throughput 161 batches/s over 7.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 16/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 16/s each
+  latency ms n=1200 min=5.13 p50=10.34 p95=14.18 p99=30.22 max=35.29
+  generator  7 % of 4 cores (1.1s CPU over 3.7s)
+  editor.validate    n=1200 min=0.43 p50=2.42 p95=3.66 p99=15.79 max=30.35
+  editor.persist     n=1200 min=2.04 p50=5.45 p95=8.01 p99=8.51 max=11.25
+  editor.broadcast   n=1200 min=0.23 p50=0.75 p95=1.43 p99=2.13 max=3.29
+  throughput 324 batches/s over 3.7s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 16/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 16/s each
+  latency ms n=1200 min=54.53 p50=60.08 p95=64.53 p99=115.18 max=118.14
+  generator  6 % of 4 cores (0.9s CPU over 3.7s)
+  editor.validate    n=1200 min=0.47 p50=2.22 p95=3.71 p99=18.32 max=27.28
+  editor.persist     n=1200 min=35.85 p50=55.27 p95=58.85 p99=109.79 max=111.56
+  editor.broadcast   n=1200 min=0.32 p50=0.95 p95=1.50 p99=3.62 max=61.75
+  throughput 320 batches/s over 3.7s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 32/s/editor, adaptive]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 32/s each
+  latency ms n=1200 min=4.02 p50=9.88 p95=13.12 p99=38.46 max=38.73
+  generator  12 % of 4 cores (0.9s CPU over 1.9s)
+  editor.validate    n=1200 min=0.43 p50=2.17 p95=3.57 p99=19.30 max=30.07
+  editor.persist     n=1200 min=1.90 p50=5.69 p95=8.25 p99=9.17 max=9.79
+  editor.broadcast   n=1200 min=0.16 p50=0.61 p95=1.10 p99=1.38 max=3.53
+  throughput 630 batches/s over 1.9s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [curve 32/s/editor, 50 ms window]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 32/s each
+  latency ms n=1200 min=53.94 p50=60.30 p95=64.87 p99=67.62 max=67.91
+  generator  6 % of 4 cores (0.8s CPU over 3.7s)
+  editor.validate    n=1200 min=0.49 p50=2.17 p95=3.50 p99=18.22 max=26.31
+  editor.persist     n=1200 min=30.80 p50=55.58 p95=60.03 p99=62.51 max=63.00
+  editor.broadcast   n=1200 min=0.23 p50=0.92 p95=1.50 p99=2.63 max=5.57
+  throughput 326 batches/s over 3.7s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [paced]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, 8/s each
+  latency ms n=1200 min=4.80 p50=10.10 p95=13.55 p99=54.66 max=55.90
+  generator  4 % of 4 cores (1.1s CPU over 7.4s)
+  editor.validate    n=1200 min=0.58 p50=2.35 p95=3.68 p99=19.30 max=28.17
+  editor.persist     n=1200 min=1.98 p50=5.51 p95=8.23 p99=9.22 max=11.27
+  editor.broadcast   n=1200 min=0.15 p50=0.65 p95=1.17 p99=1.63 max=2.01
+  throughput 162 batches/s over 7.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [paced, one document each]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on 20 documents, 8/s each
+  latency ms n=1200 min=5.67 p50=11.53 p95=14.60 p99=32.01 max=38.67
+  generator  4 % of 4 cores (1.1s CPU over 7.4s)
+  editor.validate    n=1200 min=0.54 p50=2.67 p95=4.40 p99=14.27 max=31.57
+  editor.persist     n=1200 min=1.76 p50=6.09 p95=8.04 p99=10.40 max=15.61
+  editor.broadcast   n=1200 min=0.10 p50=0.43 p95=1.59 p99=2.51 max=4.47
+  throughput 162 batches/s over 7.4s
+§8 target 1 — p99 receive → broadcast enqueue < 25 ms [saturating]
+  build      Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  load       20 editors × 60 batches on one document, unthrottled
+  latency ms n=1200 min=3.96 p50=8.60 p95=12.50 p99=67.91 max=72.99
+  generator  32 % of 4 cores (0.8s CPU over 0.6s)
+  editor.validate    n=1200 min=0.38 p50=1.11 p95=2.39 p99=12.53 max=29.65
+  editor.persist     n=1200 min=1.94 p50=5.28 p95=7.83 p99=13.82 max=65.26
+  editor.broadcast   n=1200 min=0.21 p50=0.65 p95=1.73 p99=2.75 max=62.44
+  throughput 1884 batches/s over 0.6s

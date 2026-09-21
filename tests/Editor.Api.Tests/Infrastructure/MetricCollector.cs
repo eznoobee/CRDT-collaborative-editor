@@ -23,13 +23,37 @@ public sealed class MetricCollector : IDisposable
     // the gauge had not moved.
     private readonly ConcurrentQueue<Measurement> _measurements = new();
 
-    public MetricCollector(string meterName)
+    /// <param name="meterName">The meter to listen to.</param>
+    /// <param name="scope">
+    /// The <see cref="Meter.Scope"/> to restrict to, or null for every meter of
+    /// that name in the process.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>Scope matters for gauges and only for gauges.</b> A counter's
+    /// <see cref="Total"/> sums what this test caused, and another live host
+    /// contributing to the same meter name adds to it visibly. An observable
+    /// gauge is different: <see cref="Observe"/> pulls <em>every</em> published
+    /// instrument with that name, so one call records one sample per live host,
+    /// and <see cref="Latest"/> then returns whichever host happened to be
+    /// enumerated last — which may be a host that has never heard of this
+    /// test's connection.
+    /// </para><para>
+    /// That is what made the active-connection gauge test intermittent: it did
+    /// not race on the value, it read a different host's value. Passing this
+    /// test's own <c>factory.Services</c> narrows the listener to the meter
+    /// <c>IMeterFactory</c> created for that host, which makes the reading
+    /// independent of how many other tests are mid-flight.
+    /// </para>
+    /// </remarks>
+    public MetricCollector(string meterName, object? scope = null)
     {
         ArgumentNullException.ThrowIfNull(meterName);
 
         _listener.InstrumentPublished = (instrument, listener) =>
         {
-            if (instrument.Meter.Name == meterName)
+            if (instrument.Meter.Name == meterName
+                && (scope is null || ReferenceEquals(instrument.Meter.Scope, scope)))
             {
                 listener.EnableMeasurementEvents(instrument);
             }

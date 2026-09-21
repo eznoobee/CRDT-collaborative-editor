@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using Crdt.Core;
 using Editor.Api.Documents;
 using Editor.Api.Infrastructure;
@@ -126,8 +127,18 @@ public sealed class EditorMetricsTests
         // §13.32 applied to the metric list. A gauge derived from submissions
         // would report this document as having nobody on it.
         _fixture.RequireBoth();
-        using var metrics = new MetricCollector(EditorMetrics.MeterName);
         await using var factory = new EditorApiFactory(_fixture);
+
+        // Scoped to this host's meter, and the factory therefore built first.
+        // `Observe` pulls every published instrument of this name, so an
+        // unscoped collector records one sample per live host per call and
+        // `Latest` returns whichever was enumerated last — a host that knows
+        // nothing about the connection below. That is not a race on the value;
+        // it is reading the wrong gauge, and it is why this test was
+        // intermittent in a full suite and green on its own.
+        using var metrics = new MetricCollector(
+            EditorMetrics.MeterName,
+            factory.Services.GetRequiredService<IMeterFactory>());
 
         var documentId = await DocumentSetup.DocumentAsync(factory, "metrics-gauge-owner");
         await DocumentSetup.GrantAsync(factory, documentId, "metrics-watcher", Role.Viewer);
@@ -398,5 +409,48 @@ public sealed class EditorMetricsTests
                 TestContext.Current.CancellationToken);
 
         return documentId;
+    }
+
+    [Fact]
+    public async Task A_gauge_reading_belongs_to_one_host_and_not_to_whichever_was_enumerated_last()
+    {
+        // WHY THIS EXISTS. The gauge test above was intermittent in a full run
+        // and green on its own, and the obvious reading — a race between one
+        // test's connection and another's — was wrong. `Observe` pulls every
+        // published instrument carrying the meter's name, so one call records
+        // one sample per live host, and `Latest` returns whichever was
+        // enumerated last. It was not racing on a value; it was reading a
+        // different host's gauge.
+        //
+        // "Flake" would have closed it. This is the demonstration, so the
+        // diagnosis is in the suite rather than in a commit message: two hosts,
+        // a connection on exactly one of them, and the two gauges disagree.
+        _fixture.RequireBoth();
+        await using var busy = new EditorApiFactory(_fixture);
+        await using var idle = new EditorApiFactory(_fixture);
+
+        using var busyMetrics = new MetricCollector(
+            EditorMetrics.MeterName, busy.Services.GetRequiredService<IMeterFactory>());
+        using var idleMetrics = new MetricCollector(
+            EditorMetrics.MeterName, idle.Services.GetRequiredService<IMeterFactory>());
+
+        var documentId = await DocumentSetup.DocumentAsync(busy, "metrics-scope-owner");
+        await DocumentSetup.GrantAsync(busy, documentId, "metrics-scope-watcher", Role.Viewer);
+
+        await using (var watcher = await DocumentClient.JoinAsync(busy, "metrics-scope-watcher", documentId))
+        {
+            Assert.Null((await watcher.CatchUpAsync()).Code);
+
+            busyMetrics.Observe();
+            idleMetrics.Observe();
+
+            Assert.True(
+                busyMetrics.Latest("editor.connections.active") > 0,
+                "the host holding the connection did not count it");
+
+            // The whole point. This host has no connections, and an unscoped
+            // reading could have returned either number.
+            Assert.Equal(0, idleMetrics.Latest("editor.connections.active"));
+        }
     }
 }

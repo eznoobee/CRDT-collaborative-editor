@@ -1736,9 +1736,47 @@ rather than being quietly absent.
   readiness (§5) is what makes an out-of-order arrival safe, and `server_seq` is
   what makes catch-up queries answerable. Requiring ordered fan-out would also
   serialise it, which is the opposite of what §8 is for.
-- Batch operation persistence: buffer for up to 50 ms or 100 ops, whichever
-  comes first, then write in one round trip under the per-document advisory lock
-  (§6).
+- Batch operation persistence: **write as soon as there is no write in flight
+  for that document, and batch whatever arrives while one is**, capped at 100
+  operations, in one round trip under the per-document advisory lock (§6).
+
+  **This said "buffer for up to 50 ms or 100 ops, whichever comes first" until
+  9.4, and the 50 ms contradicted this section's own first performance target.**
+  The wait happens inside the segment target 1 measures, so §8 required a 25 ms
+  p99 across a span it also required to contain a 50 ms delay. 7b.4 measured
+  the consequence — `editor.persist` never below 28 ms, p50 57-59 ms, overall
+  p99 234 ms — and recorded it as a contradiction in this document rather than a
+  defect in the implementation, which is what it was.
+
+  **Adaptive is not "no batching", and it needed no new mechanism.** One
+  consumer loop per document drains the queue, writes, and only then looks
+  again, so every submission arriving during a write is waiting when it returns
+  and goes out as the next batch. The batch size is therefore the offered load,
+  measured continuously and for nothing. The amortisation the window existed for
+  is intact; what is gone is paying for it when there is nothing to amortise.
+  There is no threshold and so no mode to switch, which is why the measured
+  curve has no cliff in it.
+
+  Measured across six rates under both policies: the window costs a flat
+  50 ms of p50 at every rate — it is a constant, not a proportion, because the
+  timer is what the loop waits on and twenty typists never fill a 100-operation
+  batch before it expires — and past sixteen batches a second per editor it also
+  becomes a throughput ceiling, 326/s against adaptive's 630/s. Numbers in
+  `docs/phase-8-measurements.md`.
+
+  **The cap stays, and stays in operations.** It bounds one write's size; a long
+  burst becomes several bounded writes rather than one unbounded one.
+
+  **The correctness this rests on is the loop, not the lock.** `server_seq` is
+  assigned by reading the high-water mark under the advisory lock, so two
+  overlapping writes for one document would each be correct and their
+  *completion* order would be whichever transaction committed first — a client
+  could be told about sequence 12 before sequence 11 existed. The lock orders
+  transactions, not completions. One consumer per document removes the case by
+  construction. It is per document: different documents overlap freely, which is
+  what the per-document queues are for, and a test asserts both halves because
+  a globally serialised writer satisfies the first and is the cost this design
+  exists to avoid.
 - Backpressure: bounded per-connection outbound channel, **bounded in bytes**,
   because what exhausts an app server here is buffered payload rather than
   message count. If a client cannot keep up, drop it to catch-up-via-snapshot
@@ -5969,3 +6007,49 @@ and in seconds*. Asking "who sets this?" about the size produced the answer
 had never been implemented in either core, and nine phases of review had read
 that sentence as though it said one thing. A requirement with two halves
 sustains attention on the half that exists.
+
+### 13.55 An intermittent test is a diagnosis nobody has made yet
+
+9.4's adaptive flushing took a minute off the API suite, and the suite then
+failed once, in `EditorMetricsTests`, on a gauge assertion. Run alone the test
+was green, four times. Run as a full suite it was green twice more. Every
+available signal said *flake*, and the first explanation to hand was a race:
+the assertion compares a process-wide gauge before and after opening a
+connection, other tests open and close connections, so a concurrent close
+between the two readings would sink it.
+
+**That explanation was wrong, and it was wrong in the direction that makes a
+test look unfixable.** `MetricCollector.Observe` calls
+`RecordObservableInstruments`, which pulls *every* published instrument
+carrying the meter's name. Each live `EditorApiFactory` has its own meter under
+that name, so one `Observe` records one sample per host, and `Latest` returns
+whichever host was enumerated last. The test was not racing on a value. It was
+reading a different host's gauge, and it agreed with itself whenever it happened
+to be the only host alive — which is exactly the condition that "run it on its
+own to check" creates.
+
+> **"Intermittent" is a description of a symptom and is routinely mistaken for
+> an explanation.** It says the outcome depends on something the test does not
+> control. It does not say what, and the plausible first guess is not evidence.
+
+Two things follow, and the second is the one worth keeping.
+
+**Adaptive flushing did not cause this and did not fix it.** It changed the
+suite's timing enough to make a latent defect show, which is the ordinary way
+such defects surface: they arrive attached to an unrelated change and get
+attributed to it.
+
+**A diagnosis belongs in the suite, not in a commit message.** The repair —
+scoping the collector to one host's `IMeterFactory` — makes the test pass, and a
+passing test is equally consistent with the wrong explanation. So there is a
+second test that demonstrates the mechanism directly: two hosts, a connection on
+exactly one, and the two scoped gauges disagree. If the reading were ever global
+again, that test fails and says why, where a re-run of the original would just
+be intermittent once more.
+
+**The check, when a test is intermittent.** Do not reach for the first race that
+would explain it. Name the thing the test does not control, then establish that
+it is that thing rather than assuming — and if the mechanism can be exhibited
+deterministically, exhibit it. Where it cannot be, §13.53's rule applies
+instead: measure the baseline, because a failure that was already there is not
+evidence about the change that revealed it.

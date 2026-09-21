@@ -67,6 +67,99 @@ the stronger one:** it is what distinguishes this harness from one that happens
 to be timing the whole hub call, which is 3b.1's near-miss — a length measured on
 the payload rather than the frame — in the place it is easiest to repeat.
 
+---
+
+## Target 1, re-measured after 9.4's adaptive flushing · **still missed, and now for a different reason**
+
+`Release · a62bc23 · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Xeon 2.10GHz × 4 · 10 GiB`
+
+The window is gone from the segment. §8's own scenario, twenty editors at
+eight batches a second on one document, n = 1,200:
+
+| | p50 | p95 | p99 | throughput |
+|---|---|---|---|---|
+| 50 ms window (7b.4's arrangement) | 66.6 ms | — | **234 ms** | 161/s |
+| adaptive (9.4) | **10.1 ms** | **13.6 ms** | 54.7 ms | 162/s |
+
+**The p50 improves by a factor of six and is now well inside a target it used
+to be more than twice outside.** 7b.4's conclusion — *the p50 alone is more than
+twice the p99 target, so this is not a tail problem and no amount of tail work
+reaches it* — no longer holds. It is a tail problem now.
+
+### The curve, which is what 9.4 was asked for
+
+Six rates under both policies, one build, one run, alternating.
+
+| rate, per editor | adaptive p50 | adaptive p95 | adaptive p99 | window p50 | window p99 | adaptive thru | window thru |
+|---|---|---|---|---|---|---|---|
+| 1/s | 11.4 | 20.3 | 117.1 | 61.3 | 65.2 | 20/s | 20/s |
+| 2/s | 11.7 | 16.1 | 42.4 | 60.8 | 65.8 | 41/s | 41/s |
+| 4/s | 11.4 | 15.0 | 29.7 | 61.1 | 69.8 | 81/s | 81/s |
+| **8/s (§8's scenario)** | **10.9** | **14.4** | 71.4 | 61.2 | 143.3 | 162/s | 161/s |
+| 16/s | 10.3 | 14.2 | 30.2 | 60.1 | 115.2 | 324/s | 320/s |
+| 32/s | 9.9 | 13.1 | 38.5 | 60.3 | 67.6 | **630/s** | **326/s** |
+| saturating | 8.6 | 12.5 | 67.9 | — | — | **1,884/s** | 309/s (7b.4) |
+
+**No cliff.** That was the thing to look for, and the reason there is none is
+structural rather than lucky: there is no threshold in the code to cross. The
+adaptive p50 falls monotonically from 11.4 to 9.9 as offered load rises by a
+factor of 32, which is the batch size tuning itself — more company per write at
+higher load, and the write amortised over more of it.
+
+**The window's cost is a constant, not a proportion.** Its p50 sits at 60-61 ms
+at every rate, and the floor is the window itself: `min` was 51.3 ms at 1/s.
+This corrects a prediction written before the run, which expected the gap to
+shrink as load rose on the grounds that a busy server would fill its batches
+before the timer expired. It does not, because the timer is what the loop waits
+on and a full batch at 100 operations is far above what twenty typists produce.
+
+**Where the window does become proportional is throughput**, and only past 16/s:
+at 32 batches a second per editor, adaptive sustains 630/s against the window's
+326/s, and saturated it reaches 1,884/s. The window is a rate ceiling of roughly
+one flush per 50 ms per document.
+
+### The honest statement about the p99, which is that this data cannot settle it
+
+The two runs of this curve disagree about the p99 by more than the distance to
+the target. At 8/s adaptive: **36.6 ms** in the first run, **71.4 ms** in the
+second, same code, same machine, minutes apart. At 1/s it was 114.6 and 117.1 —
+stable, and attributable: `editor.validate` p99 is 99.4 ms there against a p50
+of 2.5 ms, in the **first measurement the process runs**. That is JIT, not load;
+the harness warms one submission per client, which does not warm the validation
+path.
+
+§8's own third rule is the one that applies: *a p99 over 50 requests is the worst
+of 50*. n = 1,200 puts twelve observations above the p99, and twelve
+observations on a four-core box shared with the generator is not enough for a
+25 ms decision.
+
+**The p95 is stable.** Across both runs and all six rates it sits between 12.5
+and 20.3 ms, always inside 25 ms, and it moves smoothly with load. If §8's
+target 1 were stated at p95 it would now pass, and the statement would be one
+this harness can actually support.
+
+> **That is a decision about §8 rather than about the code, and it is the same
+> decision target 4 needs.** It is not taken here.
+
+### What was decided, and what was rejected
+
+**Decided: §8's batching rule becomes adaptive.** Forced by the measurement —
+the fixed window is worse on p50 at every rate by a constant 50 ms, worse or
+equal on p99 at every rate, and caps throughput at roughly half past 16/s. There
+is no load shape in this data where it wins. Keeping it would also leave the
+code and §8 disagreeing, which §11's Phase 9 forbids.
+
+Rejected, with reasons:
+
+| Option | Why not |
+|---|---|
+| Keep the 50 ms window and move the target to ~250 ms | This was the live option after 7b.4, and it was live only because the window made 25 ms unreachable. It is not any more. |
+| Keep the window as the default and offer adaptive | Backwards: the measurement says adaptive is better everywhere. The window survives as `BatchingPolicy.FixedWindow` because the comparison needs it and a deployment dominated by lock contention rather than round trips could still want it. |
+| Declare target 1 met | It is not. 54.7 ms against 25 ms at §8's scenario, and the p99 is too unstable here to claim either way. |
+| Chase the remaining tail in `editor.validate` | Out of scope for a close-out, and premature: the p99 is not measured well enough to know there is a tail to chase. It needs a bigger sample and a generator off the box first. |
+
+---
+
 **What is not attributed:** the tails. They move between stages across load
 shapes, and the generator shares the server's process, so scheduling delay
 cannot be excluded. Settling that needs the out-of-process harness target 3 now
