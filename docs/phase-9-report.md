@@ -188,3 +188,38 @@ existing job — a guard passing while the new suite did not run.
 - **The unsent-work line's threshold and wording**, implemented and flagged.
 - **Row 38**, measured with its reversal condition, deliberately not fixed.
 - **Presence**, out of scope in §2.
+
+---
+
+## Addendum — the preflight, on the commit containing this report
+
+**`./scripts/phase-preflight.sh` PASSED for `82c92dede24cdd1c00676c64c0ebc83340d2d8a5`**,
+which is the commit that contains this report (§13.49).
+
+Two workflows for that exact commit, neither superseded:
+
+- **CI**, 15 jobs, all `success` — the .NET build and test, cross-implementation
+  conformance, the TypeScript core against a running server, client lint,
+  typecheck and test, the application in a browser, the walk, §7 against the
+  deployed stack, §9's offline-window discard in a browser, §5's collection seen
+  through the product, the browser document-load metric, the secret scan, and the
+  four §12 gates (sabotage, seeding, breakdown, register).
+- **Mutation**, 1 job, `success` — `Crdt.Core`'s score against §13.7's ratchet.
+
+All thirteen local gates green: workflows, format, breakdown, register,
+sabotage, seeding, tests, client, conformance, interop, e2e, mutation.
+
+**The named residue.** The commit adding this addendum is not itself certified by
+the run above — that is unavoidable while a report lives in the tree it
+describes, and 7b.11 chose the same arrangement. A known one-line gap is better
+than an unknown one. Everything the report asserts about code, measurements and
+register rows is in `82c92de` and was verified there.
+
+**One qualification, stated because it would otherwise be read out of the green.**
+Row 31's suite has been green, red, green across four runs, failing at the point
+of reaching the application with `Failed to fetch` while the API was serving.
+The run that closed the row exercised the whole path and read §9's sentence off
+the screen, and the run above is green — but four runs is not evidence of a
+stable suite. Instrumentation now captures which request the browser could not
+make, so the next failure names it rather than costing a cycle. Until then this
+is a known intermittent, not a flake dismissed.
