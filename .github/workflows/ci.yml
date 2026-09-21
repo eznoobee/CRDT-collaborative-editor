@@ -315,6 +315,40 @@ jobs:
       - name: Deployment conformance
         run: ./scripts/deployment.sh
 
+  offline-window:
+    name: §9's offline-window discard, in a browser
+    runs-on: ubuntu-latest
+
+    # Register row 31. Its own job for the reason the deployment job gives: the
+    # phase preflight derives its expected job list from this file, so only a
+    # suite with a job of its own can be required by it.
+    #
+    # And its own stack, which is the part specific to this row. §5's T_retire
+    # is seven days; a browser cannot be left open that long, so this brings the
+    # product up with the retirement durations shortened and nothing else
+    # changed. It cannot share the walk's stack — a fifteen-second T_retire
+    # there would retire the walk's own tabs between its steps.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      # As with the walk: nothing supplied from outside but what a deployment's
+      # operator supplies. The overlay changes three timer settings and no code.
+      - name: Offline-window discard
+        run: ./scripts/offline-window.sh
+
   breakdown:
     name: §12's required fields in every breakdown
     runs-on: ubuntu-latest

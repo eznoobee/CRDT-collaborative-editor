@@ -123,9 +123,32 @@ function spkiOf(certFile: string): string {
   return createHash('sha256').update(der).digest('base64');
 }
 
-export async function startWalk(): Promise<Walk> {
+/** What a suite may vary about the stack it brings up. */
+export interface WalkOptions {
+  /**
+   * Compose overlays applied after the walk's own, in order.
+   *
+   * @remarks
+   * <b>Not a way to make a failing step pass.</b> The walk's overlay carries a
+   * comment saying that anything added to it makes the walk a test of a
+   * different stack, and that is still true — which is exactly why a suite that
+   * genuinely needs a different stack brings its own file rather than editing
+   * that one. Register row 31 is the case: observing §9's offline-window
+   * discard needs `T_retire` measured in seconds, and a stack that retires a
+   * replica after a minute would retire the walk's own tabs between its steps.
+   */
+  readonly overlays?: readonly string[];
+
+  /** Extra entries for the generated env file, as `KEY=value`. */
+  readonly env?: readonly string[];
+
+  /** The port the proxy is published on. Distinct per suite, so two can run. */
+  readonly port?: number;
+}
+
+export async function startWalk(options: WalkOptions = {}): Promise<Walk> {
   const host = hostAddress();
-  const port = Number(process.env['WALK_HTTPS_PORT'] ?? 8443);
+  const port = options.port ?? Number(process.env['WALK_HTTPS_PORT'] ?? 8443);
 
   // The issuer a real deployment would have, outside the stack.
   const oidc = await startOidc({
@@ -162,12 +185,24 @@ export async function startWalk(): Promise<Walk> {
     `OIDC_CLIENT_ID=${CLIENT_ID}`,
     'REDIS_CONFIGURATION=redis:6379',
     `WALK_CA_FILE=${oidc.caFile}`,
+    ...(options.env ?? []),
     '',
   ].join('\n'));
 
-  const env = { COMPOSE_ENV_FILE: envFile };
-  const files = ['-f', 'docker-compose.yml', '-f', 'deploy/docker-compose.walk.yml',
-    '--env-file', envFile];
+  // A project name per port, so two suites bringing up their own stacks do not
+  // adopt each other's containers — and, worse, do not have one's
+  // `down --volumes` delete the other's database mid-run. The walk keeps the
+  // default name it has always had.
+  const env = {
+    COMPOSE_ENV_FILE: envFile,
+    ...(options.port === undefined ? {} : { COMPOSE_PROJECT_NAME: `editor-walk-${options.port}` }),
+  };
+  const files = [
+    '-f', 'docker-compose.yml',
+    '-f', 'deploy/docker-compose.walk.yml',
+    ...(options.overlays ?? []).flatMap((overlay) => ['-f', overlay]),
+    '--env-file', envFile,
+  ];
 
   // A FRESH VOLUME, ASSERTED RATHER THAN ASSUMED. Compose volumes persist, so a
   // migration test runs forever against a database an earlier run migrated and
