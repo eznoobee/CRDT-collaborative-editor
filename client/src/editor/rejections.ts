@@ -65,12 +65,31 @@ export const REJECTION = {
    * the user is being asked to log in again.
    */
   signInRequired: 'sign_in_required',
+
+  /**
+   * §5's pending-set bound, exceeded by what arrived from the connection.
+   *
+   * The second entry no server emits — `sign_in_required` was the first. This
+   * one is raised by the client about its own buffer: more operations are
+   * waiting on a causal dependency than §5's bound allows, which means this
+   * replica is missing something the connection is not going to resend on its
+   * own.
+   *
+   * **It is not a drop and it is not a loss.** §5 allows exactly one exception
+   * to "do not drop" — `resync_required` — and this is not it. The recovery
+   * fetches the missing dependencies by version vector, the gaps close, the
+   * pending set drains, and the outbox is never touched. Nothing a user typed
+   * is at risk, which is why the recovery is `catch-up` and not `resync`.
+   */
+  pendingOverflow: 'pending_overflow',
 } as const;
 
 /** What the controller does with a refusal. */
 export type Recovery =
   /** Reconcile with the server, then submit the same batch once more. */
   | 'catch-up-and-retry'
+  /** Reconcile with the server. There is no batch to resubmit. */
+  | 'catch-up'
   /** Wait out the window the server named, then submit the same batch again. */
   | 'wait-and-retry'
   /** Throw local state away, take a snapshot, and report the lost work. */
@@ -104,6 +123,13 @@ export function recoveryFor(code: string): Recovery {
   switch (code) {
     case REJECTION.unknownOrigin:
       return 'catch-up-and-retry';
+
+    case REJECTION.pendingOverflow:
+      // Not `catch-up-and-retry`. That recovery resubmits the batch the server
+      // refused; this one has no batch — the overflow happened on the way in,
+      // not on the way out, and what needs fetching is what this replica is
+      // missing.
+      return 'catch-up';
 
     case REJECTION.rateLimited:
       return 'wait-and-retry';

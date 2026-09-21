@@ -36,6 +36,41 @@ import { replacementBetween } from './diff';
 export const MAX_OPERATIONS_PER_BATCH = 256;
 
 /**
+ * Operations this session will hold waiting on a causal dependency (§5).
+ *
+ * @remarks
+ * <p>
+ * §5 bounds the pending set <b>per connection</b>, and says in as many words
+ * that whoever attaches a replica to a network connection sets it. Both cores
+ * therefore default it to unbounded, deliberately: a replica replaying a stored
+ * trace legitimately buffers as much as the trace demands, and an unbounded
+ * buffer fed by a local file is not a denial-of-service vector.
+ * </p><p>
+ * <b>Nobody was that layer.</b> The server has no pending set by design —
+ * `IngestValidator` refuses a non-ready operation rather than buffering it,
+ * which removes the vector instead of bounding it — so the browser client is the
+ * only place the bound can be set, and for nine phases it was not. The only
+ * assignments anywhere were in the two causal-readiness test files, which is why
+ * a fully covered core hid it: the core's tests set the bound themselves and
+ * proved the mechanism works, which was never the question (register row 36).
+ * </p><p>
+ * <b>The number.</b> §13.37's rule is to size a limit by the largest legitimate
+ * use, not by what feels safe. That use is a peer's offline afternoon arriving
+ * across a partition — 2,000 operations, the figure row 27 put in
+ * `limits/use.ts` as `BURST` — and the realistic worst case is several
+ * peers reconnecting at once, so this is five of them. It is not a memory
+ * budget: 10,000 buffered operations is a few megabytes in a tab, and what makes
+ * an unbounded pending set dangerous is that it has no number at all, which is
+ * why §5 asks for one rather than for a small one.
+ * </p><p>
+ * Exceeding it is not a drop. §5 allows exactly one exception to "do not drop"
+ * and this is not it, so the core throws and the connection layer recovers by
+ * fetching what it is missing — see `SyncController`'s `pending_overflow`.
+ * </p>
+ */
+export const MAX_PENDING_OPERATIONS = 10_000;
+
+/**
  * One editing session over the local replica (§9).
  *
  * @remarks
@@ -63,8 +98,25 @@ export class DocumentSession {
    * @param sink - Receives every batch this session authors, in §6 binary.
    */
   constructor(id: ReplicaId, sink: (operations: Uint8Array) => void) {
-    this.replica = new Replica(id);
+    this.replica = this.install(new Replica(id));
     this.sink = sink;
+  }
+
+  /**
+   * Installs a replica under this session's bounds (§5).
+   *
+   * @remarks
+   * Every path that puts a replica in this session goes through here — the
+   * constructor, `restore`, and `adopt` — because a bound set in the
+   * constructor alone is lost on exactly the paths that follow a long absence,
+   * which is when a peer's backlog is largest. A reload and a snapshot catch-up
+   * would each have silently returned the session to unbounded, and nothing
+   * about a session reading `maxPending === MAX_SAFE_INTEGER` looks different
+   * from one that never set it.
+   */
+  private install(replica: Replica): Replica {
+    replica.maxPending = MAX_PENDING_OPERATIONS;
+    return replica;
   }
 
   /** The replica id this session authors under (§7's assignment). */
@@ -200,7 +252,8 @@ export class DocumentSession {
   ): DocumentSession {
     const decoded = decodeSnapshot(snapshot);
     const session = new DocumentSession(id, sink);
-    session.replica = Replica.import(id, decoded.elements, decoded.versionVector);
+    session.replica = session.install(
+      Replica.import(id, decoded.elements, decoded.versionVector));
     return session;
   }
 
@@ -223,7 +276,7 @@ export class DocumentSession {
    * omits — collected tombstones, above all — resurrected on this client alone.
    */
   adopt(replica: Replica): void {
-    this.replica = replica;
+    this.replica = this.install(replica);
     this.changed();
   }
 

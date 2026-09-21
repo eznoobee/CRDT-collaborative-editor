@@ -1,4 +1,5 @@
-import { DocumentSession } from './DocumentSession';
+import { DocumentSession, MAX_PENDING_OPERATIONS } from './DocumentSession';
+import { REJECTION } from './rejections';
 import { SyncController, type CatchUpOutcome, type Session, type SubmitOutcome, type Transport } from './SyncController';
 import { Replica, encodeOperations, encodeSnapshot, parseReplicaId } from '../crdt';
 
@@ -593,5 +594,85 @@ describe('losing the connection', () => {
     transport.broadcast?.(encodeOperations(operations));
 
     expect(sync.session?.text).toBe('yo');
+  });
+});
+
+describe("§5's pending-set bound, overflowed (register row 36)", () => {
+  /**
+   * `count` operations from `PEER` that can never become ready.
+   *
+   * Every one is parented on the peer's sequence 0, which is never delivered,
+   * so §5's density rule holds all of them. What a partition delivers when the
+   * link comes back and the operation everything depends on is still in flight.
+   */
+  function stranded(count: number): Uint8Array {
+    const parent = { replica: PEER, seq: 0n };
+    return encodeOperations(Array.from({ length: count }, (_, i) => ({
+      kind: 'insert' as const,
+      id: { replica: PEER, seq: BigInt(i + 1) },
+      value: 'a',
+      parent,
+      side: 'R' as const,
+      rightOrigin: null,
+    })));
+  }
+
+  it('reports the overflow and catches up, rather than throwing into the socket', async () => {
+    // Before this, the core's throw landed in the SignalR broadcast handler
+    // with nothing catching it: §5's bound was enforced and the enforcement
+    // was unobservable, which §13.13 says is not enforcement at all.
+    const transport = new FakeTransport();
+    const { sync } = controller(transport);
+    await sync.start();
+    await settle();
+
+    const before = transport.vectors.length;
+    transport.broadcast!(stranded(MAX_PENDING_OPERATIONS + 1));
+    await settle();
+
+    expect(sync.problem?.code).toBe(REJECTION.pendingOverflow);
+    expect(sync.state).toBe('live');
+
+    // The recovery is a catch-up by version vector — asking for what this
+    // replica is missing, which is what the pending set is waiting for.
+    expect(transport.vectors.length).toBe(before + 1);
+    expect(transport.forced.at(-1)).toBe(false);
+  });
+
+  it('does not touch the outbox, because nothing was lost', async () => {
+    // The distinction that decides the recovery. `resync` is §5's one exception
+    // to "do not drop" and reports a count; this is not that case — the core
+    // threw instead of dropping, so the user's unsent work is untouched and
+    // there is nothing to report as lost. A recovery that emptied the outbox
+    // here would lose typed text to a peer's backlog arriving out of order.
+    const transport = new FakeTransport();
+    transport.submitResults = [new Error('offline')];
+    const { sync } = controller(transport, { outbox: [encodeOperations([])] });
+    await sync.start();
+    await settle();
+
+    transport.broadcast!(stranded(MAX_PENDING_OPERATIONS + 1));
+    await settle();
+
+    expect(sync.problem?.lost).toBe(0);
+    expect(sync.pending).toHaveLength(1);
+  });
+
+  it('stops on a second overflow, instead of catching up forever', async () => {
+    // The same budget as `unknown_origin`, for the same reason: a second
+    // overflow after a successful catch-up means this client asked for what it
+    // was missing, was given it, and is still missing it. That is a bug here,
+    // and retrying a bug forever is a loop that looks like a slow network.
+    const transport = new FakeTransport();
+    const { sync } = controller(transport);
+    await sync.start();
+    await settle();
+
+    transport.broadcast!(stranded(MAX_PENDING_OPERATIONS + 1));
+    transport.broadcast!(stranded(MAX_PENDING_OPERATIONS + 1));
+    await settle();
+
+    expect(sync.state).toBe('stopped');
+    expect(sync.problem?.code).toBe(REJECTION.pendingOverflow);
   });
 });

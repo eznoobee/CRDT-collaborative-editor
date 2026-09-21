@@ -1,4 +1,5 @@
 export { Replica } from './replica';
+export { PendingSetOverflowError } from './pendingSetOverflow';
 export type { ElementId } from './elementId';
 export { compareElementId, elementIdsEqual, elementKey } from './elementId';
 export type { ReplicaId } from './replicaId';

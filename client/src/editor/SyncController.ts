@@ -1,4 +1,4 @@
-import { Replica, decodeSnapshot, parseReplicaId } from '../crdt';
+import { PendingSetOverflowError, Replica, decodeSnapshot, parseReplicaId } from '../crdt';
 import { Backoff, DEFAULT_BACKOFF, type BackoffOptions } from './backoff';
 import { REJECTION, recoveryFor } from './rejections';
 import type { DocumentSession } from './DocumentSession';
@@ -189,6 +189,9 @@ export class SyncController {
   private stopped = false;
   private draining = false;
   private problemState: SyncProblem | null = null;
+
+  /** Whether a pending-set overflow is already being recovered from (§5, §9). */
+  private overflowed = false;
   private readOnlyState = false;
   private retried = new Set<string>();
 
@@ -225,7 +228,7 @@ export class SyncController {
       // starts sending the moment the connection joins the group. Dropping it
       // is safe: catch-up runs on the same connection and asks for everything
       // this replica does not have.
-      this.sessionState?.receive(operations);
+      this.deliver(() => this.sessionState?.receive(operations));
       this.changed();
     });
 
@@ -511,8 +514,59 @@ export class SyncController {
       );
     }
 
-    this.sessionState.receive(caught.operations);
+    const session = this.sessionState;
+    this.deliver(() => session.receive(caught.operations));
+
+    // Cleared only after the catch-up applied without overflowing again. Set
+    // before this line and the budget would be spent by the reconciliation
+    // that was supposed to restore it.
+    this.overflowed = false;
     this.changed();
+  }
+
+  /**
+   * Applies what arrived, recovering from §5's pending-set bound (§9).
+   *
+   * @remarks
+   * <p>
+   * Both paths that hand operations to the session go through here, because
+   * both can overflow: a broadcast can arrive with its dependency still in
+   * flight, and a catch-up answer can too — the server sends what this replica
+   * does not have, in `server_seq` order, which §8 explicitly does not promise
+   * to be causal order.
+   * </p><p>
+   * <b>The overflow is not a loss.</b> The core throws rather than dropping, so
+   * nothing has been discarded when this runs; some of the batch applied and
+   * the rest did not, and catch-up by version vector asks for exactly what is
+   * missing. Duplicates among the re-sent operations are one of §5's three
+   * guaranteed sources and cost a counter.
+   * </p><p>
+   * <b>Once, then stop.</b> The same bound as `unknown_origin`, for the same
+   * reason: a second overflow after a successful catch-up means the client
+   * asked for what it was missing, was given it, and is still missing it —
+   * which is a bug here, and retrying a bug forever is a loop that looks like a
+   * slow network. The flag clears on the next successful reconciliation.
+   * </p>
+   */
+  private deliver(apply: () => void): void {
+    try {
+      apply();
+    } catch (error) {
+      if (!(error instanceof PendingSetOverflowError)) {
+        throw error;
+      }
+
+      this.fail(REJECTION.pendingOverflow, 0);
+
+      if (this.overflowed) {
+        this.stopped = true;
+        this.setState('stopped');
+        return;
+      }
+
+      this.overflowed = true;
+      void this.reconcile(false);
+    }
   }
 
   /**
@@ -659,6 +713,15 @@ export class SyncController {
         this.setState('offline');
         this.retry();
         return 'halt';
+
+      case 'catch-up':
+        // Unreachable, and an assertion rather than a fall-through. This
+        // recovery belongs to the receive path — a pending-set overflow, which
+        // this client raises about its own buffer — and reaching it here would
+        // mean a server answered a submission with `pending_overflow`, which
+        // is not a code it may return. Letting it fall into `stop` would hide
+        // that behind a plausible-looking halt.
+        throw new Error(`${code} is not a refusal the server may return`);
 
       case 'stop':
       default:
