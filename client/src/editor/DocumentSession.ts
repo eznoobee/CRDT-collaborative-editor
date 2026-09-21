@@ -71,6 +71,36 @@ export const MAX_OPERATIONS_PER_BATCH = 256;
 export const MAX_PENDING_OPERATIONS = 10_000;
 
 /**
+ * How long one operation may wait on a causal dependency (§5).
+ *
+ * @remarks
+ * <p>
+ * §5 bounds the pending set <b>in operations and in seconds</b>, and the second
+ * half is not decoration. The size bound catches a flood; it does nothing at all
+ * about four operations stuck forever, which is the quieter failure and the
+ * worse one — the client renders a document missing those operations, converges
+ * with nobody, and shows `live` the whole time (§13.13).
+ * </p><p>
+ * <b>The number.</b> Longer than any legitimate wait. A dependency held back by
+ * §8's unordered fan-out arrives within a round trip; the longest legitimate
+ * case is a catch-up answer crossing a bad link, which row 27 put at 45 seconds
+ * (`SLOW_RELOAD_SECONDS`, the train tunnel). Sixty seconds is past that, and is
+ * also two of this client's own 30-second acknowledgement intervals — a
+ * dependency still missing after the client has twice told the server what it
+ * holds is not in flight.
+ * </p><p>
+ * <b>Age is measured per operation, from when it entered the set</b>, which §5
+ * is explicit about: a cascade that releases some of the backlog must not
+ * restart the clock on what is left. `SyncController` therefore keys on element
+ * identity rather than watching the count, because a set that stays at four
+ * while four different operations pass through it is healthy and one that stays
+ * at four because the same four are stuck is not, and the count cannot tell
+ * them apart.
+ * </p>
+ */
+export const MAX_PENDING_AGE_MS = 60_000;
+
+/**
  * One editing session over the local replica (§9).
  *
  * @remarks
@@ -178,6 +208,11 @@ export class DocumentSession {
   /** Operations waiting on a causal dependency (§5). */
   get pendingCount(): number {
     return this.replica.pendingCount;
+  }
+
+  /** Which operations are waiting, for §5's age bound. */
+  get pendingKeys(): readonly string[] {
+    return this.replica.pendingKeys;
   }
 
   /** Duplicate deliveries dropped, which §5 guarantees is never zero for long. */

@@ -1904,9 +1904,17 @@ is a stress target, not a steady state.
   outbox holds operations authored under the stored replica id, and they are
   submittable only under a binding for that same id.
 
-- **Every rejection the server can return has exactly one defined client
-  recovery, and each produces a visible change of state.** A code the client
-  swallows is a client that appears to work and silently is not (§13.13).
+- **Every code in this table has exactly one defined client recovery, and each
+  produces a visible change of state.** A code the client swallows is a client
+  that appears to work and silently is not (§13.13).
+
+  Most of them are refusals the server returns. **Two are raised by the client
+  about itself** — `sign_in_required` and `pending_overflow` — and they are in
+  the same table deliberately: what matters to the user is that something
+  stopped and why, and a second mechanism for the client's own failures would
+  be a second place for one of them to acquire the recovery "nothing happens".
+  The table said "every rejection the server can return" until 9.2, by which
+  point it had one entry no server emits and a sentence that did not cover it.
 
   | Code | Recovery |
   |---|---|
@@ -1918,6 +1926,7 @@ is a stress target, not a steady state.
   | `unknown_origin` | The server does not have an operation this batch references. Catch up by version vector, then resubmit once. Repeated occurrence is a bug, not a race. |
   | `rate_limited` | §7's abuse budget is spent. Wait the delay the refusal carries, then resubmit **the same bytes** — no catch-up, because nothing about the document changed. Unbounded retries, unlike `unknown_origin`: a repeat means the window has not rolled over, which is the server working. |
   | `resync_required` | §5's GC watermark: the referenced id is at or below it and is gone. Discard local state, take a snapshot, and report the unsent operations as lost — this is the one case where §5's "do not drop" rule has an exception, so it is the one the user has to be told about. |
+  | `pending_overflow` | **Client-raised.** §5's pending-set bound — in operations or in seconds — has been exceeded by what arrived on the connection. Catch up by version vector, which asks for exactly the dependencies being waited on; do not touch the outbox and do not report anything lost, because nothing was dropped. Once per stuck operation: a catch-up that succeeded and left the same operation waiting has established that the dependency is not coming, and that is a `stop`. |
 
   **`rate_limited` is the one refusal that carries a number, and the number is
   the server's.** A client left to invent the delay either hammers the limit it
@@ -2010,6 +2019,39 @@ is a stress target, not a steady state.
   says a sign-in is needed. §7 requires this rather than an exception, because
   an unhandled rejection in the refresh path discards unsent work at exactly
   the moment the user is being asked to log in again.
+
+  **`pending_overflow` joins the table** and is the second entry no server
+  emits. §5 bounds the pending set *per connection*, in operations and in
+  seconds, and names the layer that attaches a replica to a connection as the
+  one that sets it — which in this product is the browser client and nothing
+  else, because the server refuses a non-ready operation rather than buffering
+  it.
+
+  **The recovery is a catch-up, not a resync, and the difference is the whole
+  point.** The core throws rather than dropping, so when this fires nothing has
+  been discarded: some of the batch applied, the rest did not, and the version
+  vector says precisely what is missing. Asking for it closes the gap, the
+  pending set drains, and the user's unsent work is never involved.
+  `resync_required` remains the only code that destroys unsent work, and
+  widening this one to behave like it would lose typed text to a peer's backlog
+  arriving out of order.
+
+  **The two halves of the bound share one code because they mean one thing:**
+  this replica is missing a dependency that is not going to arrive by itself.
+  The size half catches a flood. The age half catches the quieter failure the
+  size half cannot see — four operations stuck permanently, far below any size
+  bound, leaving the client rendering a document missing them, converging with
+  nobody, and reporting `live` throughout.
+
+  **Age is enforced by the connection layer, not by the core, and that is not a
+  compromise.** §5 already puts the bound at the connection, and a core that
+  read a clock would replay a committed trace differently depending on when it
+  ran — which §9's corpus cannot tolerate. The core exposes which operations are
+  waiting; the client, which already has a timer, records when each was first
+  seen and measures from there. That satisfies §5's rule that age runs from when
+  an operation *entered* the set rather than from the last time the set changed:
+  a cascade releasing part of a backlog removes those entries and leaves the
+  rest with their original timestamps.
 
 - Reconnect with exponential backoff and jitter. On reconnect, send the local
   version vector and receive only the missing operations.
@@ -2561,7 +2603,7 @@ written, not done).
 | 33 | A walk step observing GC's effect on the deployed stack | **still open — 7b.10 attempted it and changed its terms; scheduled 9.7** | Its blocker is not row 6, which landed in 7b.2, and **not Docker, which CI has** (§13.51). The real constraint is that §10's metric surface is served on an admin port the proxy deliberately does not forward — publishing it would undo a §7 control in the artefact that ships. So the walk observes the product-visible consequence instead, which 7b.10 identified: after collection and truncation a first-open client's catch-up returns a snapshot where it previously returned a delta. Asking this question is also what found the stranding defect §13.48 records | §5, §7, §10, §13.19, §13.27, §13.48, §13.51 |
 | 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
 | 34 | Audit the convergence tests for §13.42's shape | **CLOSED (7b.9), and the scoping lead was wrong** | `ScaleOutTests`' rejoin case does *not* adopt a snapshot — an empty version vector asks for everything, which is eleven operations, well under `MaxDeltaOperations`, so catch-up answers with a delta and the rejoining replica places every operation itself. Probed directly: `caught.Snapshot` is null. The file named as the worst case is one of the better ones. What the audit found instead is structural and larger: **a convergence assertion is invariant under any consistent ordering rule**, so none of the twenty-five two-party comparisons can detect a placement bug (§13.47). Inverting the sibling tie-break turns red 3 of 77 in `Crdt.Core.Tests`, 2 of 14 in `Conformance`, 1 of 393 in `Editor.Api.Tests` and **0 of 213** in the default client suite — every detection a comparison against a committed value. Repaired: `client/src/crdt/elementId.test.ts`, which TypeScript never had while `AGENTS.md` calls the comparator load-bearing *because* TypeScript has no `Guid`. `scripts/placement-probe.sh` makes it re-runnable; `docs/convergence-audit.md` names the property each file's comparison actually guards | §13.42, §13.47, §13.19 |
-| 36 | §5's per-connection pending-set bound is never set by the product | **8** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody does. The server has no pending set by design (`IngestValidator` rejects a non-ready operation rather than buffering it, which removes the vector instead of bounding it), so the only layer left is the browser client, and `DocumentSession` constructs `new Replica(id)` and leaves the bound alone. The only assignments anywhere are in the two causal-readiness test files. Deferred rather than fixed in 7b because the number is a §9 question — what a client should do when a peer's backlog exceeds what it will hold is a recovery, not a refusal, and §9's rejection table has no entry for it | §5, §9, §13.37 |
+| 36 | §5's per-connection pending-set bound is never set by the product | **CLOSED (9.2), and the bound had two halves, of which nobody had implemented either** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody did, for nine phases, while both cores carried a complete test of the mechanism that set the bound itself first (§13.54). Fixed in `DocumentSession`, at **10,000** operations: §13.37's largest legitimate use is one peer's offline afternoon at 2,000 (row 27's `BURST`) and the realistic worst case is five peers reconnecting at once. Installed at all three places a replica enters a session — the constructor, `restore` and `adopt` — because the last two are the paths that follow a reload and a snapshot catch-up, which is when a backlog is largest. **The second half was found while fixing the first:** §5 bounds the set *in operations and in seconds*, and the age bound existed nowhere in either core. It is enforced at the connection layer, keyed on element identity so a cascade cannot restart the clock, with the core kept clock-free so §9's corpus still replays deterministically. Recovery is §9's new `pending_overflow`: catch up by version vector, never touch the outbox, once per stuck operation | §5, §9, §13.37, §13.54 |
 | 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **8** | `SnapshotSweeper` ranks laggards **globally** and sweeps the top N, so a test asserting that *its* document was swept is asserting that no other test left N documents further behind. The test knows — its `BatchSize` is set to 64 with a comment saying the database is shared — and 64 is a number that was large enough at the time. 7b.7's use tests write the largest documents in the suite and turned it red once, then green on a re-run, which is the signature. They now remove their documents through `DELETE /documents/{id}`, which is hygiene rather than a fix: the next test that writes a big document brings it back. **Widening the batch until the red goes away is tuning a control into silence** (§13.37's second half), so the real repair is to make the sweep assertion independent of the ranking — sweep scoped to a document, or assert on the document's snapshot given that it was in the batch rather than assuming it was | §8, §13.31, §12 |
 | 38 | An interior placeholder is never collected, and the fraction grows without bound | **MEASURED (7b.8) — left as a measurement by decision, not fixed** | 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages. Row 29's measurement was asked about payloads and answered about positions: a placeholder costs about one byte, so this is a §5 correctness question about whether one can be spliced out by rewiring its child's parent while preserving Definition 4 for a concurrent insert naming it as a right origin — **not** to be attempted by relaxing rule 2, which 7.3 settled. Left deliberately at the close-out: it may not be resolvable, and starting without finishing would be worse than the measured, explained state it is in. **Reversal condition:** take it if §5's collection rules are reopened for another reason, or if a document's tombstone fraction is observed causing a real load problem. Numbers in `docs/gc-reclamation.md` | §5, §8, §13.46 |
 | 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
@@ -5890,3 +5932,40 @@ the system did unbroken.** Before/after is the whole method, and a tool that
 only runs the *after* has an unstated premise — that everything was green — which
 is exactly the kind of assumption §13.51 records this project making about its
 own capabilities. State it, or measure it. This one now measures it.
+
+### 13.54 A test that supplies the configuration proves the mechanism, not the product
+
+§5 requires the pending set to be bounded per connection. Both cores implement
+the bound, both default it to unbounded with a written reason — a replica is not
+a connection — and both say in their documentation that whoever attaches a
+replica to a network connection sets it. Nobody ever did. For nine phases the
+shipped browser client ran with `maxPending` at `Number.MAX_SAFE_INTEGER`.
+
+**What makes this worth writing down is that the bound was fully tested the
+whole time.** `causalReadiness.test.ts` and `CausalReadinessTests` each overflow
+the pending set and assert the refusal. Both begin by setting `maxPending`
+themselves. They are correct tests of a correct mechanism, and they are the
+reason nobody looked: coverage of the feature was complete, and the feature was
+switched off.
+
+> **A test that supplies the configuration is testing the mechanism. Whether
+> anything in the product supplies it is a different question, and no amount of
+> the first kind of test asks it.**
+
+This is §13.41's question — *does anything invoke this, or only the test?* —
+asked about a value rather than a call. The existing form catches a service
+nobody starts. It does not catch a setting nobody sets, because the setting
+*is* used, on every apply, against a number that makes it inert.
+
+**The general check.** For any option whose default is deliberately permissive:
+grep for assignments and discard the ones in test files. What remains is the
+product's opinion. If nothing remains, the documented sentence naming who sets
+it is describing a layer that does not exist, and the default is the behaviour
+— which for a safety bound means there is none.
+
+**It is also how the second half was found.** §5 bounds the set *in operations
+and in seconds*. Asking "who sets this?" about the size produced the answer
+"nobody", and asking it about the age produced something worse: the age bound
+had never been implemented in either core, and nine phases of review had read
+that sentence as though it said one thing. A requirement with two halves
+sustains attention on the half that exists.

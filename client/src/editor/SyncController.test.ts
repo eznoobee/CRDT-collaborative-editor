@@ -1,4 +1,4 @@
-import { DocumentSession, MAX_PENDING_OPERATIONS } from './DocumentSession';
+import { DocumentSession, MAX_PENDING_AGE_MS, MAX_PENDING_OPERATIONS } from './DocumentSession';
 import { REJECTION } from './rejections';
 import { SyncController, type CatchUpOutcome, type Session, type SubmitOutcome, type Transport } from './SyncController';
 import { Replica, encodeOperations, encodeSnapshot, parseReplicaId } from '../crdt';
@@ -129,6 +129,11 @@ function controller(transport: FakeTransport, options: {
 } = {}) {
   const pending: (() => void)[] = [];
   const acks: (() => void)[] = [];
+
+  // §5's pending age is measured in seconds, and a test that waited them out
+  // would be a test nobody runs. The controller's clock is injected for the
+  // same reason `schedule` is.
+  const clock = { at: 1_000_000 };
   const sync = new SyncController(
     (replicaId) => {
       const built = new DocumentSession(parseReplicaId(replicaId), () => {});
@@ -143,6 +148,7 @@ function controller(transport: FakeTransport, options: {
     options.outbox ?? [],
     {
       random: () => 0.5,
+      now: () => clock.at,
 
       // §5's report timer and the reconnect backoff share one scheduling seam
       // in the controller, which is right there and wrong here: a test that
@@ -176,6 +182,10 @@ function controller(transport: FakeTransport, options: {
     },
     get scheduled(): number {
       return pending.length;
+    },
+    /** Moves the injected clock, for §5's pending age. */
+    advance(ms: number): void {
+      clock.at += ms;
     },
   };
 }
@@ -674,5 +684,161 @@ describe("§5's pending-set bound, overflowed (register row 36)", () => {
 
     expect(sync.state).toBe('stopped');
     expect(sync.problem?.code).toBe(REJECTION.pendingOverflow);
+  });
+});
+
+describe("§5's pending-set bound in seconds (register row 36, second half)", () => {
+  /** One operation that can never become ready: its parent is never delivered. */
+  function stuck(seq: number): Uint8Array {
+    return encodeOperations([{
+      kind: 'insert' as const,
+      id: { replica: PEER, seq: BigInt(seq) },
+      value: 'a',
+      parent: { replica: PEER, seq: 0n },
+      side: 'R' as const,
+      rightOrigin: null,
+    }]);
+  }
+
+  it('leaves a briefly waiting operation alone', () => {
+    // The pair, and the one that says the bound is a bound rather than a ban.
+    // An operation held back by §8's unordered fan-out is waiting correctly and
+    // arrives within a round trip; a client that recovered from that would
+    // catch up on every out-of-order broadcast it ever received.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+
+    return (async () => {
+      await harness.sync.start();
+      await settle();
+
+      transport.broadcast!(stuck(1));
+      await settle();
+
+      const before = transport.vectors.length;
+      harness.advance(MAX_PENDING_AGE_MS - 1);
+      await harness.ackTick();
+
+      expect(harness.sync.problem).toBeNull();
+      expect(transport.vectors.length).toBe(before);
+    })();
+  });
+
+  it('recovers from four operations stuck forever, which the size bound cannot see', async () => {
+    // The whole reason §5 bounds the set in seconds as well as in operations.
+    // Four is nowhere near 10,000, so the size bound never fires; without an
+    // age bound this client renders a document missing those operations,
+    // converges with nobody, and reports `live` throughout — §13.13's shape.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    for (const seq of [1, 2, 3, 4]) {
+      transport.broadcast!(stuck(seq));
+    }
+    await settle();
+
+    expect(harness.sync.session?.pendingCount).toBe(4);
+    expect(harness.sync.problem).toBeNull();
+
+    // First tick records when they started waiting; the clock then passes the
+    // bound. Age is measured from when the operation entered the set, so the
+    // first tick cannot itself be the one that fires.
+    await harness.ackTick();
+    harness.advance(MAX_PENDING_AGE_MS);
+
+    const before = transport.vectors.length;
+    await harness.ackTick();
+
+    expect(harness.sync.problem?.code).toBe(REJECTION.pendingOverflow);
+    expect(harness.sync.problem?.lost).toBe(0);
+    expect(transport.vectors.length).toBe(before + 1);
+  });
+
+  it('does not restart the clock when a cascade releases part of the backlog', async () => {
+    // §5 is explicit: age is measured from when an operation entered the set,
+    // not from the last time the set changed. An implementation that watched
+    // the count, or the last time it moved, would reset here and never fire —
+    // and a trickle of cascades is exactly what a partly-healed partition
+    // delivers.
+    //
+    // Two peers. One's backlog drains halfway through; the other's never does,
+    // and it is the one whose clock must not have been restarted.
+    const other = parseReplicaId('00000000-0000-0000-0000-00000000000e');
+    const child = (author: typeof PEER, seq: number) => encodeOperations([{
+      kind: 'insert' as const,
+      id: { replica: author, seq: BigInt(seq) },
+      value: 'a',
+      parent: { replica: author, seq: 0n },
+      side: 'R' as const,
+      rightOrigin: null,
+    }]);
+    const root = (author: typeof PEER) => encodeOperations([{
+      kind: 'insert' as const,
+      id: { replica: author, seq: 0n },
+      value: 'z',
+      parent: null,
+      side: 'R' as const,
+      rightOrigin: null,
+    }]);
+
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    transport.broadcast!(child(PEER, 1));
+    transport.broadcast!(child(other, 1));
+    await settle();
+    await harness.ackTick();
+
+    expect(harness.sync.session?.pendingCount).toBe(2);
+
+    // Half the bound later, the other peer's missing root arrives and its
+    // child cascades out of the pending set. The set moved; what is stuck did
+    // not, and its clock keeps running.
+    harness.advance(MAX_PENDING_AGE_MS / 2);
+    transport.broadcast!(root(other));
+    await settle();
+    await harness.ackTick();
+
+    expect(harness.sync.session?.pendingCount).toBe(1);
+    expect(harness.sync.problem).toBeNull();
+
+    // The stuck operation reaches the bound measured from when it arrived, not
+    // from the cascade. Half the bound more is enough only if the clock was
+    // never restarted.
+    harness.advance(MAX_PENDING_AGE_MS / 2);
+    const before = transport.vectors.length;
+    await harness.ackTick();
+
+    expect(harness.sync.problem?.code).toBe(REJECTION.pendingOverflow);
+    expect(transport.vectors.length).toBe(before + 1);
+  });
+
+  it('stops when a catch-up leaves the same operation waiting', async () => {
+    // The budget is per stuck operation. A session-level flag would be cleared
+    // by the successful reconciliation and this would catch up every tick
+    // forever — a client that looks busy and is making no progress.
+    const transport = new FakeTransport();
+    const harness = controller(transport);
+    await harness.sync.start();
+    await settle();
+
+    transport.broadcast!(stuck(1));
+    await settle();
+
+    await harness.ackTick();
+    harness.advance(MAX_PENDING_AGE_MS);
+    await harness.ackTick();
+
+    expect(harness.sync.state).toBe('live');
+
+    harness.advance(MAX_PENDING_AGE_MS);
+    await harness.ackTick();
+
+    expect(harness.sync.state).toBe('stopped');
+    expect(harness.sync.problem?.code).toBe(REJECTION.pendingOverflow);
   });
 });

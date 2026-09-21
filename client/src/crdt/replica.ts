@@ -120,6 +120,26 @@ export class Replica {
     return this.pending.length;
   }
 
+  /**
+   * Which operations are waiting, as element keys (§5).
+   *
+   * @remarks
+   * For the connection layer's age bound. §5 measures a pending operation's age
+   * from when it entered the set, and the count alone cannot express that: a set
+   * that stays at four because four different operations passed through it is a
+   * healthy one, and a set that stays at four because the same four are stuck is
+   * the failure the age bound exists for. Identity is what tells them apart, so
+   * identity is what this returns.
+   *
+   * The core keeps no clock, deliberately. A replica that read the time would
+   * replay a committed trace differently depending on when it ran, which is the
+   * one thing §9's corpus cannot tolerate — so the bound is applied by the layer
+   * that already has a timer and knows what a connection is.
+   */
+  get pendingKeys(): readonly string[] {
+    return this.pending.map((operation) => elementKey(operation.id));
+  }
+
   /** Inserts a code point at a visible index, returning the operation. */
   insert(index: number, value: string): InsertOperation {
     const all = this.inOrder();

@@ -1,7 +1,7 @@
 import { PendingSetOverflowError, Replica, decodeSnapshot, parseReplicaId } from '../crdt';
 import { Backoff, DEFAULT_BACKOFF, type BackoffOptions } from './backoff';
 import { REJECTION, recoveryFor } from './rejections';
-import type { DocumentSession } from './DocumentSession';
+import { MAX_PENDING_AGE_MS, type DocumentSession } from './DocumentSession';
 
 /** What the server answered a submission with (§7). */
 export interface SubmitOutcome {
@@ -131,6 +131,17 @@ export interface SyncOptions {
    * Not reporting at all is the failure — see the timer below.
    */
   readonly acknowledgeEveryMs?: number;
+
+  /**
+   * The clock §5's pending age is measured against.
+   *
+   * @remarks
+   * Injected for the same reason `schedule` is: a test that waited out sixty
+   * seconds of real time to prove the age bound would be a test nobody runs.
+   * The core deliberately has no clock at all (see `Replica.pendingKeys`), so
+   * this is the only one in the path.
+   */
+  readonly now?: () => number;
 }
 
 /**
@@ -192,6 +203,25 @@ export class SyncController {
 
   /** Whether a pending-set overflow is already being recovered from (§5, §9). */
   private overflowed = false;
+
+  /**
+   * When each waiting operation was first seen waiting (§5's age bound).
+   *
+   * @remarks
+   * Keyed by element identity rather than tracking the count, because §5
+   * measures age from when an operation *entered* the set and requires that a
+   * cascade releasing part of the backlog does not restart the clock on the
+   * rest. An entry is removed when its operation becomes ready and is applied,
+   * which is the only way an operation leaves the pending set — so an id that
+   * is still here on a later tick has been waiting the whole time.
+   */
+  private readonly pendingSince = new Map<string, number>();
+
+  /** Stuck operations a catch-up has already been spent on (§5's age bound). */
+  private readonly caughtUpFor = new Set<string>();
+
+  /** The clock §5's pending age is measured against. */
+  private readonly now: () => number;
   private readOnlyState = false;
   private retried = new Set<string>();
 
@@ -222,6 +252,7 @@ export class SyncController {
     // days, and a report frequent enough that an ordinary session contributes
     // many of them costs one small message a minute per open tab.
     this.acknowledgeEveryMs = options.acknowledgeEveryMs ?? 30_000;
+    this.now = options.now ?? (() => Date.now());
 
     transport.onBroadcast((operations) => {
       // A broadcast can land before this client has a session — the server
@@ -455,6 +486,12 @@ export class SyncController {
     }
 
     if (this.current === 'live' && this.sessionState !== null) {
+      // Before the report, not after. The report is skipped when the vector has
+      // not moved, and a pending set that is stuck is exactly the case where it
+      // has not moved — so putting this behind that check would silence the age
+      // bound in the only situation it fires.
+      this.checkPendingAge(this.sessionState);
+
       const known = this.known();
 
       // Skipped when the last report said the same thing — which, for a client
@@ -556,17 +593,88 @@ export class SyncController {
         throw error;
       }
 
-      this.fail(REJECTION.pendingOverflow, 0);
-
-      if (this.overflowed) {
-        this.stopped = true;
-        this.setState('stopped');
-        return;
-      }
-
+      const tried = this.overflowed;
       this.overflowed = true;
-      void this.reconcile(false);
+      this.overflow(tried);
     }
+  }
+
+  /**
+   * §5's pending-set bound was exceeded, by size or by age (§9).
+   *
+   * @remarks
+   * One recovery for both halves of the bound, because both mean the same
+   * thing: this replica is missing a dependency that is not going to arrive by
+   * itself. Catching up by version vector asks for exactly that.
+   */
+  private overflow(alreadyTried: boolean): void {
+    this.fail(REJECTION.pendingOverflow, 0);
+
+    if (alreadyTried) {
+      this.stopped = true;
+      this.setState('stopped');
+      return;
+    }
+
+    void this.reconcile(false);
+  }
+
+  /**
+   * §5's age bound: nothing may wait on a dependency indefinitely.
+   *
+   * @remarks
+   * <p>
+   * The size bound catches a flood. This catches the quieter failure it cannot
+   * see — a handful of operations stuck forever behind a dependency that was
+   * lost rather than delayed. Without it the client renders a document missing
+   * those operations, converges with nobody, and reports `live` throughout,
+   * which is precisely the shape §13.13 exists to forbid.
+   * </p><p>
+   * Run from the acknowledgement timer rather than a timer of its own: that one
+   * already ticks while the connection is live, and a second timer would be a
+   * second thing to keep in step for no gain.
+   * </p>
+   */
+  private checkPendingAge(session: DocumentSession): void {
+    const now = this.now();
+    const waiting = session.pendingKeys;
+    const live = new Set(waiting);
+
+    // Anything that drained is forgotten, so the map cannot grow across a
+    // session and a key that reappears cannot inherit an old timestamp.
+    for (const key of [...this.pendingSince.keys()]) {
+      if (!live.has(key)) {
+        this.pendingSince.delete(key);
+        this.caughtUpFor.delete(key);
+      }
+    }
+
+    const stale: string[] = [];
+    for (const key of waiting) {
+      const since = this.pendingSince.get(key);
+      if (since === undefined) {
+        this.pendingSince.set(key, now);
+      } else if (now - since >= MAX_PENDING_AGE_MS) {
+        stale.push(key);
+      }
+    }
+
+    if (stale.length === 0) {
+      return;
+    }
+
+    // The budget is per stuck operation, not per session. A catch-up that
+    // succeeded and still left this operation waiting has answered the only
+    // question worth asking: the dependency is not coming. Counting per
+    // session instead would catch up every tick forever, because a successful
+    // reconciliation clears the session-level flag — which is what the size
+    // bound's flag is for, and exactly wrong here.
+    const tried = stale.some((key) => this.caughtUpFor.has(key));
+    for (const key of stale) {
+      this.caughtUpFor.add(key);
+    }
+
+    this.overflow(tried);
   }
 
   /**
