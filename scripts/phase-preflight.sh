@@ -44,11 +44,11 @@
 #   {
 #     "sha": "0c60bb58850be1c5e6e026fd217c699dfd6674ec",
 #     "runs_for_sha": [
-#       { "id": 34398694675, "workflow": "CI",
+#       { "id": 34398694675, "workflow": "CI", "event": "push",
 #         "status": "completed", "conclusion": "success" }
 #     ],
 #     "runs": [
-#       { "id": 34398694675, "workflow": "CI",
+#       { "id": 34398694675, "workflow": "CI", "event": "push",
 #         "jobs": [ { "name": "...", "conclusion": "success" }, ... ] }
 #     ]
 #   }
@@ -56,6 +56,11 @@
 # `runs_for_sha` must list EVERY run GitHub reports for the commit, across every
 # workflow; that is what makes supersession visible. Trimming it to the runs
 # being reported defeats the check, which is why the failure messages say so.
+#
+# `event` is required because a commit legitimately has two runs of one workflow
+# when a pull request is opened on it — the push run and the pull_request run —
+# and that is not the same thing as a re-run. Supersession is judged within an
+# event; across events, both must be present and both green.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -179,58 +184,89 @@ reported = report.get("runs")
 if not isinstance(reported, list) or not reported:
     die("the status file lists no runs; a rollup alone is not enough")
 
-by_workflow = {}
+# KEYED ON (WORKFLOW, EVENT), NOT ON WORKFLOW ALONE.
+#
+# This used to refuse any workflow reported twice for one commit, which is right
+# for a RE-RUN — a second answer to the same question, where the newer one wins —
+# and wrong for two runs of the same workflow triggered by different events.
+# Opening a pull request produces exactly that: the push run and the
+# pull_request run, both complete, both green, neither superseding the other.
+# The check called it "reported twice" and refused a healthy commit.
+#
+# Keying on the pair keeps the supersession guard intact within each event — a
+# re-run of the push event still has to be the newest — and stops a normal
+# thing from looking like tampering. Every (workflow, event) GitHub reports must
+# also be accounted for, so a failing pull_request run cannot be left out of the
+# file.
+def key_of(run):
+    return (str(run.get("workflow", "")), str(run.get("event", "")))
+
+
+by_key = {}
 for run in reported:
-    workflow = str(run.get("workflow", ""))
+    workflow, event = key_of(run)
     if not workflow:
         die("a reported run names no workflow")
-    if workflow in by_workflow:
-        die(f"{workflow} is reported twice; one run per workflow")
-    by_workflow[workflow] = run
+    if not event:
+        die(f"{workflow}'s reported run names no event; without it a re-run cannot\n"
+            "be told from a run triggered by something else")
+    if (workflow, event) in by_key:
+        die(f"{workflow} is reported twice for the {event} event; one run per\n"
+            "workflow and event — the newest is the answer")
+    by_key[(workflow, event)] = run
 
-missing_workflows = sorted(set(expected) - set(by_workflow))
+reported_workflows = {workflow for workflow, _ in by_key}
+missing_workflows = sorted(set(expected) - reported_workflows)
 if missing_workflows:
     die(f"no run reported for: {', '.join(missing_workflows)}. Every workflow in\n"
         ".github/workflows must have run on this commit — a workflow that did not\n"
         "run is the failure this check exists for, and it looks like nothing.")
 
-unknown = sorted(set(by_workflow) - set(expected))
+unknown = sorted(reported_workflows - set(expected))
 if unknown:
     die(f"reported runs name workflows that do not exist here: {', '.join(unknown)}")
 
-for workflow in sorted(expected):
-    run = by_workflow[workflow]
+# Every pair GitHub has for this commit must be in the file. Without this a
+# failing pull_request run could simply be omitted and the push run reported.
+for run in runs_for_sha:
+    workflow, event = key_of(run)
+    if workflow in expected and (workflow, event) not in by_key:
+        die(f"runs_for_sha has a {workflow} run for the {event!r} event that the\n"
+            "file does not report. Every run for this commit is reported, or the\n"
+            "omission is the answer.")
+
+for (workflow, event), run in sorted(by_key.items()):
     run_id = run.get("id")
     if not isinstance(run_id, int):
         die(f"{workflow}'s reported run has no numeric id")
 
-    siblings = [r for r in runs_for_sha if str(r.get("workflow", "")) == workflow]
+    siblings = [r for r in runs_for_sha if key_of(r) == (workflow, event)]
     if not siblings:
-        die(f"runs_for_sha lists no run of {workflow} for this commit, but one is\n"
-            "reported — the run list is trimmed, and a trimmed list hides exactly\n"
-            "the newer run this check looks for")
+        die(f"runs_for_sha lists no {event} run of {workflow} for this commit, but\n"
+            "one is reported — the run list is trimmed, and a trimmed list hides\n"
+            "exactly the newer run this check looks for")
 
     unfinished = [r for r in siblings if r.get("status") != "completed"]
     if unfinished:
-        die(f"{workflow} has a run still in progress on this commit "
+        die(f"{workflow} has a {event} run still in progress on this commit "
             f"({unfinished[0].get('id')}); a run in flight is not a pass")
 
     newest = max(siblings, key=lambda r: r.get("id", 0))
     if newest.get("id") != run_id:
-        die(f"{workflow} run {run_id} was superseded by {newest.get('id')} on the\n"
-            "same commit. A re-run exists because someone doubted the first answer;\n"
-            "the newest one is the answer.")
+        die(f"{workflow} run {run_id} was superseded by {newest.get('id')} for the\n"
+            f"same {event} event on the same commit. A re-run exists because someone\n"
+            "doubted the first answer; the newest one is the answer.")
 
     if newest.get("conclusion") != "success":
-        die(f"{workflow} run {run_id} concluded {newest.get('conclusion')!r}, not\n"
-            "'success'. Cancelled is not green — a cancelled run has completed\n"
+        die(f"{workflow} run {run_id} ({event}) concluded {newest.get('conclusion')!r},\n"
+            "not 'success'. Cancelled is not green — a cancelled run has completed\n"
             "status and no result.")
 
     jobs = run.get("jobs")
     if not isinstance(jobs, list) or not jobs:
         die(f"{workflow} run {run_id} lists no jobs")
 
-    print(f"    {workflow} run {run_id}: {len(jobs)} jobs for {sha[:12]}")
+    print(f"    {workflow} run {run_id} ({event}): {len(jobs)} jobs for {sha[:12]}")
     for job in sorted(jobs, key=lambda j: str(j.get("name", ""))):
         print(f"      {str(job.get('conclusion', '?')):>10}  {job.get('name', '?')}")
 

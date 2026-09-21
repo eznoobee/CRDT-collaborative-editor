@@ -6356,3 +6356,37 @@ Four of the four found here would have been visible that way.
 the suites is scoped to something the test owns — one document's rows, one
 user's connections, one factory's own counter — which is what the repair above
 produces and what the shape should look like.
+
+### 13.63 A guard that refuses a legitimate state
+
+Almost every entry in this log is a check that passed when it should not have.
+This one is the opposite, and it is worth recording precisely because the
+failure mode is the reverse.
+
+The phase preflight refuses a workflow reported twice for one commit. That is
+right for a **re-run** — a second answer to the same question, where someone
+doubted the first and the newest one is the answer — and it is how a green run
+that a later red run superseded gets caught.
+
+**Opening the final pull request produced two runs of CI on one commit**, from
+two different events: the `push` run and the `pull_request` run. Both complete,
+both green, neither superseding the other. The preflight refused the commit with
+"CI is reported twice; one run per workflow", and the commit was fine.
+
+> **The guard had collapsed "the same workflow ran twice" into "someone re-ran
+> it".** Those are different facts, and GitHub distinguishes them in a field the
+> status file did not carry.
+
+The repair keys supersession on the pair (workflow, event) rather than on the
+workflow: a re-run of the push event still has to be the newest one, and a
+`pull_request` run alongside a `push` run is two answers to two questions rather
+than two answers to one. **Every pair GitHub reports must also appear in the
+file**, so the new dimension cannot be used to omit a failing run — which is the
+way a fix like this usually goes wrong.
+
+**Why it matters beyond the fix.** A guard that refuses something legitimate
+teaches the person hitting it to work around it, and the workaround is
+indistinguishable from the tampering the guard exists to prevent — here,
+trimming the run list until the check is satisfied. A false refusal is not a
+safe failure: it is pressure applied to exactly the mechanism that must not
+bend.
