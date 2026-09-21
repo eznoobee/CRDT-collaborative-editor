@@ -53,6 +53,26 @@ REQUIRED = [
     ("§12 Q3", r"\*\*§12 Q3"),
 ]
 
+# Questions 4 and 5 arrived in 7b.5 and 7b.7 and went unenforced until 9.0 —
+# this gate exhibiting the drift it was built to prevent: §12 grew and the
+# mechanism that checks §12 did not (§13.50). Adding a question to §12 now means
+# adding it here, and the fixture must omit it.
+LATER = [
+    ("§12 Q4", r"\*\*§12 Q4"),
+    ("§12 Q5", r"\*\*§12 Q5"),
+]
+
+# Breakdowns written before those questions existed are NOT retrofitted, and the
+# exemption is a named list rather than a date comparison or a silent skip.
+#
+# Retrofitting would mean inventing eleven tasks' worth of answers after the work
+# was done, and the value of the questions is entirely that they are asked
+# beforehand — a back-filled answer makes this gate's green mean less, not more.
+# Exempting silently would be the hole the gate exists to close. So the
+# exemption is explicit, visible in the failure output when it applies, and
+# cannot be joined by accident: a new breakdown is not on this list.
+EXEMPT_FROM_LATER = {"7b"}
+
 # A task heading: "## 7b.3 — Title". The em dash is required so that prose
 # headings ("## The shape of this phase") are not mistaken for tasks.
 TASK = re.compile(r"^##\s+(\d+b?\.\d+)\s+—\s+(.+)$")
@@ -93,7 +113,11 @@ for path in paths:
         checked += 1
         text = "\n".join(body)
 
-        for name, pattern in REQUIRED:
+        phase = ""
+        if "phase-" in file_path:
+            phase = file_path.split("phase-", 1)[1].split("-breakdown", 1)[0]
+
+        for name, pattern in REQUIRED + ([] if phase in EXEMPT_FROM_LATER else LATER):
             found = re.search(pattern, text)
             if not found:
                 problems.append(

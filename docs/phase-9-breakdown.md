@@ -36,9 +36,17 @@ each. If either row passes that without converging, it stops and comes back with
 the iteration count and what each one changed, rather than absorbing the cost
 silently.
 
-**Sequencing.** 9.0 first. Then 9.6 and 9.7 begin, because their CI loops are the
-long pole, and 9.1 through 9.3 are the local work done while a run is in flight —
-local work is unconstrained, only pushing is. 9.4 and 9.5 follow, and 9.8 closes.
+**Sequencing, and 9.6 and 9.7 go on branches of their own.** CI's concurrency
+group is `${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress:
+true`, so two pushes to one ref cancel each other — overlapping 9.6 and 9.7 on
+the same branch would spend the iteration budget on cancellations rather than
+runs. Separate refs are separate groups. Each merges back to
+`phase-4-react-client` once green. (The mutation workflow is keyed on `sha` with
+`cancel-in-progress: false`, so it is unaffected either way.)
+
+9.0 first. Then 9.6 and 9.7 begin on their own branches, because their CI loops
+are the long pole, and 9.1 through 9.3 are the local work done while runs are in
+flight — local work is unconstrained, only pushing is. 9.4 and 9.5 follow, and 9.8 closes.
 
 ---
 
@@ -140,8 +148,10 @@ client is the only such layer, and `DocumentSession` constructs
 genuinely open.** The number follows §13.37 — the largest legitimate burst, which
 row 27 already put at 2,000 operations for a peer's offline afternoon arriving
 across a partition. The recovery does not exist yet: §5 says *reject, log and
-close* for the connection layer, and §9's table has no entry, so this task
-proposes one and it is reviewable.
+close* for the connection layer, and §9's table has no entry. **This task
+proposes the entry** — approved in principle, with the wording to be reviewed —
+so the deliverable includes the row as it would read in §9's table, not merely
+an implementation that behaves some way.
 
 **Vacuity risk.** **A test that sets `maxPending` itself and then overflows it
 tests the core, not the product** — and that test already exists, in
@@ -233,7 +243,21 @@ flight, so it degenerates to the current behaviour plus a branch. It is measured
 rather than dismissed, and if it loses, the choice between moving the target and
 changing the window is **genuinely the user's**, because both edit §8.
 
-**Vacuity risk.** Two, and the first is the one that would produce a
+**The correctness argument, which comes before the measurement.** Adaptive
+flushing changes *when* writes happen, and `server_seq`'s monotonic visibility
+depends on there being one writer per document at a time under the advisory
+lock. So "no write in flight" must be **per document**, never global. A global
+flag fails in both directions: it would serialise unrelated documents for no
+reason, and — the direction that matters — it would let a flush for one document
+start while another document's write was pending, admitting **two concurrent
+flushes for the same document** and breaking the invariant that makes
+`server_seq` a total order clients can rely on. The task states why the
+invariant still holds under the new scheduling, and carries **a test that fails
+if two flushes for one document ever overlap**, rather than asserting the
+ordering that such an overlap would corrupt — an overlap can produce correct
+ordering by luck, and a test of the ordering would pass on the run where it did.
+
+**Vacuity risk.** Three, and the first is the one that would produce a
 plausible-looking wrong answer. **Measuring adaptive flushing only at low load
 proves the trivial half** — it wins there by construction, because there is no
 write in flight — so the claim "amortisation under load" must be measured at
@@ -241,7 +265,12 @@ saturation, where it is most likely to lose. And **a new number is not
 comparable to 7b.4's unless it is taken at the same boundary with the same
 generator** (§13.38); a re-measurement that quietly moved either would show an
 improvement that is an artefact. The old arrangement is re-measured in the same
-run rather than compared against a recorded figure.
+run rather than compared against a recorded figure. **And two points on the load
+curve are not a curve.** Adaptive schemes commonly have a latency cliff where
+they change mode — here, the rate at which a write is almost always already in
+flight — and idle and saturation are precisely the two points that bracket that
+cliff without showing it. The measurement sweeps the middle, and a cliff inside
+§8's operating range is a result whether or not the endpoints look good.
 
 **§12 Q1 — who is the legitimate user that never performs the action?** The
 client that submits once and stops — under adaptive flushing its single write
@@ -285,10 +314,12 @@ queued. I will propose and implement; it is flagged for review because it is a
 product decision wearing an implementation's clothes.
 
 **Target 4 — document load, p50 inside, tail outside.** *Whether the target is a
-p50 or a max*: **genuinely the user's.** It is not a fact about the code; it is
-what §8 means by its own sentence, and either reading is defensible. What I will
-bring is the distribution, so the choice is made against the shape of the tail
-rather than against a preference.
+p50 or a max*: **genuinely the user's**, and their prior is on record before the
+data — **neither**: a p50 hides the users who suffer, a max is dominated by
+events unrelated to the design, and a p95 is the usual reading. I bring the
+distribution. If its shape argues against p95 — a bimodal tail, say, where p95
+falls in the gap between two populations and so describes nobody — I make that
+case explicitly rather than quietly reporting the number that fits the prior.
 
 **Target 1** arrives here from 9.4 with its measurement attached.
 

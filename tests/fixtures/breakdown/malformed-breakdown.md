@@ -22,6 +22,12 @@ reason.
 **§12 Q3 — in this comparison, does each side decide for itself?** Not
 applicable — same reason.
 
+**§12 Q4 — does this start when the host starts, or when someone first asks?**
+Not applicable — a reason is given here, so this field is well formed.
+
+**§12 Q5 — does the party that must respect this limit know what it is?** Not
+applicable — a reason is given here too.
+
 ## 99.2 — Answering a question with a bare not-applicable
 
 **Done when.** Something observable is true.
@@ -35,6 +41,12 @@ described at enough length to clear the emptiness check.
 reason is given here, so this field is well formed.
 
 **§12 Q3 — in this comparison, does each side decide for itself?** Not
+applicable — a reason is given here too.
+
+**§12 Q4 — does this start when the host starts, or when someone first asks?**
+Not applicable — a reason is given here, so this field is well formed.
+
+**§12 Q5 — does the party that must respect this limit know what it is?** Not
 applicable — a reason is given here too.
 
 ## 99.3 — Answering with a longer bare not-applicable
@@ -51,3 +63,28 @@ reason is given here, so this field is well formed.
 
 **§12 Q3 — in this comparison, does each side decide for itself?** Not
 applicable — a reason is given here too.
+
+**§12 Q4 — does this start when the host starts, or when someone first asks?**
+Not applicable — a reason is given here, so this field is well formed.
+
+**§12 Q5 — does the party that must respect this limit know what it is?** Not
+applicable — a reason is given here too.
+
+## 99.4 — Missing question 5, which §12 gained in 7b.7
+
+**Done when.** Something observable is true.
+
+**Vacuity risk.** This task could pass without the code being right, in a way
+described at enough length to clear the emptiness check.
+
+**§12 Q1 — who is the legitimate user that never performs the action?** Not
+applicable — a reason is given here.
+
+**§12 Q2 — does anything invoke this, or only the test?** Not applicable — a
+reason is given here.
+
+**§12 Q3 — in this comparison, does each side decide for itself?** Not
+applicable — a reason is given here.
+
+**§12 Q4 — does this start when the host starts, or when someone first asks?**
+Not applicable — a reason is given here.

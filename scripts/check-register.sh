@@ -92,7 +92,8 @@ if not rows:
 # actually uses; a new one has to be added here deliberately, which is the
 # point — "still open" must be a statement somebody wrote, not a default.
 SETTLED = re.compile(
-    r"CLOSED|MEASURED|EXERCISED|CORRECTED|CONFIRMED|WITHDRAWN", re.IGNORECASE)
+    r"CLOSED|MEASURED|EXERCISED|CORRECTED|CONFIRMED|WITHDRAWN|OUT OF SCOPE",
+    re.IGNORECASE)
 DECLARED_OPEN = re.compile(
     r"still open|remains open|BLOCKED|blocked on|attempted", re.IGNORECASE)
 
