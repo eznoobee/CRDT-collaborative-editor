@@ -159,10 +159,6 @@ describe("§9's offline-window discard, seen by a person", () => {
       'the editor to still be on screen after typing offline',
       30_000);
 
-    const queued = await page.evaluate(
-      () => (window.document.querySelector('[data-testid="backlog"]')?.textContent ?? '').trim(),
-    );
-
     // Longer than T_retire plus a sweep, so the server has actually retired
     // this replica rather than merely being entitled to.
     await new Promise((done) => setTimeout(done, 45_000));
@@ -185,12 +181,25 @@ describe("§9's offline-window discard, seen by a person", () => {
     expect(reported).toMatch(/This client was offline too long\./);
     expect(reported).toMatch(/[1-9]\d* unsent changes? could not be recovered\./);
 
-    // The second guard, asserted after the fact rather than before, because the
-    // backlog line is what says the offline typing produced unsent work at all.
-    // If this is empty the run above proved nothing: an empty outbox is
-    // discarded silently and correctly.
-    expect(queued, 'nothing was queued while offline, so nothing could be lost')
-      .toMatch(/\d+ edits not sent yet\./);
+    // THE SECOND GUARD, AND WHERE IT HAD TO MOVE TO. An empty outbox is
+    // discarded silently and correctly, so a run that queued nothing would
+    // prove nothing — something has to establish that there was work to lose.
+    //
+    // The first version read the unsent-work line while offline. That can never
+    // pass: `backlogMessage` shows it only while `live`, deliberately, because
+    // offline already says so on its own line — a guard asserting on a thing the
+    // product hides in exactly the state the guard runs in. The run it failed
+    // had already passed the assertion above, so §9's discard was on screen and
+    // the only broken thing was the check.
+    //
+    // The count in §9's own sentence is the evidence, and a better one: it is
+    // what the user is told. Twelve words were typed offline and each change
+    // event is a batch, so a client reporting one or two would be under-counting
+    // what it threw away.
+    const lost = Number(/(\d+) unsent change/.exec(reported)?.[1] ?? '0');
+
+    expect(lost, `§9 reported "${reported}", which does not account for a page of offline typing`)
+      .toBeGreaterThanOrEqual(10);
 
     // And the session recovers rather than stopping: §9's discard costs the
     // unsent work, not the document.

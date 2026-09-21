@@ -6196,3 +6196,39 @@ mechanism sees the mechanism do nothing, the state the test built is the thing
 to check first — it is cheaper to establish than either alternative, and it is
 the only one of the three that no amount of reading the implementation can rule
 out.
+
+### 13.59 A guard that cannot pass is not a strict test, it is a broken one
+
+9.6's suite named three vacuity risks before it was written, and the second was
+real: an empty outbox is discarded silently and correctly, so a run that queued
+nothing while offline would prove nothing about §9's discard. The guard read the
+unsent-work line to establish that there had been work to lose.
+
+**It could never pass.** `backlogMessage` shows that line only while the session
+is `live` — deliberately, because an offline session already says so on its own
+line and two messages about one condition is one too many. The guard read it
+while offline. It was asserting on something the product hides in exactly the
+state the guard runs in, and both rules were written in the same phase, a few
+hours apart, by the same author.
+
+The run that exposed it is the useful part: the test had **already passed** the
+assertion it exists for — §9's sentence on screen with a non-zero count — and
+then failed on the guard. So the row's claim was verified and the failure was
+entirely in the checking apparatus.
+
+> **A guard is a test of the test, and nothing tests the guard.** It fails
+> loudly when the thing it guards is absent, which looks exactly like it
+> working; there is no green it has to produce for anyone to trust it. A guard
+> that can only fail is indistinguishable from a strict one until the day the
+> subject passes.
+
+**The repair moved the evidence to where the user sees it.** §9's own message
+carries the count of what was discarded, so the guard now asserts that number
+accounts for a page of typing. That is strictly better than the backlog line:
+it is the thing the user is told, a client that under-reported would fail it,
+and it cannot be hidden by a rule about some other state.
+
+**The general check.** When writing a guard that asserts a precondition was met,
+ask what makes it pass, and satisfy yourself that something can. If the guard
+reads a different surface from the assertion it protects, that surface has its
+own rules — and those rules were written for a reader, not for a test.
