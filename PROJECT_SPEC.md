@@ -2564,7 +2564,7 @@ written, not done).
 | 36 | §5's per-connection pending-set bound is never set by the product | **8** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody does. The server has no pending set by design (`IngestValidator` rejects a non-ready operation rather than buffering it, which removes the vector instead of bounding it), so the only layer left is the browser client, and `DocumentSession` constructs `new Replica(id)` and leaves the bound alone. The only assignments anywhere are in the two causal-readiness test files. Deferred rather than fixed in 7b because the number is a §9 question — what a client should do when a peer's backlog exceeds what it will hold is a recovery, not a refusal, and §9's rejection table has no entry for it | §5, §9, §13.37 |
 | 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **8** | `SnapshotSweeper` ranks laggards **globally** and sweeps the top N, so a test asserting that *its* document was swept is asserting that no other test left N documents further behind. The test knows — its `BatchSize` is set to 64 with a comment saying the database is shared — and 64 is a number that was large enough at the time. 7b.7's use tests write the largest documents in the suite and turned it red once, then green on a re-run, which is the signature. They now remove their documents through `DELETE /documents/{id}`, which is hygiene rather than a fix: the next test that writes a big document brings it back. **Widening the batch until the red goes away is tuning a control into silence** (§13.37's second half), so the real repair is to make the sweep assertion independent of the ranking — sweep scoped to a document, or assert on the document's snapshot given that it was in the batch rather than assuming it was | §8, §13.31, §12 |
 | 38 | An interior placeholder is never collected, and the fraction grows without bound | **MEASURED (7b.8) — left as a measurement by decision, not fixed** | 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages. Row 29's measurement was asked about payloads and answered about positions: a placeholder costs about one byte, so this is a §5 correctness question about whether one can be spliced out by rewiring its child's parent while preserving Definition 4 for a concurrent insert naming it as a right origin — **not** to be attempted by relaxing rule 2, which 7.3 settled. Left deliberately at the close-out: it may not be resolvable, and starting without finishing would be worse than the measured, explained state it is in. **Reversal condition:** take it if §5's collection rules are reopened for another reason, or if a document's tombstone fraction is observed causing a real load problem. Numbers in `docs/gc-reclamation.md` | §5, §8, §13.46 |
-| 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **8** | Found by 7b.9's probe. `client/src/crdt/conformance.test.ts` is excluded from `npm test` because it needs the C# runner to materialise the corpus first, which is a sound reason and leaves the default suite unable to see a whole class of core bug. 7b.9 closed the specific hole for the comparator by adding direct tests, but the general shape stands: anything the two cores must agree on byte for byte is checked only by a suite a contributor does not run. The fix is a committed fixture the TypeScript suite can replay unaided — the canonical-form fixtures of 2.5 are the precedent — rather than making the default run depend on a build of the other implementation | §9, §11, §13.47 |
+| 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -5847,3 +5847,46 @@ differ, the file is the wrong boundary, and the cost of finding that out later
 is measured in how long the strongest dependency got to speak for the weakest.
 It was nine phases here, and the artefact that would have revealed it — a probe
 reporting zero suites — had already been run and written down.
+
+### 13.53 An audit that counts failures counts the failures it did not cause
+
+`scripts/placement-probe.sh` inverts the sibling tie-break and reports which
+suites notice. 9.1 re-ran it and it reported a new detection:
+`PeriodicSnapshotTests.A_swept_snapshot_loads_the_same_document_as_a_replay_that_ignores_it`,
+in `Editor.Api.Tests`, which had not detected the inversion in 7b.9.
+
+**It does not detect it.** Run alone under the same sabotage, that test is green
+— four times, and green unsabotaged four times too. It was red in the probe for
+register row 37's reason: `SnapshotSweeper` ranks laggards globally, the test
+database is shared with every other test's documents, and under full-suite load
+this document is not always in the batch. The probe ran the suite under load, the
+test failed for its own reason, and **the probe counted it as an oracle.**
+
+> **A sabotage census that counts red tests is counting two different things
+> with one number: tests that failed *because of* the sabotage, and tests that
+> would have failed anyway.** The second kind inflates the census precisely
+> where a suite is least reliable, which is the last place a coverage claim
+> should be generous.
+
+This is §13.42's shape one level up. The probe exists because a convergence
+assertion cannot detect a placement bug and something had to establish what
+does; it then made the same mistake in its own measurement — an answer that
+came from somewhere other than where it appeared to.
+
+**The fix is a baseline pass.** Each suite runs twice, unsabotaged and
+sabotaged, and a detection is a test red in the second and green in the first.
+That doubles the runtime, which is the price of the number meaning what it says
+for a tool run once per audit.
+
+**The baseline failures are reported, not subtracted silently.** A suite red on
+its own is a fact this script is in a position to notice, and a quiet
+subtraction would turn the discovery above into a blank space. It is how row 37
+became visible again after two phases of being a known-but-unfixed row: the
+probe surfaced it by accident, and a silent subtraction would have taken that
+back.
+
+**Generally: any tool that measures a system by breaking it needs to know what
+the system did unbroken.** Before/after is the whole method, and a tool that
+only runs the *after* has an unstated premise — that everything was green — which
+is exactly the kind of assumption §13.51 records this project making about its
+own capabilities. State it, or measure it. This one now measures it.

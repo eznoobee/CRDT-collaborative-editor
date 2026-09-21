@@ -76,18 +76,9 @@ chmod +x "$SCRATCH"/invert-*.sh
 # Each runner reports failures differently, so each is parsed on its own terms.
 # A single regex over all three is how "to" and "Tests" ended up counted as
 # failing test names in this script's first run.
-run_suite() {
-    local label=$1 patch=$2 kind=$3 command=$4 log="$SCRATCH/$5"
+failing_names() {
+    local kind=$1 log=$2 names
 
-    ./scripts/sabotage.sh "$SCRATCH/invert-$patch.sh" \
-        bash -c "cd '$PWD' && $command > '$log' 2>&1" > /dev/null 2>&1
-
-    if [ ! -s "$log" ]; then
-        echo "| $label | **the suite did not run** | — |"
-        return
-    fi
-
-    local names
     case "$kind" in
         vstest)
             # dotnet test: "  Failed Namespace.Class.Method [12 ms]"
@@ -106,12 +97,55 @@ run_suite() {
                 | sed 's/[[:space:]]*$//' | sort -u) ;;
     esac
 
-    local red
-    red=$(printf '%s\n' "$names" | grep -c '[^[:space:]]')
-    local joined
-    joined=$(printf '%s\n' "$names" | grep '[^[:space:]]' | paste -sd'; ' -)
+    printf '%s\n' "$names" | grep '[^[:space:]]' | sort -u
+}
 
-    echo "| $label | $red | ${joined:-—} |"
+# A BASELINE RUN, AND WHY IT COSTS THE RUNTIME IT COSTS.
+#
+# This script used to count the tests that were red with the sabotage applied
+# and call that the detections. It cannot: a test that would have failed anyway
+# is red under the sabotage too, and gets counted as an oracle it is not. That
+# is not hypothetical — 9.1's run reported `PeriodicSnapshotTests` detecting the
+# inversion, and the test turned out to have no placement oracle at all. It was
+# red for register row 37's reason, the shared database's global ranking, which
+# only bites under full-suite load. Run alone under the same sabotage it is
+# green.
+#
+# So the census is the DIFFERENCE: red with the sabotage, green without it.
+# Doubling the runtime is the price of the number meaning what it says, and this
+# script is run once per audit.
+#
+# The baseline failures are reported rather than subtracted silently. A suite
+# that is red on its own is a fact about the repository that this script is in a
+# position to notice, and quietly removing it from both sides would hide it.
+run_suite() {
+    local label=$1 patch=$2 kind=$3 command=$4 log="$SCRATCH/$5" base="$SCRATCH/base-$5"
+
+    # Unsabotaged first. Same command, same environment, same parser.
+    bash -c "cd '$PWD' && $command > '$base' 2>&1" > /dev/null 2>&1
+
+    ./scripts/sabotage.sh "$SCRATCH/invert-$patch.sh" \
+        bash -c "cd '$PWD' && $command > '$log' 2>&1" > /dev/null 2>&1
+
+    if [ ! -s "$log" ] || [ ! -s "$base" ]; then
+        echo "| $label | **the suite did not run** | — | — |"
+        return
+    fi
+
+    local sabotaged baseline detected
+    sabotaged=$(failing_names "$kind" "$log")
+    baseline=$(failing_names "$kind" "$base")
+
+    # Red with the sabotage and green without it. comm needs sorted input,
+    # which failing_names guarantees.
+    detected=$(comm -23 <(printf '%s\n' "$sabotaged") <(printf '%s\n' "$baseline"))
+
+    local red joined already
+    red=$(printf '%s\n' "$detected" | grep -c '[^[:space:]]')
+    joined=$(printf '%s\n' "$detected" | grep '[^[:space:]]' | paste -sd'; ' -)
+    already=$(printf '%s\n' "$baseline" | grep '[^[:space:]]' | paste -sd'; ' -)
+
+    echo "| $label | $red | ${joined:-—} | ${already:-none} |"
 }
 
 {
@@ -119,8 +153,13 @@ run_suite() {
     echo
     echo "The sibling tie-break inverted; which suites notice."
     echo
-    echo "| suite | assertions red | which |"
-    echo "|---|---|---|"
+    echo "Each suite is run twice: once unsabotaged, once with the tie-break"
+    echo "inverted. A detection is a test red in the second and green in the"
+    echo "first, because a test that fails anyway is red under any sabotage and"
+    echo "is not evidence of an oracle."
+    echo
+    echo "| suite | detected the inversion | which | red at baseline |"
+    echo "|---|---|---|---|"
 
     run_suite "Crdt.Core.Tests" csharp vstest \
         "dotnet test tests/Crdt.Core.Tests/Crdt.Core.Tests.csproj -c Release" core.log
@@ -137,4 +176,8 @@ run_suite() {
     echo
     echo "Every detection is a comparison against a value committed to this"
     echo "repository. No two-party comparison appears above, and none can."
+    echo
+    echo "A non-empty *red at baseline* column is not noise this script removed:"
+    echo "it is a suite failing on its own, which is worth more attention than"
+    echo "the census it would otherwise have inflated."
 } | tee "$OUT"

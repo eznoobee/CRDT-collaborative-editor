@@ -132,3 +132,46 @@ would duplicate the conformance corpus at every layer while making each test
 harder to read. What was missing was not assertions but a *statement* of which
 property each one guards, which is what this document is, and one oracle in the
 one suite that had none.
+
+---
+
+## The 9.1 re-run, and what it found about this document's own tool
+
+Row 39 was closed by splitting §9's committed traces into
+`client/src/crdt/committedTraces.test.ts`, which the default suite runs. The
+probe was re-run to check it, with the expected counts written down first.
+
+| suite | 7b.9 | 9.1 | predicted |
+|---|---|---|---|
+| `Crdt.Core.Tests` | 3 | 3 | 3 ✓ |
+| `Conformance` (C#) | 2 | 2 | 2 ✓ |
+| `Editor.Api.Tests` | 1 | **1**, after correction — the probe said 2 | 1 ✓ |
+| `client` (`npm test`) | **0** | **6** | 6 ✓ |
+
+The client's six are 7b.9's three `elementId` cases and three committed traces:
+`tpds-figure-6-forced-order`, `arxiv-theorem-5-unavoidable-interleaving` and
+`replica-id-byte-ordering`. Every one of them compares against a value written
+from §5 or the paper.
+
+**The correction is the interesting part.** The probe reported a second
+detection in `Editor.Api.Tests`:
+`PeriodicSnapshotTests.A_swept_snapshot_loads_the_same_document_as_a_replay_that_ignores_it`.
+It is not one. Run alone under the same sabotage that test is green — checked,
+four runs sabotaged and four unsabotaged. It was red because `SnapshotSweeper`
+ranks laggards globally over a database shared with every other test, which is
+**register row 37**, and only bites under full-suite load.
+
+> The probe counted a test that would have failed anyway as an oracle. §13.53
+> has the general form: an audit that measures a system by breaking it has to
+> know what the system did unbroken.
+
+`scripts/placement-probe.sh` now runs each suite twice and reports the
+difference, with the baseline failures shown in their own column rather than
+subtracted — a suite red on its own is worth more attention than the census it
+would otherwise have inflated. **The table above carries the corrected reading,
+established by isolation rather than by the fixed tool; the full two-pass
+re-census runs in 9.8.**
+
+The audit's conclusion is unchanged and slightly sharper: still no two-party
+comparison detects the inversion, and the one apparent counter-example turned
+out to be a flake rather than an exception.
