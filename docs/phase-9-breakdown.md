@@ -481,3 +481,55 @@ breakdowns.
 **§12 Q4.** Not applicable — nothing new has a lifecycle.
 
 **§12 Q5.** Not applicable — no limit.
+
+---
+
+## 9.9 — Row 40: what made the offline-window suite intermittent
+
+Added after Phase 9 was accepted, because row 40 was opened with a closing
+condition and the next CI run satisfied its first half.
+
+**Done when.** Row 40's instrumentation has named the failing request; the cause
+is recorded in `docs/row-40-outcome.md` with the evidence and with what would
+falsify the reading; and the suite either tolerates that named cause or the row
+stays open. Not "a run happened to be green" — the row's own words.
+
+**Vacuity risk, and it is the whole task.** **The obvious repair closes the row
+and hides the finding.** A retry makes the red go away, and a red that has gone
+away is indistinguishable from a fault that has been understood. Three guards,
+all structural rather than intentions:
+
+1. The retry names one `errorText` and one phase of the test. A retry of `until`
+   would cover a real discard regression, which is the property the suite
+   exists for (§13.29).
+2. The recorded failures are cleared per attempt, so a stale entry cannot
+   authorise a retry for a cause that has stopped happening.
+3. The explanation is written before the repair is committed, with a stated
+   falsifier, so a different `errorText` later is a new fault rather than more
+   of this one.
+
+**Second risk, and it is what the task actually found.** The evidence for the
+flake is also evidence about the product, and only one of the two is red. The
+same log shows the page settling on `Failed to fetch` and staying there, which
+is `bootstrap` having no recovery path at all. Closing row 40 without opening
+row 41 would have moved that out of view rather than out of the system (§13.64).
+
+**§12 Q1 — who is the legitimate user that never performs the action?** The user
+whose network blips once during sign-in. They are the reason row 41 exists: the
+suite now retries for them and the product does not.
+
+**§12 Q2 — does anything invoke this, or only the test?** `signIn` is the
+suite's own prologue and is invoked by the case. The product path it exercises —
+`bootstrap`, `GET /me` — is the one the application runs on every load.
+
+**§12 Q3 — in this comparison, does each side decide for itself?** The retry
+condition is Chromium's `errorText`, reported by the browser, not a string this
+suite chose from its own failure. The explanation is checked against the API's
+own log in the same block, which the suite does not write.
+
+**§12 Q4 — lifecycle.** The retry's attempt counter is bounded at three and
+resets nothing across cases; each case opens its own context.
+
+**§12 Q5 — limit.** Three attempts. The largest legitimate use is one: a single
+network change during a single page load. Three is two spare, and a fourth would
+be a suite waiting on something that is not going to resolve.

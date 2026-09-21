@@ -115,6 +115,78 @@ describe("§9's offline-window discard, seen by a person", () => {
     }
   }
 
+  /**
+   * Chromium's error when the host's network configuration changes underneath
+   * an in-flight request.
+   *
+   * @remarks
+   * Not a name this suite invented and not a class: it is the one `errorText`
+   * Chromium emits for that condition, and it is what row 40's instrumentation
+   * finally named — `GET /me — net::ERR_NETWORK_CHANGED` on the first load,
+   * with the API serving throughout (its retirement sweep is in the same run's
+   * logs). A GitHub runner brings Docker's bridge network up while this suite's
+   * stack starts, and a request in flight across that moment dies here.
+   */
+  const NETWORK_CHANGED = 'net::ERR_NETWORK_CHANGED';
+
+  /**
+   * Signs in, retrying only a load that died because the runner's network
+   * changed.
+   *
+   * @remarks
+   * <p>
+   * <b>The narrowest thing that makes row 40's failure survivable</b>, and
+   * deliberately not a retry of the test. §13.29: name the specific thing you
+   * are trusting, never widen the class. Three conditions, all required — the
+   * failure is the sign-in prologue, before a single claim about §9 has been
+   * made; the browser recorded exactly `NETWORK_CHANGED`; and there have been
+   * fewer than three attempts. Any other error, or the same error anywhere
+   * after this point, fails the suite as before.
+   * </p><p>
+   * <b>Why not further.</b> Everything after this line is the property under
+   * test — the offline transition, the wait past `T_retire`, the reconnection —
+   * and a retry there could hide a real discard failure behind a second
+   * attempt. This prologue asserts nothing; it gets a signed-in page or it does
+   * not.
+   * </p><p>
+   * <b>It tolerates; it does not fix.</b> The cause is the runner's network,
+   * which this repository does not control. Recorded that way in row 40 rather
+   * than as a repair.
+   * </p>
+   */
+  async function signIn(
+    page: Awaited<ReturnType<Walk['browsing']['open']>>['page'],
+    attempts = 3,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      // Cleared per attempt, so a stale entry from a previous one cannot
+      // authorise a retry for a cause that is no longer happening.
+      failures.length = 0;
+
+      try {
+        await page.goto(walk.baseUrl);
+        await pick(page, 'offline-walker');
+
+        await until(
+          page,
+          () => document.querySelector('[data-testid="create"]') !== null,
+          'the signed-in home page to offer a Create button');
+
+        return;
+      } catch (error) {
+        const blamed = failures.some((failure) => failure.includes(NETWORK_CHANGED))
+          || String(error).includes(NETWORK_CHANGED);
+
+        if (!blamed || attempt >= attempts) {
+          throw error;
+        }
+
+        console.warn(
+          `sign-in attempt ${attempt} died on ${NETWORK_CHANGED}; retrying (row 40).`);
+      }
+    }
+  }
+
   beforeAll(async () => {
     walk = await startWalk({
       overlays: ['deploy/docker-compose.offline-window.yml'],
@@ -131,13 +203,7 @@ describe("§9's offline-window discard, seen by a person", () => {
     const { context, page } = await walk.browsing.open();
     watch(page);
 
-    await page.goto(walk.baseUrl);
-    await pick(page, 'offline-walker');
-
-    await until(
-      page,
-      () => document.querySelector('[data-testid="create"]') !== null,
-      'the signed-in home page to offer a Create button');
+    await signIn(page);
     await page.fill('[data-testid="new-title"]', 'Written before the link went');
     await page.click('[data-testid="create"]');
 

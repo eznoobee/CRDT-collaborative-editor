@@ -2645,7 +2645,8 @@ written, not done).
 | 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **CLOSED (9.3)** | `SnapshotSweeper` ranks laggards **globally** and sweeps a bounded batch, so a test asserting that *its* document was swept was asserting that no other test had left `BatchSize` documents further behind. The repair is the one the row proposed: the two claims are separated rather than the batch widened. The hosted timer's test now asserts only what does not depend on ranking — that it ticked and wrote *something*, which is §13.41's claim and the reason that test exists — and whether a given document reaches head is asserted through `SnapshotDocumentAsync`, where no batch is involved. The `BatchSize = 64` override is gone, so these tests run against the product's own default; widening it was tuning a control until the red went away (§13.37). **The condition is now constructed rather than waited for**: a test fills the default batch with seventeen documents each further behind than its own and requires the claim to hold anyway, which is exactly the shape that failed in 7b.7 and then passed on a re-run | §8, §13.31, §13.37, §12 |
 | 38 | An interior placeholder is never collected, and the fraction grows without bound | **MEASURED (7b.8) — left as a measurement by decision, not fixed** | 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages. Row 29's measurement was asked about payloads and answered about positions: a placeholder costs about one byte, so this is a §5 correctness question about whether one can be spliced out by rewiring its child's parent while preserving Definition 4 for a concurrent insert naming it as a right origin — **not** to be attempted by relaxing rule 2, which 7.3 settled. Left deliberately at the close-out: it may not be resolvable, and starting without finishing would be worse than the measured, explained state it is in. **Reversal condition:** take it if §5's collection rules are reopened for another reason, or if a document's tombstone fraction is observed causing a real load problem. Numbers in `docs/gc-reclamation.md` | §5, §8, §13.46 |
 | 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
-| 40 | Row 31's offline-window suite is intermittent | **9** | It has gone green, red, green across four CI runs, failing at the point of reaching the application: the page reports `Failed to fetch` while the API is demonstrably serving — its own retirement sweep is in the stack's logs from the same run. The run that closed row 31 exercised the whole path and read §9's sentence off the screen, and the preflight run is green, so the row's claim is verified; **four runs is not a stable suite**, and a suite that goes green-red-green is one people learn to re-run rather than read. Opened rather than left as a note in a phase report for exactly that reason. Instrumentation added in 9.6's sixth iteration records the method, URL and reason of every request the browser could not make, so the next failure names it instead of costing a cycle. **Closes when that instrumentation has named the failing request and the cause is either fixed or explained** — not when a run happens to be green | §9, §12, §13.23, §13.55 |
+| 40 | Row 31's offline-window suite is intermittent | **CLOSED (9.9), and the log line that explained it found a product gap nobody was looking for** | It went green, red, green across four CI runs, failing at the point of reaching the application. **The instrumentation named it**: `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for the host's network configuration changing underneath an in-flight request — while the page shell had already loaded from that same origin and the API's retirement sweep was in the same block's logs. A runner bringing up Docker's bridge network under the suite's own stack, not §9's discard path, which has never failed on any run. `bdbf784` isolates it: the same job passed in one run of that commit and failed in another. **Fixed as far as it can be here**: `signIn` retries the sign-in prologue at most three times and only when the browser recorded exactly that `errorText`, cleared per attempt — the prologue asserts nothing, and the same error after it still fails the suite (§13.29). **Not fixed, and now row 41**: the product does not tolerate it either; the page settled on `Failed to fetch` and stayed there. `docs/row-40-outcome.md` | §9, §12, §13.23, §13.29, §13.55, §13.64 |
+| 41 | A transient failure during `bootstrap` is a dead end | **9** | Found while explaining row 40, not looked for. `bootstrap` wraps sign-in, the token exchange, `GET /me` and the document open in one `try` and returns `{ kind: 'failed', message }`; the composed app renders the message and offers nothing else, so a connection that blips for one request leaves the user on a dead page with the API healthy behind it. Row 40's CI log is the evidence: `Failed to fetch`, unchanged for sixty seconds, while the stack served. **Deliberately not fixed in the close-out** — a retry in the bootstrap sequence has its own failure modes (looping on a genuine 401, re-entering the PKCE exchange on reload) and deserves a test that distinguishes them, not a patch on the last day. Closes when a transient failure at any step of `bootstrap` is recoverable without the user knowing to reload, and a test drives that from the browser | §7, §9, §13.64 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -6390,3 +6391,39 @@ indistinguishable from the tampering the guard exists to prevent — here,
 trimming the run list until the check is satisfied. A false refusal is not a
 safe failure: it is pressure applied to exactly the mechanism that must not
 bend.
+
+### 13.64 A test that tolerates a fault the product does not
+
+Row 40 was opened because a suite had gone green, red, green and nobody could
+say why. The instrumentation it demanded produced one block of text, and that
+block answered a question nobody had asked.
+
+The question asked was *which request failed*. The answer:
+`GET /me — net::ERR_NETWORK_CHANGED`, with the page shell already rendered from
+the same origin and the API's retirement sweep in the same log. A runner
+rearranging its network under the suite's own Compose stack. Environmental, and
+the repair belongs in the suite.
+
+The question nobody asked was *what the page did about it*. It said
+`Failed to fetch` and stayed there for the full sixty seconds. `bootstrap`
+wraps the whole sequence in one `try` and returns a failure state; nothing
+retries, and the app offers no way back but a manual reload.
+
+> **The flaky test and the product gap have the same root, and only one of them
+> was being looked at.** A browser suite that hangs where a person would be
+> stuck is reporting both, and the pressure is entirely towards reading only the
+> first — because the first is what is red.
+
+The suite now retries its sign-in prologue, three times, only on that exact
+`errorText`, only where nothing has been asserted yet (§13.29). That was the
+right repair and it is also the dangerous one, because a green suite feels like
+a closed question.
+
+**It is not.** The test's retry is evidence that the test recovers. It says
+nothing whatever about whether the product does, and the log says it does not.
+Row 41 carries that, with the same log line as its evidence.
+
+**The general form.** Every environmental tolerance added to a test is a claim
+that the fault does not matter. Check whether the product is making the same
+claim, because a suite hardened against something a user meets unprotected has
+quietly moved the problem out of view rather than out of the system.
