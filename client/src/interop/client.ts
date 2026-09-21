@@ -162,28 +162,43 @@ export class InteropClient {
   }
 
   /**
-   * Builds a batch tombstoning the first `count` visible elements.
+   * Builds a batch tombstoning the **last** `count` visible elements.
    *
    * @remarks
+   * <p>
    * Deletes rather than inserts because §5's collection rules only ever reach a
-   * tombstone, so a document with none is one where garbage collection is
-   * correctly a no-op — and register row 33's claim is about what collection
-   * does, which needs something to collect.
-   *
+   * tombstone, so a document with none is one where collection is correctly a
+   * no-op — and register row 33's claim is about what collection does, which
+   * needs something to collect.
+   * </p><p>
+   * <b>The last, and that is the whole of it.</b> This took the first `count`
+   * until 9.7's second CI run, which collected nothing and truncated nothing.
+   * A document typed straight through is a chain, every element the child of
+   * the one before it, so deleting from the <em>front</em> tombstones only
+   * elements that still have a child — and §5's second collection condition
+   * forbids collecting those. It was not a defect in collection; collection was
+   * working, and there was genuinely nothing it was allowed to take. Deleting
+   * from the end gives a leaf, then another as each is taken.
+   * </p><p>
    * The targets come from this replica's own visible order rather than from ids
    * the caller remembered, so they are whatever the document actually contains
    * at the moment of the call. The sequence numbers continue this replica's own
    * counter, because §5's density rule admits no gaps.
+   * </p>
    */
   buildDeletes(count: number): Uint8Array {
     const replica = parseReplicaId(this.negotiated.replicaId);
-    const targets = this.current.visibleIds.slice(0, count);
+    const visible = this.current.visibleIds;
+    const targets = visible.slice(Math.max(0, visible.length - count));
     if (targets.length < count) {
       throw new Error(
-        `asked to delete ${count} elements but only ${targets.length} are visible; `
+        `asked to delete the last ${count} elements but only ${targets.length} are visible; `
         + 'the document is not what this test thinks it is',
       );
     }
+
+    // Deepest first, so each delete lands on what is a leaf at that moment.
+    targets.reverse();
 
     return encodeOperations(targets.map((target) => ({
       kind: 'delete' as const,

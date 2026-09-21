@@ -6151,3 +6151,48 @@ distinguishes a check that passes from one that no longer looks.
 work of five tasks was simply never confirmed by CI, and two phase reports would
 have certified a commit no job had examined. That is the failure §13.49 was
 written about, arriving through a different door.
+
+### 13.58 A test that makes a correct mechanism look broken
+
+9.7's suite waits for §5's collection to reach a document and then asserts that
+catch-up answers a first-open client with a snapshot rather than a delta. Its
+second CI run waited two hundred seconds across eight probes and saw nothing
+collected. The obvious readings were both about the product: the stability
+frontier was not advancing, or the collector was not being scheduled.
+
+**Both were wrong, and the failure was in the test's idea of a document.** The
+stack's own logs — added to the assertion for exactly this reason — showed the
+truncation sweeper's candidate query selecting on `last_reclaimable_at IS NOT
+NULL`, and nothing ever becoming reclaimable. The collector was running, on this
+document, every three seconds, and correctly taking nothing.
+
+A document typed straight through is a chain: every element is the child of the
+one before it. The test tombstoned the **first** ten characters, so every one of
+those tombstones still had a child, and §5's second collection condition forbids
+collecting an element with children. There was nothing collection was permitted
+to take. Deleting the **last** ten gives a leaf, and another as each is taken.
+
+> **A test can arrange a state in which the mechanism it is testing is required
+> to do nothing, and the resulting silence is indistinguishable from the
+> mechanism being broken.** Neither the test nor the product is wrong in a way
+> any assertion could show; the test's premise is.
+
+Three things make this worth recording beyond the one-line fix.
+
+**It is register row 38 arriving from the other side.** That row measures how
+many tombstones rule 2 can never collect in a normally edited document — 114 of
+1,220 — and here the test had constructed a document where the figure was all of
+them. The property row 38 describes was the reason the test failed, and the
+register already held it.
+
+**The diagnosis came from the product's own logs, not from a new assertion.**
+The previous iteration had failed with "it did not happen", which cost a cycle
+and taught nothing. Attaching the stack's logs to the failure turned the next
+run into an answer. On a remote loop that is the difference between iterating
+and guessing (§13.23).
+
+**And the first two hypotheses were both about the product.** When a test of a
+mechanism sees the mechanism do nothing, the state the test built is the thing
+to check first — it is cheaper to establish than either alternative, and it is
+the only one of the three that no amount of reading the implementation can rule
+out.

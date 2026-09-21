@@ -259,6 +259,22 @@ export async function startWalk(options: WalkOptions = {}): Promise<Walk> {
   // from outside, over TLS, which is the assertion that matters anyway.
   await reachable(`${baseUrl}/health/live`, 60_000);
 
+  // AND THEN FOR SOMETHING THE PRODUCT NEEDS. §7 has no `/health/ready`
+  // deliberately — "a readiness probe that checks nothing is worse than no
+  // probe" — and `/health/live` is exactly such a probe: it answers as soon as
+  // the proxy is serving, which says nothing about the API behind it. Waiting
+  // on it alone was enough for the walk, whose first steps are fetches with
+  // their own retries, and not enough for a suite that opens a browser
+  // immediately: 9.6's first two CI runs died with "Failed to fetch" on the
+  // page's own bootstrap, because `/config` was the first thing anyone asked
+  // the API for.
+  //
+  // `/config` is the right thing to wait on rather than a new endpoint: it is
+  // what the client itself loads before it can do anything, so a stack that
+  // answers it is a stack the product can start against. No probe is added, and
+  // the thing waited for is the thing that has to work.
+  await reachable(`${baseUrl}/config`, 60_000);
+
   oidc.redirectUris.add(`${baseUrl}/callback`);
 
   // Registered exactly, like the callback: §7 treats a post-logout URI the

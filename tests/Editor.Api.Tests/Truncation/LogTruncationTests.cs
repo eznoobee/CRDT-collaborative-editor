@@ -169,27 +169,37 @@ public sealed class LogTruncationTests
         var job = factory.Services.GetRequiredService<LogTruncationSweeper>();
         Assert.Equal(0, job.Sweeps);
 
-        // Advanced repeatedly rather than once. A sweep examines a bounded
-        // batch and this database holds every other test's documents, so one
-        // tick is not guaranteed to reach this one — the rotation
-        // Document.LastTruncatedAt exists for, exercised as a side effect
-        // rather than assumed.
+        // WAITS ON THIS SWEEPER, NOT ON THE ROW COUNT (register row 37's shape,
+        // found again in 9.7's CI run). The loop used to exit as soon as this
+        // document's row count dropped — and every other test in the process has
+        // its own sweeper against the same database, so the count can drop
+        // because somebody else's timer reached this document first. The test
+        // then asserted `job.Sweeps > 0` about an instance that had never run,
+        // which is what failed: a claim about *this* sweeper, waited for by
+        // watching something any sweeper can do.
+        //
+        // So the wait is on this instance's own counter, which nothing else can
+        // move.
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-        var after = before;
-        while (DateTime.UtcNow < deadline && after == before)
+        while (DateTime.UtcNow < deadline && job.Removed == 0)
         {
             clock.Advance(TimeSpan.FromMinutes(15));
             await Task.Delay(50, TestContext.Current.CancellationToken);
-            after = await LogRowsAsync(factory, documentId);
         }
 
+        // §13.41's claim, and the reason this test leads the file: nothing here
+        // called the truncator, the clock moved, and rows went.
+        Assert.True(job.Sweeps > 0, "the sweeper never ran on its own timer");
         Assert.True(
-            after < before,
-            $"the sweep never reclaimed anything: {before} rows before, {after} after, "
-                + $"{job.Sweeps} sweeps.");
+            job.Removed > 0,
+            $"the sweeper ran {job.Sweeps} times on its own timer and reclaimed nothing");
 
-        Assert.True(job.Sweeps > 0);
-        Assert.True(job.Removed > 0);
+        // Not asserted here: that the rows it removed were *this* document's.
+        // The sweep takes a bounded batch ranked across every document in a
+        // shared database, so that claim is about the rest of the suite rather
+        // than about truncation. `Truncation_removes_only_what_collection_collected`
+        // makes it through the scoped entry point, where no ranking is involved.
+        Assert.True(before > 0, "the document had no log rows to reclaim");
     }
 
     [Fact]
