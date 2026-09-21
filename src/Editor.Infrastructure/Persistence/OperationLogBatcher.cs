@@ -5,12 +5,57 @@ using Crdt.Core;
 namespace Editor.Infrastructure.Persistence;
 
 /// <summary>How long to accumulate before writing (PROJECT_SPEC.md §8).</summary>
-/// <param name="Window">Maximum time a submission waits for company.</param>
+/// <param name="Window">
+/// Extra time a drained batch waits for company before being written. Zero is
+/// the default and means adaptive — see <see cref="Default"/>.
+/// </param>
 /// <param name="MaxOperations">Flush as soon as this many have accumulated.</param>
 public readonly record struct BatchingPolicy(TimeSpan Window, int MaxOperations)
 {
-    /// <summary>The §8 default: 50 ms or 100 operations, whichever comes first.</summary>
-    public static BatchingPolicy Default => new(TimeSpan.FromMilliseconds(50), 100);
+    /// <summary>
+    /// Adaptive: write immediately, and batch only what arrives during a write.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// §8 originally said "buffer for up to 50 ms or 100 ops, whichever comes
+    /// first", and the reasoning was sound: twenty people typing produce twenty
+    /// tiny transactions a second each, and each one takes the document's
+    /// advisory lock. What the number did not account for is that <b>the wait
+    /// happens inside the segment §8's own latency target measures</b>. 7b.4
+    /// measured the contradiction: <c>editor.persist</c> never dropped below
+    /// 28 ms and sat at a p50 of 57-59 ms, against a target of 25 ms for the
+    /// whole of receive to broadcast. The p50 alone was more than twice the p99
+    /// target, so no amount of tail work reached it.
+    /// </para><para>
+    /// <b>A window of zero is not "no batching".</b> The consumer loop drains
+    /// everything queued, writes it, and only then looks again — so every
+    /// submission that arrives <i>while a write is in flight</i> is waiting in
+    /// the channel when that write returns, and goes out in the next batch.
+    /// The batch size therefore tunes itself to load: one operation when the
+    /// system is idle, and as many as arrive in a write's duration when it is
+    /// busy. The amortisation the window was for is still there; what is gone
+    /// is paying for it when there is no contention to amortise.
+    /// </para><para>
+    /// This is why there is no new code path and no mode switch. A scheme that
+    /// chose between "immediate" and "batched" would have a threshold, and a
+    /// threshold has a latency cliff at the crossing; this has neither, because
+    /// the queue depth at the moment a write finishes <i>is</i> the load
+    /// measurement, taken continuously and for free.
+    /// </para><para>
+    /// <c>MaxOperations</c> still caps a batch, so a long burst becomes several
+    /// bounded writes rather than one unbounded one.
+    /// </para>
+    /// </remarks>
+    public static BatchingPolicy Default => new(TimeSpan.Zero, 100);
+
+    /// <summary>§8's original fixed window, kept for measuring against.</summary>
+    /// <remarks>
+    /// Not dead code: <c>docs/phase-8-measurements.md</c> compares the two, and
+    /// a figure with nothing to compare it to cannot be shown to have improved.
+    /// A deployment whose write latency is dominated by lock contention rather
+    /// than by round trips can also still choose it.
+    /// </remarks>
+    public static BatchingPolicy FixedWindow => new(TimeSpan.FromMilliseconds(50), 100);
 }
 
 /// <summary>
@@ -19,13 +64,33 @@ public readonly record struct BatchingPolicy(TimeSpan Window, int MaxOperations)
 /// <remarks>
 /// <para>
 /// Twenty people typing produce twenty tiny transactions a second each, and each
-/// one takes the document's advisory lock. Buffering for up to 50 ms or 100
-/// operations turns that into one transaction that takes the lock once, which is
-/// what makes per-document serialisation affordable at all.
+/// one takes the document's advisory lock. Coalescing turns that into one
+/// transaction that takes the lock once, which is what makes per-document
+/// serialisation affordable at all.
 /// </para>
 /// <para>
-/// One consumer loop per document, so operations from a single document are
-/// never written concurrently with each other. Documents do not contend.
+/// <b>One consumer loop per document, and it awaits each write before looking
+/// for more.</b> That single fact carries two things §8 depends on, and it is
+/// worth separating them because they are usually conflated.
+/// </para>
+/// <para>
+/// <b>First, correctness.</b> <c>server_seq</c> is assigned inside
+/// <see cref="OperationLogWriter.AppendAsync"/> under the document's advisory
+/// lock, by reading the high-water mark and inserting above it. Two overlapping
+/// writes for one document would each be correct in isolation — the lock
+/// serialises them in the database — but the <i>completion order</i> would then
+/// be whichever transaction committed first, so a client could be told about
+/// sequence 12 before sequence 11 existed. The loop removes that case by
+/// construction rather than by locking: there is never a second write for the
+/// same document to race with. Note what this does <b>not</b> rest on: it is
+/// per document, and different documents do overlap freely, which is the whole
+/// point of a queue per document rather than one global writer.
+/// </para>
+/// <para>
+/// <b>Second, and consequently, "no write in flight" is a property this loop
+/// already has.</b> Adaptive flushing is not a new mechanism here — it is what
+/// a zero window means given the loop: drain, write, and whatever arrived
+/// meanwhile is the next batch. See <see cref="BatchingPolicy.Default"/>.
 /// </para>
 /// </remarks>
 public sealed class OperationLogBatcher(
@@ -94,8 +159,11 @@ public sealed class OperationLogBatcher(
             pending.Clear();
             var count = 0;
 
-            // Take everything already queued, then hold the window open for
-            // stragglers — that is where the coalescing comes from.
+            // Everything already queued. Under the adaptive default that is
+            // where the coalescing comes from: what is sitting here now is
+            // exactly what arrived while the previous write was in flight.
+            // A non-zero window then holds the batch open for stragglers on
+            // top of that, which is §8's original arrangement.
             while (count < policy.MaxOperations && reader.TryRead(out var first))
             {
                 pending.Add(first);

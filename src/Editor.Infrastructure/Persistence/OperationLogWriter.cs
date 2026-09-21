@@ -31,7 +31,7 @@ public readonly record struct AppendResult(long HighestServerSeq, int Written);
 /// same document without depending on .NET and Postgres agreeing about hashing.
 /// </para>
 /// </remarks>
-public sealed class OperationLogWriter(NpgsqlDataSource dataSource)
+public class OperationLogWriter(NpgsqlDataSource dataSource)
 {
     // Two statements rather than one: Postgres' extended protocol cannot carry
     // multiple commands in a single parameterised statement, and parameters are
@@ -54,7 +54,16 @@ public sealed class OperationLogWriter(NpgsqlDataSource dataSource)
         """;
 
     /// <summary>Appends a batch, assigning consecutive sequence numbers.</summary>
-    public async Task<AppendResult> AppendAsync(
+    /// <remarks>
+    /// Virtual, and the class unsealed, for one reason: §8's batching makes a
+    /// claim about <em>concurrency</em> — that a document's writes never
+    /// overlap, which is what lets <c>server_seq</c> be assigned under the
+    /// advisory lock and still be monotonically visible. That claim is about
+    /// what happens between entering and leaving this method, so it can only be
+    /// observed here. Asking the batcher to report its own concurrency would be
+    /// the checked party supplying the answer (§13.42).
+    /// </remarks>
+    public virtual async Task<AppendResult> AppendAsync(
         Guid documentId,
         IReadOnlyList<Operation> operations,
         CancellationToken cancellationToken = default)
