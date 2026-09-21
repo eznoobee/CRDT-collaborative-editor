@@ -300,27 +300,38 @@ explanation, the scope, and the closing condition.
 
 ## Addendum — the preflight, on the commit containing this report
 
-**`./scripts/phase-preflight.sh` PASSED for `82c92dede24cdd1c00676c64c0ebc83340d2d8a5`**,
-which is the commit that contains this report (§13.49).
+**`./scripts/phase-preflight.sh` PASSED for `0100d7c74aa38ec599fd6eec1f00917e8cfaaee6`**,
+which is the commit that contains this report as it now stands (§13.49).
 
-Two workflows for that exact commit, neither superseded:
+**Re-run, because the report changed after its first certification.** The first
+addendum named `82c92de` and was accurate for the report as it read then. 9.9
+was written afterwards, and with it §13.65 and §13.66, a register row closed and
+another opened, a new module and its tests. A report certified against a tree
+that no longer matches it is the same class of stale artefact this preflight
+exists to catch, so the certification moved with the report rather than the
+sentence being left standing.
 
-- **CI**, 15 jobs, all `success` — the .NET build and test, cross-implementation
-  conformance, the TypeScript core against a running server, client lint,
-  typecheck and test, the application in a browser, the walk, §7 against the
-  deployed stack, §9's offline-window discard in a browser, §5's collection seen
-  through the product, the browser document-load metric, the secret scan, and the
-  four §12 gates (sabotage, seeding, breakdown, register).
-- **Mutation**, 1 job, `success` — `Crdt.Core`'s score against §13.7's ratchet.
+**Four runs for that exact commit, none superseded.** Two workflows × the `push`
+and `pull_request` events (§13.63):
 
-All thirteen local gates green: workflows, format, breakdown, register,
-sabotage, seeding, tests, client, conformance, interop, e2e, mutation.
+- **CI**, 15 jobs each, all `success` — the .NET build and test,
+  cross-implementation conformance, the TypeScript core against a running
+  server, client lint, typecheck and test, the application in a browser, the
+  walk, §7 against the deployed stack, §9's offline-window discard in a browser,
+  §5's collection seen through the product, the browser document-load metric,
+  the secret scan, and the four §12 gates (sabotage, seeding, breakdown,
+  register).
+- **Mutation**, 1 job each, `success` — `Crdt.Core`'s score against §13.7's
+  ratchet.
+
+All twelve local gates green: workflows, format, breakdown, register, sabotage,
+seeding, tests, client, conformance, interop, e2e, mutation.
 
 **The named residue.** The commit adding this addendum is not itself certified by
 the run above — that is unavoidable while a report lives in the tree it
 describes, and 7b.11 chose the same arrangement. A known one-line gap is better
 than an unknown one. Everything the report asserts about code, measurements and
-register rows is in `82c92de` and was verified there.
+register rows is in `0100d7c` and was verified there.
 
 **One qualification, stated because it would otherwise be read out of the green.**
 9.9 above says what the instrumentation found — `net::ERR_NETWORK_CHANGED`,
