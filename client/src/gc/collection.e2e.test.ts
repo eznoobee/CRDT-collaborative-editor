@@ -79,8 +79,17 @@ describe("§5's collection, seen by a client that was not there", () => {
     }
   }
 
+  /** Every probe subject, granted up front because a stranger gets a 404. */
+  const probes = ['gc-before', ...Array.from({ length: 8 }, (_, n) => `gc-after-${n + 1}`)];
+
   it('answers a first-open client with a snapshot once the log it would have sent is gone', async () => {
-    const documentId = await provision(walk.baseUrl, walk.oidc, { owner: 'gc-owner' });
+    // Each probe is a different person, so each needs access. The first run of
+    // this suite granted none of them and negotiate answered 404 — which is
+    // §7's authorization working, on a test that had not asked for any.
+    const documentId = await provision(walk.baseUrl, walk.oidc, {
+      owner: 'gc-owner',
+      members: probes.map((subject) => ({ subject, role: 'viewer' as const })),
+    });
 
     const author = await InteropClient.join(
       walk.baseUrl, walk.oidc.mint('gc-owner'), documentId);
@@ -136,7 +145,7 @@ describe("§5's collection, seen by a client that was not there", () => {
     while (attempt < attempts && (after.snapshot ?? null) === null) {
       await new Promise((done) => setTimeout(done, probeEvery));
       attempt += 1;
-      after = await firstOpen(documentId, `gc-after-${attempt}`);
+      after = await firstOpen(documentId, probes[attempt]!);
     }
 
     // AFTER. The operations the delta was made of are gone, so the same

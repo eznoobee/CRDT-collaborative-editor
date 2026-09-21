@@ -54,6 +54,42 @@ import { pick } from '../e2e/browser';
 describe("§9's offline-window discard, seen by a person", () => {
   let walk: Walk;
 
+  /**
+   * Waits for something to become true of the page, and says what was on it if
+   * it does not.
+   *
+   * @remarks
+   * §13.23. `page.waitForFunction` times out with the source of the predicate
+   * and nothing about the page, which on a remote runner is a failure nobody
+   * can act on — the first CI run of this suite timed out waiting for a URL and
+   * the log said only that sixty seconds had passed. This reports what the page
+   * actually showed and what the stack logged, so an iteration buys a diagnosis
+   * rather than a guess.
+   */
+  async function until(
+    page: Awaited<ReturnType<Walk['browsing']['open']>>['page'],
+    predicate: () => boolean,
+    describeWait: string,
+    timeout = 60_000,
+  ): Promise<void> {
+    try {
+      await page.waitForFunction(predicate, undefined, { timeout });
+    } catch (error) {
+      const text = await page
+        .evaluate(() => window.document.body.innerText)
+        .catch(() => '(the page could not be read)');
+
+      throw new Error(
+        `waiting for ${describeWait} timed out after ${timeout} ms.\n`
+        + `--- url ---\n${page.url()}\n`
+        + `--- what the page showed ---\n${text.slice(0, 2_000)}\n`
+        + `--- what the stack logged ---\n${walk.logs().slice(-4_000)}\n`
+        + `--- the original error ---\n${String(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
   beforeAll(async () => {
     walk = await startWalk({
       overlays: ['deploy/docker-compose.offline-window.yml'],
@@ -76,39 +112,36 @@ describe("§9's offline-window discard, seen by a person", () => {
     await page.fill('[data-testid="new-title"]', 'Written before the link went');
     await page.click('[data-testid="create"]');
 
-    await page.waitForFunction(
+    await until(
+      page,
       () => /\/d\/[0-9a-fA-F-]{36}$/.test(window.location.pathname),
-      undefined,
-      { timeout: 60_000 },
-    );
+      'the application to navigate to the document it created');
 
     // The first vacuity guard: a session that was never established has nothing
     // to lose, and its screen is indistinguishable from one that lost work
     // silently.
-    await page.waitForFunction(
+    await until(
+      page,
       () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
-      undefined,
-      { timeout: 60_000 },
-    );
+      "the session to reach 'live'");
 
     await page.click('textarea');
     await page.keyboard.type('sent while connected');
 
-    await page.waitForFunction(
+    await until(
+      page,
       () => document.querySelector('[data-testid="backlog"]') === null,
-      undefined,
-      { timeout: 60_000 },
-    );
+      'the outbox to drain while connected');
 
     // The link goes. Not the server, and not the document: this is a person on
     // a train, and everything about the deployment stays up.
     await context.setOffline(true);
 
-    await page.waitForFunction(
+    await until(
+      page,
       () => document.querySelector('[data-testid="state"]')?.textContent === 'offline',
-      undefined,
-      { timeout: 120_000 },
-    );
+      "the session to notice the link is gone and report 'offline'",
+      120_000);
 
     // Enough to fill the outbox past the threshold the unsent-work line uses,
     // so the second guard can assert there was something to lose.
@@ -117,11 +150,11 @@ describe("§9's offline-window discard, seen by a person", () => {
       await page.keyboard.type(` offline-${batch}`);
     }
 
-    await page.waitForFunction(
-      () => document.querySelector('textarea')?.textContent !== undefined,
-      undefined,
-      { timeout: 30_000 },
-    );
+    await until(
+      page,
+      () => document.querySelector('textarea') !== null,
+      'the editor to still be on screen after typing offline',
+      30_000);
 
     const queued = await page.evaluate(
       () => (window.document.querySelector('[data-testid="backlog"]')?.textContent ?? '').trim(),
@@ -135,12 +168,12 @@ describe("§9's offline-window discard, seen by a person", () => {
 
     // §9's sentence, on the screen. The count matters: a client reporting zero
     // would have discarded silently in every way that counts.
-    await page.waitForFunction(
+    await until(
+      page,
       () => /This client was offline too long\. [1-9]\d* unsent change/
         .test(window.document.body.innerText),
-      undefined,
-      { timeout: 180_000 },
-    );
+      "§9's discard to be reported on screen with a non-zero count",
+      180_000);
 
     const reported = await page.evaluate(
       () => window.document.querySelector('[data-testid="problem"]')?.textContent ?? '',
@@ -158,10 +191,10 @@ describe("§9's offline-window discard, seen by a person", () => {
 
     // And the session recovers rather than stopping: §9's discard costs the
     // unsent work, not the document.
-    await page.waitForFunction(
+    await until(
+      page,
       () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
-      undefined,
-      { timeout: 120_000 },
-    );
+      'the session to recover after the discard',
+      120_000);
   }, 900_000);
 });
