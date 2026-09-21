@@ -49,34 +49,11 @@ describe('conformance corpus', () => {
     expect(traces.length).toBeGreaterThan(0);
   });
 
-  it.each(traces.map((t) => [t.name, t] as const))(
-    'satisfies the expectations of %s',
-    (_name, trace) => {
-      const result = replay(trace);
-      const { expected } = trace;
-
-      for (const [replica, text] of result.replicaTexts) {
-        expect(text, `replica ${replica} diverged. ${expected.rationale}`).toBe(result.text);
-      }
-
-      expect(
-        result.wireRoundTripText,
-        `wire round trip diverged from direct replay. ${expected.rationale}`,
-      ).toBe(result.text);
-
-      if (expected.text !== undefined) {
-        expect(result.text, expected.rationale).toBe(expected.text);
-      }
-
-      if (expected.oneOf !== undefined) {
-        expect(expected.oneOf, expected.rationale).toContain(result.text);
-      }
-
-      if (expected.forbidden !== undefined) {
-        expect(expected.forbidden, expected.rationale).not.toContain(result.text);
-      }
-    },
-  );
+  // The committed traces' expectations moved to committedTraces.test.ts in 9.1,
+  // which the DEFAULT suite runs — they need nothing this file waits for, and
+  // leaving them here as well would be two homes for one assertion. This file
+  // still loads them, because the normalised result file the cross-
+  // implementation diff compares must cover the whole corpus.
 
   it('replays the generated corpus, converging every time', () => {
     const generated = loadGenerated();

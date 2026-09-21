@@ -26,9 +26,16 @@ export default defineConfig({
       // else should, and a measurement that ran beside the ordinary suite
       // would be measuring the ordinary suite.
       'src/load/**',
-      // §9's corpus needs the C# runner to have materialised the generated
-      // traces first, so it is not self-contained and does not belong in the
-      // default run. `npm run test:conformance`, via scripts/conformance.sh.
+      // §9's GENERATED corpus needs the C# runner to have materialised it
+      // first, so it is not self-contained and does not belong in the default
+      // run. `npm run test:conformance`, via scripts/conformance.sh.
+      //
+      // Only the generated half. §9's COMMITTED traces need nothing, and were
+      // excluded for nine phases only because they shared a file with the ones
+      // that do — which left the default suite with no opinion about where
+      // characters go (register row 39, §13.52). They live in
+      // `src/crdt/committedTraces.test.ts` now, which runs here. Do not widen
+      // this pattern to `conformance*`: that would quietly take them back out.
       'src/crdt/conformance.test.ts',
     ],
     // PROJECT_SPEC.md §11: an empty suite passing proves nothing, and vitest

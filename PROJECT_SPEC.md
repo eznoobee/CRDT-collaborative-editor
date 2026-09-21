@@ -5803,3 +5803,47 @@ It is also the reason the 5b arrangement exists: predictions written down before
 the first push, because a remote loop punishes guessing much harder than a local
 one does. Calling remote work blocked is how a project loses the ability to do
 anything its author cannot personally run.
+
+### 13.52 A file is the unit of exclusion; it is not the unit of justification
+
+Row 39 said the client's default suite had no placement oracle, and 9.1 was
+planned as building one: a fixture produced by the C# runner, committed with its
+provenance, regenerable only deliberately. That plan was sound and it was not
+needed. **The oracle already existed, had existed since Phase 2, and was already
+committed, already asserted, and already read out of the specification rather
+than out of either implementation.** The nine traces in
+`tests/Conformance/traces/` script an execution in *user* terms — "insert 'a' at
+index 0" — and carry an `expected` block whose `rationale` cites §5 or the paper.
+Nothing in them names a parent, a side or an origin. They are exactly the
+artefact 9.1 set out to create.
+
+They were not running, and the reason they were not running was correct:
+`conformance.test.ts` also replays the **generated** corpus, whose loader throws
+when the C# runner has not materialised it, so the file is excluded from
+`npm test`. Every word of that justification is true, and it is true about half
+the file's contents.
+
+> **An exclusion is written against a file and argued from a reason, and nothing
+> checks that the reason covers the file.** The two halves had different
+> dependencies and one line in a config could only express one of them. The
+> stronger dependency won, silently, for nine phases.
+
+The tell was available the whole time and was read as something else. 7b.9's
+probe reported the entire default client suite green with the sibling tie-break
+inverted, and that was recorded as *the corpus is excluded, which is sound* —
+a restatement of the justification rather than a question about it. The
+justification is a reason to exclude the generated traces; it was accepted as a
+reason to exclude everything in the file with them.
+
+**The fix was a two-file split and no new artefact.** The committed traces moved
+to `client/src/crdt/committedTraces.test.ts`, which the default suite runs;
+`conformance.test.ts` keeps the generated corpus and stays excluded, and still
+loads the committed traces because §9's normalised diff must cover the whole
+corpus. Inverting the tie-break now turns the default suite red.
+
+**Generally: when a suite is excluded, the thing to state is not why the file is
+excluded but which of its dependencies each test actually has.** Where they
+differ, the file is the wrong boundary, and the cost of finding that out later
+is measured in how long the strongest dependency got to speak for the weakest.
+It was nine phases here, and the artefact that would have revealed it — a probe
+reporting zero suites — had already been run and written down.
