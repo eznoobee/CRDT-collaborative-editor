@@ -6,7 +6,7 @@ import { startSystem, type System } from '../e2e/harness';
 import { pick } from '../e2e/browser';
 import { provision } from '../interop/harness';
 import { decodeOperations, encodeOperations, parseReplicaId, Replica } from '../crdt';
-import { describe as describeProvenance, percentiles, provenance } from './provenance';
+import { cpuBetween, describe as describeProvenance, percentiles, provenance, sampleCpu } from './provenance';
 
 /**
  * §8's second target: p99 < 150 ms, client keystroke → remote client render,
@@ -215,6 +215,13 @@ describe("§8's keystroke-to-render target", () => {
       // Paced like a person, for the same reason the background editors are:
       // §8's target says twenty concurrent editors, and an editor is someone
       // typing, not a loop pressing keys as fast as Playwright will carry them.
+      // §8's rule 2, which this harness did not satisfy until 9.5: the
+      // generator's utilisation is reported beside the result, or the result is
+      // not one. Whole-box rather than this process, because the browsers where
+      // the rendering happens are separate processes — a figure covering only
+      // the generator would have reported it idle while the box was saturated.
+      const cpuBefore = sampleCpu();
+      const generatorBefore = process.cpuUsage();
       const started = Date.now();
       for (let i = 0; i < KEYSTROKES; i++) {
         const due = started + (i * 1000) / BACKGROUND_RATE;
@@ -227,6 +234,10 @@ describe("§8's keystroke-to-render target", () => {
       }
 
       const typedFor = (Date.now() - started) / 1000;
+      const boxBusy = cpuBetween(cpuBefore, sampleCpu());
+      const generatorCpu = process.cpuUsage(generatorBefore);
+      const generatorBusy =
+        ((generatorCpu.user + generatorCpu.system) / 1e6) / (typedFor * where.cores) * 100;
 
       // Waited for, but not with waitForFunction: a bare timeout there says
       // "the reader did not get there" and nothing about how far it got or
@@ -325,6 +336,8 @@ describe("§8's keystroke-to-render target", () => {
       say(`  api log    ${system.log.join('').split('\n').filter((l) => /warn|error|fail|drop|rate/i.test(l)).slice(-8).join(' | ') || '(nothing notable)'}`);
       say(`  matched    ${samples.length} of ${sent.length} keystrokes seen at both ends`);
       say(`  latency ms ${percentiles(samples)}`);
+      say(`  host       ${boxBusy === null ? 'utilisation unavailable' : `${boxBusy.toFixed(0)} % of ${where.cores} cores busy while typing`}`);
+      say(`  generator  ${generatorBusy.toFixed(0)} % of ${where.cores} cores in this process (server and browsers are not in it)`);
       say(`  error bar  reader polls every ${POLL_MS} ms, so each sample carries up to +${POLL_MS} ms`);
 
       // The match rate is the guard. A run where most keystrokes never
