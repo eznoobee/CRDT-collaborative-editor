@@ -1,5 +1,6 @@
 using System.Text;
 using Crdt.Core;
+using Editor.Api.Infrastructure;
 using Editor.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Time.Testing;
@@ -262,5 +263,20 @@ public sealed class OperationLogBatcherTests(PostgresFixture fixture)
 
         Assert.Equal(1, await CountAsync(documentId));
         Assert.Equal(1, batcher.Flushes);
+    }
+
+    [Fact]
+    public void Batching_policy_matches_its_defaults()
+    {
+        // Two copies of §8's figures exist — `BatchingPolicy.Default`, which the
+        // batcher documents, and `BatchingOptions`, which configuration binds —
+        // because binding needs numbers on a settable class. A second copy that
+        // nothing compares is a copy that drifts, and the drift would appear as
+        // a deployment quietly running a policy the documentation does not
+        // describe.
+        var bound = new BatchingOptions();
+
+        Assert.Equal(BatchingPolicy.Default.Window, TimeSpan.FromMilliseconds(bound.WindowMs));
+        Assert.Equal(BatchingPolicy.Default.MaxOperations, bound.MaxOperations);
     }
 }

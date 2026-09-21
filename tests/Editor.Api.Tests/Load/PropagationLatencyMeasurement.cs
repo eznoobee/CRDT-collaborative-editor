@@ -127,11 +127,60 @@ public sealed class PropagationLatencyMeasurement
             assertTarget: false,
             documentPerEditor: true);
 
+    /// <summary>
+    /// The load curve, under both batching policies (9.4).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a curve and not two points.</b> Adaptive flushing is defined by
+    /// what the queue holds when a write finishes, so its behaviour at idle and
+    /// its behaviour at saturation are the two ends of one continuum and neither
+    /// says anything about the middle. A scheme that switched modes at a
+    /// threshold would have a cliff somewhere between them, and measuring only
+    /// the ends is exactly how such a cliff goes unnoticed until it is in
+    /// production.
+    /// </para><para>
+    /// Eight batches a second per editor is §8's own scenario — a fast typist —
+    /// and it appears in the middle of this range rather than at its end, which
+    /// is the point: the target is not measured at the edge of what the server
+    /// can do.
+    /// </para><para>
+    /// <b>Both policies, same build, same run.</b> §8 requires a number to be
+    /// reported with the build that produced it, and the comparison this task
+    /// turns on is between two settings rather than two builds — so they are
+    /// measured on one, alternating, rather than across two runs whose
+    /// difference could be anything the machine was doing.
+    /// </para><para>
+    /// Reported, never asserted. §8 states a target for one point on this curve
+    /// and the assertion for it lives on
+    /// <see cref="Receive_to_broadcast_enqueue_p99_at_editor_pace"/>; a
+    /// threshold invented for the rest would be a number nobody chose.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Receive_to_broadcast_enqueue_across_the_load_curve()
+    {
+        foreach (var rate in (double[])[1, 2, 4, 8, 16, 32])
+        {
+            foreach (var windowMs in (int[])[0, 50])
+            {
+                await MeasureAsync(
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"curve {rate:0.#}/s/editor, {(windowMs == 0 ? "adaptive" : $"{windowMs} ms window")}"),
+                    rate,
+                    assertTarget: false,
+                    windowMs: windowMs);
+            }
+        }
+    }
+
     private async Task MeasureAsync(
         string label,
         double batchesPerSecondPerEditor,
         bool assertTarget,
-        bool documentPerEditor = false)
+        bool documentPerEditor = false,
+        int? windowMs = null)
     {
         LoadGate.Require();
         _fixture.RequireBoth();
@@ -143,7 +192,14 @@ public sealed class PropagationLatencyMeasurement
         // segment is slow and cannot say which part of it is. A number without
         // an attribution is a number nobody can act on.
         using var trace = new ActivityCollector(EditorTracing.SourceName);
-        await using var factory = new EditorApiFactory(_fixture);
+        await using var factory = windowMs is null
+            ? new EditorApiFactory(_fixture)
+            : new EditorApiFactory(
+                _fixture,
+                settings: new()
+                {
+                    ["Batching:WindowMs"] = windowMs.Value.ToString(CultureInfo.InvariantCulture),
+                });
 
         var owner = string.Create(CultureInfo.InvariantCulture, $"load-p99-owner-{label.GetHashCode(StringComparison.Ordinal):x}");
         var shared = await DocumentSetup.DocumentAsync(factory, owner);

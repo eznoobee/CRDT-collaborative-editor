@@ -75,8 +75,28 @@ public static class PersistenceExtensions
 
         services.AddSingleton(provider => new OperationLogWriter(
             provider.GetRequiredService<NpgsqlDataSource>()));
-        services.AddSingleton(provider => new OperationLogBatcher(
-            provider.GetRequiredService<OperationLogWriter>(), BatchingPolicy.Default));
+        // §8's batching, configurable because 9.4 has to measure two settings of
+        // it against each other and a figure with nothing to compare it to
+        // cannot be shown to have improved. The default is adaptive; a
+        // deployment whose write latency is dominated by lock contention rather
+        // than by round trips can set a window back.
+        services.AddOptions<BatchingOptions>()
+            .BindConfiguration(BatchingOptions.Section)
+            .Validate(
+                options => options.WindowMs >= 0,
+                "A negative batching window would make every write overdue before it was queued.")
+            .Validate(
+                options => options.MaxOperations > 0,
+                "A batch capped at zero operations writes nothing and reports success.")
+            .ValidateOnStart();
+
+        services.AddSingleton(provider =>
+        {
+            var options = provider.GetRequiredService<IOptions<BatchingOptions>>().Value;
+            return new OperationLogBatcher(
+                provider.GetRequiredService<OperationLogWriter>(),
+                new BatchingPolicy(TimeSpan.FromMilliseconds(options.WindowMs), options.MaxOperations));
+        });
 
         services.AddScoped<CurrentUser>();
         services.AddScoped<DocumentRoleReader>();
