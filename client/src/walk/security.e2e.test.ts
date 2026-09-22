@@ -1,0 +1,298 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { startWalk, type Walk } from './harness';
+import { pick } from '../e2e/browser';
+
+/**
+ * §7, asserted against the application as Compose starts it (register row 13).
+ *
+ * @remarks
+ * <p>
+ * Every §7 test written before this phase runs against a test host, where the
+ * test supplies the configuration it is about to verify. That is §13.28's
+ * shape: the check passes and the artefact is broken, which is exactly the
+ * state Phase 5b found the deployment in under a suite green for eleven
+ * phases. §7 now says what "verified against the deployment" means, and this
+ * file is where that verification happens — every request below entered
+ * through the published port of a stack brought up from `docker-compose.yml`
+ * and a `.env`, with nothing reconfigured by the test.
+ * </p><p>
+ * <strong>Its own stack, not the walk's.</strong> Sharing one bring-up would
+ * be faster and would make a walk failure cascade into spurious failures here,
+ * which is §13.23's cost — a harness that cannot explain its own failure. Two
+ * independent bring-ups also mean the artefact is shown to start correctly
+ * twice.
+ * </p><p>
+ * <strong>The vacuity risk this file exists to avoid, and can fall into.</strong>
+ * A test here that asserts something the test host already proved is a slower
+ * copy of a test that exists. What makes a check worth its minute is a
+ * dependency on the deployed <em>configuration</em> — so the token tests below
+ * mint tokens that are wrong in one claim each, because absence of a setting
+ * is already loud (`docker-compose.yml` uses `${VAR:?}` for every OIDC value,
+ * so a missing one fails interpolation before anything starts) and wrongness
+ * is silent. A deployment whose audience is misconfigured accepts tokens meant
+ * for another service and looks entirely healthy.
+ * </p><p>
+ * <strong>The predictions, and how they did.</strong> Before the first run I
+ * recorded that I expected at least one failure, and named three candidates:
+ * `POST /documents` through a proxy configured for SignalR and the SPA, a
+ * collision between this file's compose bring-up and the walk's, and the
+ * expired-token check landing an `exp` before the `nbf` the harness sets
+ * unconditionally. All eight passed first time and all three predictions were
+ * wrong.
+ * </p><p>
+ * A clean first pass is the outcome §13.28 says to distrust, so it was
+ * checked rather than accepted: the CI log shows this file running as its own
+ * suite (8 tests, 11.3 s), the harness's `close()` tears down with
+ * `--volumes` and `startWalk()` brings up again, so the stack here really was
+ * a second cold start — fast only because the images were already built. The
+ * control test returning a real user id is what rules out the other reading,
+ * a deployment that refuses everything.
+ * </p>
+ */
+describe('§7 against the deployed stack', () => {
+  let walk: Walk;
+
+  beforeAll(async () => {
+    walk = await startWalk();
+  }, 900_000);
+
+  afterAll(async () => {
+    await walk?.close();
+  });
+
+  /** A request through the proxy, with a bearer token. */
+  function call(path: string, token: string, init: RequestInit = {}): Promise<Response> {
+    return fetch(`${walk.baseUrl}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(init.headers ?? {}),
+      },
+    });
+  }
+
+  it('accepts a correctly-issued token, so the refusals below mean something', async () => {
+    // The control. Without it every assertion in this file is satisfied by a
+    // deployment that refuses everything — including one whose database is
+    // unreachable, which is how §13.28's smoke test stayed green.
+    const response = await call('/me', walk.oidc.mint('deployment-baseline'));
+
+    expect(response.status).toBe(200);
+
+    const me = (await response.json()) as { userId: string };
+    expect(me.userId).toMatch(/^[0-9a-fA-F-]{36}$/);
+  }, 60_000);
+
+  it('refuses a token from another issuer (Oidc__Issuer is enforced, not merely set)', async () => {
+    const forged = walk.oidc.mintWith({
+      subject: 'deployment-wrong-issuer',
+      issuer: 'https://someone-elses-issuer.invalid/',
+    });
+
+    const response = await call('/me', forged);
+
+    expect(response.status).toBe(401);
+  }, 60_000);
+
+  it('refuses a token for another audience (Oidc__Audience is enforced)', async () => {
+    // The check §7 names and the one a deployment most plausibly gets wrong:
+    // a token minted by the right issuer, signed by the right key, for a
+    // different service. Everything about it is valid except who it is for.
+    const elsewhere = walk.oidc.mintWith({
+      subject: 'deployment-wrong-audience',
+      audience: 'some-other-service',
+    });
+
+    const response = await call('/me', elsewhere);
+
+    expect(response.status).toBe(401);
+  }, 60_000);
+
+  it('refuses a token expired past any tolerated clock skew', async () => {
+    // The margin is derived from §7's bound rather than picked, and that is
+    // the point: at the old five-minute maximum a token expired thirty seconds
+    // ago is *accepted*, so the obvious version of this test passed against a
+    // deployment whose lifetime check had been substantially relaxed from an
+    // environment variable. 6b.2's audit lowered the bound to thirty seconds;
+    // sixty-one is outside it under every configuration §7 permits.
+    const stale = walk.oidc.mintWith({
+      subject: 'deployment-expired',
+      expiresInSeconds: -61,
+    });
+
+    const response = await call('/me', stale);
+
+    expect(response.status).toBe(401);
+  }, 60_000);
+
+  it('refuses an unauthenticated call rather than answering it', async () => {
+    const response = await fetch(`${walk.baseUrl}/me`);
+
+    expect(response.status).toBe(401);
+  }, 60_000);
+
+  it('answers 404 for a document the caller cannot see, the same as for one that does not exist', async () => {
+    // §7's rule, through the proxy. A different status for "exists but not
+    // yours" than for "does not exist" is an enumeration oracle, and both ids
+    // below are real in exactly one of the two senses.
+    const owner = walk.oidc.mint('deployment-owner');
+    const stranger = walk.oidc.mint('deployment-stranger');
+
+    const created = await call('/documents', owner, {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Not yours' }),
+    });
+
+    expect(created.status).toBe(201);
+    const document = (await created.json()) as { id: string };
+
+    const theirs = await call(`/documents/${document.id}`, stranger);
+    const absent = await call('/documents/00000000-0000-4000-8000-000000000000', stranger);
+
+    expect(theirs.status).toBe(404);
+    expect(absent.status).toBe(theirs.status);
+  }, 60_000);
+
+  it('issues a connect ticket that is opaque and not the bearer token', async () => {
+    // §7 puts a ticket in the query string precisely so a JWT is not there.
+    // Asserted on what the deployed negotiate actually hands back.
+    const token = walk.oidc.mint('deployment-ticket');
+
+    const created = await call('/documents', token, {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Ticketed' }),
+    });
+
+    const document = (await created.json()) as { id: string };
+
+    const negotiated = await call(`/documents/${document.id}/negotiate`, token, {
+      method: 'POST',
+      body: JSON.stringify({ replicaId: null }),
+    });
+
+    expect(negotiated.status).toBe(200);
+
+    const answer = (await negotiated.json()) as { ticket: string; replicaId: string };
+
+    expect(answer.ticket).not.toBe(token);
+    expect(answer.ticket.startsWith('eyJ')).toBe(false);
+    expect(answer.ticket).not.toContain('.');
+    expect(answer.replicaId).toMatch(/^[0-9a-fA-F-]{36}$/);
+  }, 60_000);
+
+  it('carries §7\'s headers on every response, through the proxy', async () => {
+    // Asserted where the browser sees them: after TLS termination and the
+    // proxy, not at the API. A header set on the API and dropped by the proxy
+    // is a header nobody receives.
+    const token = walk.oidc.mint('deployment-headers');
+
+    const api = await call('/me', token);
+    const page = await fetch(`${walk.baseUrl}/`);
+
+    for (const response of [api, page]) {
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(response.headers.get('content-security-policy')).toBeTruthy();
+
+      // Enforced, never report-only: the two look identical in a header dump
+      // and one of them enforces nothing.
+      expect(response.headers.get('content-security-policy-report-only')).toBeNull();
+    }
+  }, 60_000);
+
+  it('names the configured issuer in connect-src, not a wildcard', async () => {
+    // The directive the browser needs for the token exchange, and the one a
+    // policy assembled from the wrong configuration silently omits.
+    const config = (await (await fetch(`${walk.baseUrl}/config`)).json()) as { issuer: string };
+    const origin = new URL(config.issuer).origin;
+
+    const policy = (await fetch(`${walk.baseUrl}/`)).headers.get('content-security-policy') ?? '';
+
+    expect(policy).toContain(`connect-src 'self' ${origin}`);
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).not.toContain('*');
+    expect(policy).not.toContain('unsafe-inline');
+  }, 60_000);
+
+  it('sends HSTS with the value this stack configured, over TLS', async () => {
+    // §7's named divergence: sixty seconds here, one year in production. What
+    // is under test is that the header is present, enforced and carries the
+    // configured value — a short value proves all three, and a long one served
+    // from a development host would pin a browser profile for a year.
+    //
+    // It also observes something nothing else does. HSTS is emitted only on an
+    // HTTPS request, and whether this request looks like HTTPS to the API
+    // depends on ForwardedHeaders matching the proxy — the one §7-relevant
+    // Compose setting with a default rather than a required value, whose
+    // misconfiguration was previously invisible.
+    const response = await fetch(`${walk.baseUrl}/`);
+    const hsts = response.headers.get('strict-transport-security');
+
+    expect(hsts).toBe('max-age=60; includeSubDomains');
+  }, 60_000);
+
+  it('runs the application under its own policy without a single violation', async () => {
+    // §7's done-when for CSP, and the reason it is phrased as work rather than
+    // as a header check: zero violations on an empty page is not weak
+    // evidence, it is evidence of nothing — a policy forbidding everything the
+    // application needs scores perfectly until the application tries.
+    //
+    // So this signs in, opens a document, waits for the socket, and types.
+    walk.oidc.accounts.add('csp-walker');
+    const { page } = await walk.browsing.open();
+
+    // Collected from the DOM event rather than the console, because a console
+    // message is a string a browser may reword and a violation event is the
+    // browser telling you which directive it enforced.
+    await page.addInitScript(() => {
+      (window as unknown as { __csp: string[] }).__csp = [];
+      window.addEventListener('securitypolicyviolation', (event) => {
+        (window as unknown as { __csp: string[] }).__csp.push(
+          `${event.violatedDirective} blocked ${event.blockedURI}`,
+        );
+      });
+    });
+
+    await page.goto(walk.baseUrl);
+    await pick(page, 'csp-walker');
+
+    await page.waitForSelector('[data-testid="create"]', { timeout: 60_000 });
+    await page.fill('[data-testid="new-title"]', 'Under policy');
+    await page.click('[data-testid="create"]');
+
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="state"]')?.textContent === 'live',
+      undefined,
+      { timeout: 60_000 },
+    );
+
+    await page.click('textarea');
+    await page.keyboard.type('typed under a content security policy');
+
+    // The application did the work. Now ask what the browser refused.
+    const violations = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
+
+    expect(await page.inputValue('textarea')).toBe('typed under a content security policy');
+    expect(violations).toEqual([]);
+  }, 300_000);
+
+  it('refuses to negotiate on a document the caller is not a member of', async () => {
+    const owner = walk.oidc.mint('deployment-negotiate-owner');
+    const stranger = walk.oidc.mint('deployment-negotiate-stranger');
+
+    const created = await call('/documents', owner, {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Members only' }),
+    });
+
+    const document = (await created.json()) as { id: string };
+
+    const refused = await call(`/documents/${document.id}/negotiate`, stranger, {
+      method: 'POST',
+      body: JSON.stringify({ replicaId: null }),
+    });
+
+    expect(refused.status).toBe(404);
+  }, 60_000);
+});

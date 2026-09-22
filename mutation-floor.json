@@ -1,0 +1,45 @@
+{
+  "why": "PROJECT_SPEC.md 13.7 and 13.21. The ratchet keys on WHICH mutants go undetected, not on the score. A mutant that flips between Killed and Timeout never appears here, so the check does not move with the runner - which the score does: commit 9ffe234 changed neither Crdt.Core nor its tests and the score still went 88.89% to 89.27% because CI timed out eight more mutants. An entry appearing that is not in this list is coverage erosion and fails the build everywhere. This list is the UNION of what has been observed undetected, so a faster machine surfacing a mutant a slower one timed out is already accounted for. Adding to it is a deliberate act and needs an argued exception recorded in 13.7; removing entries as coverage improves is ordinary cleanup and the script reports the candidates. KEY FORMAT (13.21): file:mutator:replacement:source line text. It was file:line:column:mutator until 3b, which made every entry below an insertion look like new erosion - and, worse, let a genuinely new mutant inherit a shifted entry's line number and pass as known. Entries may repeat: a repeated key is two gaps of the same shape and the check counts them.",
+  "recorded": "2026-09-03",
+  "observedScores": {
+    "local-4vcpu": 88.19,
+    "github-ubuntu-latest": [
+      88.89,
+      89.27
+    ]
+  },
+  "undetected": [
+    "PendingSetOverflowException.cs:String mutation:\"\":: base(\"The pending set exceeded its bound (§5).\")",
+    "Replica.cs:Block removal mutation:{}:{",
+    "Replica.cs:Block removal mutation:{}:{",
+    "Replica.cs:Block removal mutation:{}:{",
+    "Replica.cs:Boolean mutation:false:private readonly Node _root = new() { IsRoot = true, IsDeleted = true };",
+    "Replica.cs:Boolean mutation:false:progressed = true;",
+    "Replica.cs:Conditional (false) mutation:(false?-1 :1):return x.Side == Side.Left ? -1 : 1;",
+    "Replica.cs:Conditional (true) mutation:(true?-1 :1):return side == Side.Left ? -1 : 1;",
+    "Replica.cs:Conditional (true) mutation:(true?-1 :1):return x.Side == Side.Left ? -1 : 1;",
+    "Replica.cs:Conditional (true) mutation:(true?1 :-1):return side == Side.Left ? 1 : -1;",
+    "Replica.cs:Conditional (true) mutation:(true?x.Parent!.LeftChildren :x.Parent!.RightChildren):var siblings = x.Side == Side.Left ? x.Parent!.LeftChildren : x.Parent!.RightChildren;",
+    "Replica.cs:Equality mutation:node.Id.CompareTo(sibling.Id) <= 0:|| (byOrigin == 0 && node.Id.CompareTo(sibling.Id) < 0);",
+    "Replica.cs:Equality mutation:node.Id.CompareTo(siblings[i].Id) > 0:while (i < siblings.Count && node.Id.CompareTo(siblings[i].Id) >= 0)",
+    "Replica.cs:Equality mutation:x.Side != Side.Left:return x.Side == Side.Left ? -1 : 1;",
+    "Replica.cs:Negate expression:!(ReferenceEquals(x, b)):if (ReferenceEquals(x, b))",
+    "Replica.cs:Negate expression:!(ReferenceEquals(y, a)):if (ReferenceEquals(y, a))",
+    "Replica.cs:PostDecrementExpression to PostIncrementExpression mutation:depthX++:depthX--;",
+    "Replica.cs:PostDecrementExpression to PostIncrementExpression mutation:depthY++:depthY--;",
+    "Replica.cs:PostDecrementExpression to PostIncrementExpression mutation:i++:_pending.RemoveAt(i--);",
+    "Replica.cs:PostDecrementExpression to PostIncrementExpression mutation:i++:_pending.RemoveAt(i--);",
+    "Replica.cs:Statement mutation:;:ArgumentNullException.ThrowIfNull(elements);",
+    "Replica.cs:Statement mutation:;:_byId.Remove(node.Id);",
+    "Replica.cs:Statement mutation:;:_pending.RemoveAt(i--);",
+    "Replica.cs:Statement mutation:;:_pending.RemoveAt(i--);",
+    "Replica.cs:Statement mutation:;:depthX--;",
+    "Replica.cs:Statement mutation:;:depthY--;",
+    "Replica.cs:String mutation:\"\":\"A node with right children must have a traversal successor.\");",
+    "Replica.cs:String mutation:$\"\":_ => throw new InvalidOperationException($\"Unknown operation {operation}.\"),",
+    "Replica.cs:String mutation:$\"\":throw new InvalidOperationException($\"Unknown operation {operation}.\");",
+    "Replica.cs:UnaryMinusExpression to UnaryPlusExpression mutation:+1:return -1;",
+    "Replica.cs:UnaryMinusExpression to UnaryPlusExpression mutation:+1:return side == Side.Left ? 1 : -1;",
+    "Replica.cs:UnaryMinusExpression to UnaryPlusExpression mutation:+1:return x.Side == Side.Left ? -1 : 1;"
+  ]
+}

@@ -54,3 +54,27 @@ export function compareReplicaId(a: ReplicaId, b: ReplicaId): number {
 
   return 0;
 }
+
+/**
+ * The sixteen raw bytes, big-endian, as PROJECT_SPEC.md §5 and §6 define them.
+ *
+ * The binary encoding writes these directly rather than a text form: a canonical
+ * UUID string is 36 bytes to say what 16 bytes say, and the ordering §5 makes
+ * normative is the ordering of these bytes.
+ */
+export function replicaIdToBytes(id: ReplicaId): Uint8Array {
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(0, id.hi, false);
+  view.setBigUint64(8, id.lo, false);
+  return bytes;
+}
+
+/** Reads sixteen raw big-endian bytes. */
+export function replicaIdFromBytes(bytes: Uint8Array): ReplicaId {
+  if (bytes.length !== 16) {
+    throw new Error(`A replica id is 16 bytes, not ${bytes.length}.`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { hi: view.getBigUint64(0, false), lo: view.getBigUint64(8, false) };
+}

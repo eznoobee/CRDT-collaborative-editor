@@ -1,11 +1,20 @@
 import { Replica } from './replica';
-import { parseReplicaId, formatReplicaId } from './replicaId';
+import { parseReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
+import { encodeOperation, decodeOperation } from './wire';
+import type { Operation } from './operation';
+import { compareByCodePoint, quote, renderMap } from './normalisedJson';
+import { decodeOperations, decodeSnapshot, encodeOperations, encodeSnapshot } from './binary';
+import { deserializeSnapshot, serializeSnapshot } from './snapshotJson';
 
 export interface TraceResult {
   readonly name: string;
   readonly text: string;
   readonly replicaTexts: ReadonlyMap<string, string>;
   readonly versionVector: ReadonlyMap<string, string>;
+  /** The same operations replayed after a trip through the wire encoding. */
+  readonly wireRoundTripText: string;
+  /** The binary snapshot (§6) as lowercase hex, so the artefacts compare it. */
+  readonly snapshot: string;
 }
 
 interface TraceOp {
@@ -51,6 +60,7 @@ function syncAll(replicas: Replica[]): void {
 export function replay(trace: Trace): TraceResult {
   const ids = trace.replicas.map((r) => parseReplicaId(r.id));
   const replicas = ids.map((id) => new Replica(id));
+  const produced: Operation[] = [];
 
   for (const op of trace.ops) {
     switch (op.op) {
@@ -59,11 +69,11 @@ export function replay(trace: Trace): TraceResult {
         if (codePoints.length !== 1) {
           throw new Error(`A trace value must be exactly one code point, got '${op.value!}'.`);
         }
-        replicas[op.replica!]!.insert(op.index!, codePoints[0]!);
+        produced.push(replicas[op.replica!]!.insert(op.index!, codePoints[0]!));
         break;
       }
       case 'delete':
-        replicas[op.replica!]!.delete(op.index!);
+        produced.push(replicas[op.replica!]!.delete(op.index!));
         break;
       case 'deliver':
         deliver(replicas[op.from!]!, replicas[op.to!]!);
@@ -83,77 +93,111 @@ export function replay(trace: Trace): TraceResult {
     versionVector.set(replica, count.toString());
   }
 
-  return { name: trace.name, text: replicas[0]!.text, replicaTexts, versionVector };
-}
-
-/** Compares by Unicode code point, not UTF-16 code unit (§9). */
-function compareByCodePoint(a: string, b: string): number {
-  const x = [...a];
-  const y = [...b];
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    const cx = x[i]!.codePointAt(0)!;
-    const cy = y[i]!.codePointAt(0)!;
-    if (cx !== cy) {
-      return cx - cy;
-    }
-  }
-  return x.length - y.length;
-}
-
-/** Escapes only what JSON requires; non-ASCII stays literal (§9). */
-function quote(value: string): string {
-  let out = '"';
-  for (const ch of value) {
-    switch (ch) {
-      case '"':
-        out += '\\"';
-        break;
-      case '\\':
-        out += '\\\\';
-        break;
-      case '\n':
-        out += '\\n';
-        break;
-      case '\r':
-        out += '\\r';
-        break;
-      case '\t':
-        out += '\\t';
-        break;
-      case '\b':
-        out += '\\b';
-        break;
-      case '\f':
-        out += '\\f';
-        break;
-      default: {
-        const code = ch.codePointAt(0)!;
-        out += code < 0x20 ? `\\u${code.toString(16).padStart(4, '0')}` : ch;
-      }
-    }
-  }
-  return `${out}"`;
-}
-
-function renderMap(key: string, map: ReadonlyMap<string, string>): string {
-  if (map.size === 0) {
-    return `      ${quote(key)}: {}`;
+  // §6: the encoding is a second implementation alongside the C# one, so it is
+  // exercised on every trace. Anything it loses — a right origin that meant
+  // end-of-document, a side, a sequence past 2^53 — changes this text.
+  const mirror = new Replica(ids[0]!);
+  for (const operation of produced) {
+    mirror.apply(decodeOperation(encodeOperation(operation)));
   }
 
-  const keys = [...map.keys()].sort(compareByCodePoint);
-  const body = keys
-    .map((k) => `        ${quote(k)}: ${quote(map.get(k)!)}`)
-    .join(',\n');
+  return {
+    name: trace.name,
+    text: replicas[0]!.text,
+    replicaTexts,
+    versionVector,
+    wireRoundTripText: wireRoundTrip(ids[0]!, produced, mirror.text),
+    snapshot: snapshotHex(replicas[0]!),
+  };
+}
 
-  return `      ${quote(key)}: {\n${body}\n      }`;
+/**
+ * Replays the operations through the binary wire form and checks it agrees with
+ * the JSON one, which the caller has already replayed.
+ *
+ * PROJECT_SPEC.md §6: JSON is normative and binary is what travels, so both are
+ * exercised on every trace. Comparing them here means a failure names which
+ * encoding lost something rather than surfacing as an unattributed text
+ * mismatch.
+ */
+function wireRoundTrip(id: ReplicaId, produced: Operation[], viaJsonText: string): string {
+  const viaBinary = new Replica(id);
+  for (const operation of decodeOperations(encodeOperations(produced))) {
+    viaBinary.apply(operation);
+  }
+
+  if (viaBinary.text !== viaJsonText) {
+    throw new Error(
+      `The JSON wire form replays to "${viaJsonText}" and the binary wire form to ` +
+        `"${viaBinary.text}"; one of the two encodings loses something (§6).`,
+    );
+  }
+
+  return viaBinary.text;
+}
+
+function hex(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) {
+    out += b.toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+/**
+ * Encodes the replica as binary, having first checked that binary and the
+ * normative JSON agree about it in both directions (PROJECT_SPEC.md §6, §9).
+ *
+ * Binary is the storage form; JSON is what a correct serialisation *is*. The two
+ * round trips are what tie them together: without them binary would be a second
+ * definition of correctness that nothing checks against the first, and the two
+ * would drift the way any unchecked pair of implementations drifts.
+ */
+function snapshotHex(replica: Replica): string {
+  const elements = replica.export();
+  const vector = replica.versionVectorEntries;
+
+  const binary = encodeSnapshot(elements, vector);
+  const json = serializeSnapshot(elements, vector, replica.text);
+
+  // binary -> JSON -> binary
+  const fromBinary = decodeSnapshot(binary);
+  const viaJson = deserializeSnapshot(
+    serializeSnapshot(
+      fromBinary.elements,
+      fromBinary.versionVector,
+      Replica.import(replica.id, fromBinary.elements, fromBinary.versionVector).text,
+    ),
+  );
+  const reBinary = encodeSnapshot(viaJson.elements, viaJson.versionVector);
+  if (hex(reBinary) !== hex(binary)) {
+    throw new Error(
+      'binary -> JSON -> binary is not byte-identical, so the binary form and the normative ' +
+        'form disagree about this document (§6).',
+    );
+  }
+
+  // JSON -> binary -> JSON
+  const fromJson = deserializeSnapshot(json);
+  const roundTripped = decodeSnapshot(encodeSnapshot(fromJson.elements, fromJson.versionVector));
+  const reJson = serializeSnapshot(
+    roundTripped.elements,
+    roundTripped.versionVector,
+    fromJson.text,
+  );
+  if (reJson !== json) {
+    throw new Error('JSON -> binary -> JSON is not byte-identical (§6).');
+  }
+
+  return hex(binary);
 }
 
 /**
  * Renders the normalised result file defined in PROJECT_SPEC.md §9.
  *
- * Hand-rolled rather than JSON.stringify: "byte-identical across two languages"
- * is a property of the serialiser, not of the data, and the defaults differ in
- * exactly the places that matter — key order and non-ASCII escaping.
+ * The escaping and ordering rules come from `normalisedJson`, so there is one
+ * TypeScript implementation of them rather than one here and another for
+ * snapshots.
  */
 export function renderNormalised(implementation: string, results: TraceResult[]): string {
   const ordered = [...results].sort((a, b) => compareByCodePoint(a.name, b.name));
@@ -162,9 +206,10 @@ export function renderNormalised(implementation: string, results: TraceResult[])
     [
       '    {',
       `      ${quote('name')}: ${quote(r.name)},`,
-      `${renderMap('replicaTexts', r.replicaTexts)},`,
+      `${renderMap(3, 'replicaTexts', r.replicaTexts)},`,
+      `      ${quote('snapshot')}: ${quote(r.snapshot)},`,
       `      ${quote('text')}: ${quote(r.text)},`,
-      renderMap('versionVector', r.versionVector),
+      renderMap(3, 'versionVector', r.versionVector),
       '    }',
     ].join('\n'),
   );
@@ -175,7 +220,7 @@ export function renderNormalised(implementation: string, results: TraceResult[])
     '  "results": [',
     blocks.join(',\n'),
     '  ],',
-    '  "v": 1',
+    '  "v": 2',
     '}',
     '',
   ].join('\n');

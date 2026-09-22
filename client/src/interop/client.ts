@@ -1,0 +1,271 @@
+import {
+  HubConnection,
+  HubConnectionBuilder,
+  HttpTransportType,
+  type IHttpConnectionOptions,
+} from '@microsoft/signalr';
+import { MessagePackHubProtocol } from '@microsoft/signalr-protocol-msgpack';
+
+import {
+  Replica,
+  decodeOperations,
+  decodeSnapshot,
+  encodeOperations,
+  parseReplicaId,
+  type ElementId,
+  type Operation,
+} from '../crdt';
+import { serializeSnapshot } from '../crdt/snapshotJson';
+
+/** What the server hands back from negotiate (§7). */
+interface Negotiated {
+  ticket: string;
+  documentId: string;
+  replicaId: string;
+  role: number;
+}
+
+/** What the hub answers a submission with (§7). */
+export interface SubmitResult {
+  Code: string | null;
+  Accepted: number;
+
+  /** Milliseconds until a throttled batch may go back up (§7). */
+  RetryAfterMs: number;
+}
+
+/** What the hub answers a catch-up with (§8). */
+export interface CatchUpResult {
+  Code: string | null;
+  Snapshot: Uint8Array | null;
+  Operations: Uint8Array;
+  ServerSeq: number;
+}
+
+/** A batch the server broadcast to this connection (§8). */
+export interface Broadcast {
+  DocumentId: string;
+  Operations: Uint8Array;
+  ServerSeq: number;
+}
+
+/**
+ * The TypeScript core connected to the running C# server.
+ *
+ * @remarks
+ * Payloads stay opaque across the boundary: `Operations` and `Snapshot` are §6
+ * byte strings that MessagePack frames without inspecting, which is §13.13a's
+ * constraint. Every field named by hand here belongs to the *envelope*, and the
+ * envelope is the only thing the two implementations describe twice.
+ */
+export class InteropClient {
+  private readonly buffered: Broadcast[] = [];
+  private readonly waiting: ((broadcast: Broadcast) => void)[] = [];
+  private seq = 0n;
+  private tail: ElementId | null = null;
+  private current: Replica;
+
+  readonly connection: HubConnection;
+  readonly negotiated: Negotiated;
+
+  private constructor(connection: HubConnection, negotiated: Negotiated) {
+    this.connection = connection;
+    this.negotiated = negotiated;
+    this.current = new Replica(parseReplicaId(negotiated.replicaId));
+  }
+
+  /** This client's own copy of the document. */
+  get replica(): Replica {
+    return this.current;
+  }
+
+  /** §9's normalised form of what this client believes the document is. */
+  get normalised(): string {
+    return serializeSnapshot(
+      this.current.export(),
+      this.current.versionVectorEntries,
+      this.current.text,
+    );
+  }
+
+  /** Everything received so far and not yet taken. */
+  get pending(): number {
+    return this.buffered.length;
+  }
+
+  static async join(baseUrl: string, token: string, documentId: string): Promise<InteropClient> {
+    const response = await fetch(`${baseUrl}/documents/${documentId}/negotiate`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      throw new Error(`negotiate failed: ${response.status} ${await response.text()}`);
+    }
+
+    const negotiated = (await response.json()) as Negotiated;
+
+    const options: IHttpConnectionOptions = {
+      transport: HttpTransportType.WebSockets,
+      skipNegotiation: true,
+    };
+
+    const connection = new HubConnectionBuilder()
+      .withUrl(
+        `${baseUrl}/hub/editor?access_token=${encodeURIComponent(negotiated.ticket)}`,
+        options,
+      )
+      .withHubProtocol(new MessagePackHubProtocol())
+      .build();
+
+    const client = new InteropClient(connection, negotiated);
+
+    connection.on('ReceiveOperations', (broadcast: Broadcast) => {
+      const next = client.waiting.shift();
+      if (next) {
+        next(broadcast);
+      } else {
+        client.buffered.push(broadcast);
+      }
+    });
+
+    await connection.start();
+    return client;
+  }
+
+  /**
+   * Builds this client's next batch, appending after what it typed last.
+   *
+   * @remarks
+   * Encoded by the core's own encoder, not by a copy written for the harness:
+   * a second encoder here would make the test a check of the harness against
+   * the server rather than of the shipped core against it.
+   */
+  build(text: string): Uint8Array {
+    const replica = parseReplicaId(this.negotiated.replicaId);
+    const operations: Operation[] = [];
+
+    for (const character of [...text]) {
+      const id = { replica, seq: this.seq++ };
+      operations.push({
+        kind: 'insert',
+        id,
+        value: character,
+        parent: this.tail,
+        side: 'R',
+        rightOrigin: null,
+      });
+      this.tail = id;
+    }
+
+    return encodeOperations(operations);
+  }
+
+  /**
+   * Builds a batch tombstoning the **last** `count` visible elements.
+   *
+   * @remarks
+   * <p>
+   * Deletes rather than inserts because §5's collection rules only ever reach a
+   * tombstone, so a document with none is one where collection is correctly a
+   * no-op — and register row 33's claim is about what collection does, which
+   * needs something to collect.
+   * </p><p>
+   * <b>The last, and that is the whole of it.</b> This took the first `count`
+   * until 9.7's second CI run, which collected nothing and truncated nothing.
+   * A document typed straight through is a chain, every element the child of
+   * the one before it, so deleting from the <em>front</em> tombstones only
+   * elements that still have a child — and §5's second collection condition
+   * forbids collecting those. It was not a defect in collection; collection was
+   * working, and there was genuinely nothing it was allowed to take. Deleting
+   * from the end gives a leaf, then another as each is taken.
+   * </p><p>
+   * The targets come from this replica's own visible order rather than from ids
+   * the caller remembered, so they are whatever the document actually contains
+   * at the moment of the call. The sequence numbers continue this replica's own
+   * counter, because §5's density rule admits no gaps.
+   * </p>
+   */
+  buildDeletes(count: number): Uint8Array {
+    const replica = parseReplicaId(this.negotiated.replicaId);
+    const visible = this.current.visibleIds;
+    const targets = visible.slice(Math.max(0, visible.length - count));
+    if (targets.length < count) {
+      throw new Error(
+        `asked to delete the last ${count} elements but only ${targets.length} are visible; `
+        + 'the document is not what this test thinks it is',
+      );
+    }
+
+    // Deepest first, so each delete lands on what is a leaf at that moment.
+    targets.reverse();
+
+    return encodeOperations(targets.map((target) => ({
+      kind: 'delete' as const,
+      id: { replica, seq: this.seq++ },
+      target,
+    })));
+  }
+
+  submit(batch: Uint8Array): Promise<SubmitResult> {
+    return this.connection.invoke<SubmitResult>('SubmitAsync', {
+      DocumentId: this.negotiated.documentId,
+      ReplicaId: this.negotiated.replicaId,
+      Operations: batch,
+    });
+  }
+
+  catchUp(forceSnapshot = false): Promise<CatchUpResult> {
+    const known: Record<string, number> = {};
+    for (const [replica, next] of this.current.versionVector) {
+      known[replica] = Number(next);
+    }
+
+    return this.connection.invoke<CatchUpResult>('CatchUpAsync', known, forceSnapshot);
+  }
+
+  /** Applies a batch of §6 bytes into this replica. */
+  apply(operations: Uint8Array): void {
+    for (const operation of decodeOperations(operations)) {
+      this.current.apply(operation);
+    }
+  }
+
+  /** Adopts a catch-up answer the way a reconnecting client would. */
+  applyCatchUp(result: CatchUpResult): void {
+    if (result.Snapshot) {
+      const decoded = decodeSnapshot(result.Snapshot);
+      this.current = Replica.import(
+        parseReplicaId(this.negotiated.replicaId),
+        decoded.elements,
+        decoded.versionVector,
+      );
+    }
+
+    this.apply(result.Operations);
+  }
+
+  /** Waits for the next broadcast, or rejects. */
+  next(withinMs = 15_000): Promise<Broadcast> {
+    const ready = this.buffered.shift();
+    if (ready) {
+      return Promise.resolve(ready);
+    }
+
+    return new Promise<Broadcast>((done, fail) => {
+      const timer = setTimeout(
+        () => fail(new Error('no broadcast arrived within the timeout')),
+        withinMs,
+      );
+
+      this.waiting.push((broadcast) => {
+        clearTimeout(timer);
+        done(broadcast);
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    await this.connection.stop();
+  }
+}

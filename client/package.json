@@ -10,9 +10,20 @@
     "lint": "eslint .",
     "typecheck": "tsc --build --force",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:interop": "vitest run --config vitest.interop.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:walk": "vitest run --config vitest.walk.config.ts",
+    "test:deployment": "vitest run --config vitest.deployment.config.ts",
+    "test:offline": "vitest run --config vitest.offline.config.ts",
+    "test:gc": "vitest run --config vitest.gc.config.ts",
+    "test:conformance": "vitest run --config vitest.conformance.config.ts",
+    "test:load": "vitest run --config vitest.load.config.ts"
   },
   "dependencies": {
+    "@microsoft/signalr": "^10.0.11",
+    "@microsoft/signalr-protocol-msgpack": "^10.0.11",
+    "oidc-client-ts": "^3.5.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -25,7 +36,9 @@
     "@vitejs/plugin-react": "6.1.1",
     "eslint": "10.9.1",
     "eslint-plugin-react-hooks": "7.1.1",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "30.0.1",
+    "playwright": "^1.62.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.69.0",
     "vite": "8.2.2",

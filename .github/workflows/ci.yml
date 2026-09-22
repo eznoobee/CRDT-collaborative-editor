@@ -69,9 +69,36 @@ jobs:
       # PROJECT_SPEC.md §9: any divergence between the two cores fails the build.
       - run: ./scripts/conformance.sh
 
-  mutation:
-    name: Crdt.Core mutation score
+  interop:
+    name: TypeScript core against the running server
     runs-on: ubuntu-latest
+
+    # Real infrastructure, because the point of this job is that nothing is
+    # simulated: §9's conformance runner compares two files and the .NET suite
+    # drives the server in memory, and neither can fail the way a deployment
+    # fails.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: editor
+          POSTGRES_PASSWORD: editor
+          POSTGRES_DB: editor
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U editor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -79,22 +106,126 @@ jobs:
         with:
           global-json-file: global.json
 
-      - run: dotnet tool restore
-
-      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage. The
-      # reduced case count keeps a per-mutant suite run to seconds; the full
-      # 10,000-case gate runs in the dotnet job above.
-      - name: Stryker
-        env:
-          CRDT_PROPERTY_CASES: "150"
-        run: ./scripts/mutation.sh
-
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/setup-node@v4
         with:
-          name: mutation-report
-          path: StrykerOutput/**/reports/*.html
-          if-no-files-found: ignore
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      # The harness seeds memberships directly, because there is no admin API
+      # yet to create a document through.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Interop
+        env:
+          EDITOR_TEST_POSTGRES: "Host=localhost;Port=5432;Username=editor;Password=editor;Database=editor"
+          EDITOR_TEST_REDIS: "localhost:6379"
+        run: ./scripts/interop.sh
+
+  e2e:
+    name: The application in a browser
+    runs-on: ubuntu-latest
+
+    # Real infrastructure, because the point of this job is that nothing is
+    # simulated: §9's conformance runner compares two files and the .NET suite
+    # drives the server in memory, and neither can fail the way a deployment
+    # fails.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: editor
+          POSTGRES_PASSWORD: editor
+          POSTGRES_DB: editor
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U editor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      # The harness seeds memberships directly, because there is no admin API
+      # yet to create a document through.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      - name: End to end
+        env:
+          EDITOR_TEST_POSTGRES: "Host=localhost;Port=5432;Username=editor;Password=editor;Database=editor"
+          EDITOR_TEST_REDIS: "localhost:6379"
+        run: ./scripts/e2e.sh
+
+  browser-metrics:
+    name: Browser document load metric
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+
+      - run: npm ci
+        working-directory: tests/browser
+
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+
+      # PROJECT_SPEC.md §8 requires two document-load numbers and names the
+      # runner class as part of the browser one, so this is where that figure
+      # comes from. It reports and never asserts: §8 gives it no threshold in
+      # this phase.
+      - name: Measure
+        run: node measure.mjs
+        working-directory: tests/browser
+
+      - name: Client bundle size (§13.13a)
+        # The second figure the protocol decision rests on. Reported, not
+        # gated: a threshold set before anyone has seen a number is how §8
+        # acquired a 500 ms target nothing had measured.
+        working-directory: tests/browser
+        run: |
+          npm --prefix ../../client ci
+          node bundle-metrics.mjs
+
+  # The mutation gate lives in mutation.yml, not here. It is the longest job in
+  # the repository and this workflow cancels in-progress runs, so it was the job
+  # that never finished — cancelled by a following push twice, leaving the
+  # ratchet enforced by whether anyone happened to push slowly.
 
   client:
     name: Client lint, typecheck and test
@@ -117,46 +248,189 @@ jobs:
       - run: npm test
       - run: npm run build
 
-  compose:
-    name: Compose stack smoke test
+  walk:
+    name: The walk — cold start to the first step that cannot be taken
     runs-on: ubuntu-latest
+
+    # Replaces the old Compose smoke test, which asserted /health/live and
+    # therefore passed for eleven phases over a stack that could not serve a
+    # single request touching Postgres (§13.28). This brings the same stack up
+    # and follows what a user does, asserting a request that reads a row.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate a local-only Postgres password
-        # docker-compose.yml deliberately has no default password
-        # (PROJECT_SPEC.md §7), so CI supplies an ephemeral one.
-        run: |
-          {
-            echo "POSTGRES_DB=editor"
-            echo "POSTGRES_USER=editor"
-            echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"
-            echo "API_PORT=8080"
-          } > .env
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
 
-      - name: Start the stack
-        run: docker compose up --build --detach --wait --wait-timeout 300
+      - run: npm ci
+        working-directory: client
 
-      - name: Liveness endpoint responds
-        run: |
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://localhost:8080/health/live; then
-              echo
-              echo "Liveness OK on attempt ${attempt}."
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Liveness endpoint never responded."
-          exit 1
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
 
-      - name: Dump logs on failure
-        if: failure()
-        run: docker compose logs --no-color
+      # No .env is written here, and no schema applied, and no client built.
+      # The walk's harness generates what a deployment's operator supplies — an
+      # issuer, a certificate, a password — and nothing else. Anything more
+      # would make this a test of a stack this project does not ship (§12).
+      - name: Walk
+        run: ./scripts/walk.sh
 
-      - name: Tear down
-        if: always()
-        run: docker compose down --volumes
+      # No separate log step: `docker compose logs` here has no env file and
+      # cannot even interpolate the compose file, and the walk's harness already
+      # includes the stack's logs in the error it throws (§13.23).
+
+  deployment:
+    name: §7 against the deployed stack
+    runs-on: ubuntu-latest
+
+    # Its own job rather than a file inside the walk's, and the separation is
+    # load-bearing. The phase preflight derives its expected job list from this
+    # file, so only a suite with a job of its own can be required by it — folded
+    # into the walk, §7's deployment conformance could stop running with nothing
+    # to notice, which is register row 13's failure mode reappearing inside the
+    # mechanism built to prevent it. client/src/walk/coverage.test.ts fails if
+    # either suite loses its config or its job.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      # As with the walk: no .env written here, no schema applied, no client
+      # built. The harness generates only what a deployment's operator supplies.
+      - name: Deployment conformance
+        run: ./scripts/deployment.sh
+
+  offline-window:
+    name: §9's offline-window discard, in a browser
+    runs-on: ubuntu-latest
+
+    # Register row 31. Its own job for the reason the deployment job gives: the
+    # phase preflight derives its expected job list from this file, so only a
+    # suite with a job of its own can be required by it.
+    #
+    # And its own stack, which is the part specific to this row. §5's T_retire
+    # is seven days; a browser cannot be left open that long, so this brings the
+    # product up with the retirement durations shortened and nothing else
+    # changed. It cannot share the walk's stack — a fifteen-second T_retire
+    # there would retire the walk's own tabs between its steps.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      # As with the walk: nothing supplied from outside but what a deployment's
+      # operator supplies. The overlay changes three timer settings and no code.
+      - name: Offline-window discard
+        run: ./scripts/offline-window.sh
+
+  gc-window:
+    name: §5's collection, seen through the product
+    runs-on: ubuntu-latest
+
+    # Register row 33. §10's counters for collection and truncation are served
+    # on an admin port the proxy deliberately does not forward, and publishing
+    # it to make a test possible would undo a §7 control in the artefact that
+    # ships. So this observes the consequence a client can see instead: once the
+    # log a delta would have been made of is collected and truncated, the same
+    # first-open request has to be answered with a snapshot.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+        working-directory: client
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: client
+
+      - name: Collection through the product
+        run: ./scripts/gc-window.sh
+
+  breakdown:
+    name: §12's required fields in every breakdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # §13.43: the vacuity-risk statement and §12's three questions were
+      # honoured by hand for four phases and were the things most likely to be
+      # skipped when a phase ran long, because nothing mechanical forced them.
+      # This is the thing that forces them. It also self-tests against a
+      # deliberately malformed fixture, so a gate that stopped rejecting would
+      # fail rather than go quiet.
+      - name: Breakdown fields
+        run: ./scripts/check-breakdown.sh
+
+  register:
+    name: §13.50's register, agreeing with the breakdowns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # §13.50: rows 6 and 7 read open for nine tasks after shipping, and 7b.10
+      # then spent real effort on row 33 being "blocked on row 6" when row 6 had
+      # landed eight tasks earlier. The register is the project's memory, and a
+      # mechanism whose purpose is to survive forgetting cannot be maintained by
+      # remembering. It self-tests against a fixture it must reject, so a gate
+      # that stopped rejecting fails rather than going quiet.
+      - name: Register agrees with the breakdowns
+        run: ./scripts/check-register.sh
+  seeding:
+    name: §12's no-seeding rule, on both harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Register rows 15 and 16 were every harness seeding past the product.
+      # The grep that stopped it covered client/src only and ran from
+      # client-gates.sh, which NO CI JOB CALLED — so it fired once per phase, in
+      # preflight, while the C# harness added Document and User rows through the
+      # DbContext for two more phases (row 25). Scope and trigger were both
+      # half-measures; this is the trigger half.
+      - name: No seeded documents
+        run: ./scripts/check-seeding.sh
+
+  sabotage:
+    name: §12's sabotage harness reverts what it changed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The harness reverts with 'git checkout -- .', so a revert that quietly
+      # stops working leaves a sabotage in the tree and the next commit carries
+      # it — which has now happened. The self-test proves the revert restores
+      # tracked files, restores untracked files, and removes files the sabotage
+      # created, in a throwaway repository.
+      - name: Sabotage harness self-test
+        run: ./scripts/sabotage.sh --self-test
 
   secrets:
     name: Secret scan

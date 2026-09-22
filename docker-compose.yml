@@ -29,6 +29,42 @@ services:
       retries: 12
       start_period: 5s
 
+  # Applies the schema and exits. Nothing else does — not the API at startup
+  # (§4: several instances race the same migration and §8 forbids sticky
+  # sessions, so there are always several), and not an operator, because an
+  # operator step is what this project already had and register row 19 is the
+  # result: both harnesses ran `dotnet ef database update` themselves, which
+  # made them the only things that ever applied the schema.
+  #
+  # The same image as the API, with a different entrypoint, so the migrator and
+  # the thing it migrates for are provably the same build.
+  migrator:
+    build:
+      context: .
+      dockerfile: src/Editor.Api/Dockerfile
+    # `command`, not `entrypoint`: the image's ENTRYPOINT is
+    # ["dotnet", "Editor.Api.dll"] and this appends to it, so the container runs
+    # `dotnet Editor.Api.dll --migrate`. An earlier version of this file put a
+    # whole command line here and got `dotnet Editor.Api.dll ./migrate ...` —
+    # the API, started with arguments it ignored, failing later and elsewhere.
+    command: ["--migrate"]
+
+    environment:
+      Postgres__ConnectionString: Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # The migrator builds the same host the API builds, so it validates the
+      # same configuration: a deployment with a missing issuer fails here rather
+      # than after the schema is half-applied.
+      Oidc__Issuer: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
+      Oidc__Audience: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env}
+      Oidc__MetadataAddress: ${OIDC_METADATA_ADDRESS:?set OIDC_METADATA_ADDRESS in .env}
+      Oidc__ClientId: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      Redis__Configuration: ${REDIS_CONFIGURATION:?set REDIS_CONFIGURATION in .env}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
@@ -36,13 +72,99 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_HTTP_PORTS: 8080
-    ports:
-      - "${API_PORT:-8080}:8080"
+      # No defaults, for the same reason POSTGRES_PASSWORD has none: the API
+      # refuses to start without an issuer (PROJECT_SPEC.md §7), and a value
+      # supplied here would be exactly the fallback §7 forbids — a stack that
+      # comes up authenticating against whatever was convenient at the time.
+      Oidc__Issuer: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
+      Oidc__Audience: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE in .env}
+      Oidc__MetadataAddress: ${OIDC_METADATA_ADDRESS:?set OIDC_METADATA_ADDRESS in .env}
+      # Service name, not localhost. A default here would be a fallback that
+      # connects to nothing and issues tickets nobody can redeem.
+      Redis__Configuration: ${REDIS_CONFIGURATION:?set REDIS_CONFIGURATION in .env}
+      Postgres__ConnectionString: Host=postgres;Port=5432;Database=${POSTGRES_DB:-editor};Username=${POSTGRES_USER:-editor};Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # The public client id the browser authenticates as (§7's PKCE flow). No
+      # default, for the same reason the issuer has none: a stack meant to serve
+      # the application must fail rather than serve one that cannot log in.
+      Oidc__ClientId: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      # Where the reverse proxy is, so X-Forwarded-Proto is honoured from it and
+      # from nothing else (§4). A client-supplied header would let a plaintext
+      # request claim to be secure.
+      ForwardedHeaders__KnownProxies: ${PROXY_ADDRESS:-172.16.0.0/12}
+
+      # §7's named test/production divergence. One year is the production
+      # value and the default in code; sixty seconds is what this stack ships,
+      # because a long max-age served once from a development host pins that
+      # browser profile to HTTPS for a year and nothing in the application can
+      # undo it. The difference is written into §7 and carries its own row in
+      # the §7 requirement map — this comment is a pointer, not the record,
+      # because a comment in a compose file is the artefact that stops being
+      # read.
+      SecurityHeaders__HstsMaxAge: ${HSTS_MAX_AGE:-00:01:00}
+
+    # DELIBERATELY NOT PUBLISHED, and this comment is the point rather than the
+    # missing line. §4 terminates TLS at the proxy; a published API port is a
+    # plaintext route straight past it — a control that exists and does not
+    # apply. It is the kind of thing added back for an afternoon's debugging and
+    # never removed, so: reach the API through the proxy, or `docker compose
+    # exec` into the network. Do not republish this.
+    expose:
+      - "8080"
+
+    # §10's readiness, polled by the thing that has a consequence. Without a
+    # healthcheck here the endpoint would be correct and invoked by nothing
+    # (§13.41); with it, and with the proxy waiting on it below, a readiness
+    # probe that stops working stops the stack from coming up.
+    #
+    # Readiness rather than liveness, deliberately: liveness says the process is
+    # running, which is true of a process that cannot reach Postgres, and
+    # serving from that instance is the failure this is meant to prevent.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      # Long enough for the runtime to start and the first probe to reach both
+      # dependencies. A short one reports a starting instance as failed and the
+      # stack never converges.
+      start_period: 40s
+
     depends_on:
+      # Not "has run" — has SUCCEEDED. A failed migration leaves the stack down
+      # rather than up and serving against an empty schema (§13.28).
+      migrator:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # Where TLS terminates (§4). The only service with a published port.
+  proxy:
+    image: nginx:1.29-alpine
+    ports:
+      - "${HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/cert.pem:ro
+      - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/key.pem:ro
+    depends_on:
+      # service_healthy, not service_started. The proxy fronting an instance
+      # that cannot reach Postgres is a stack that answers requests and fails
+      # them, which is the state readiness exists to keep traffic out of.
+      api:
+        condition: service_healthy
+
+    # No healthcheck, deliberately. The obvious one — fetch the API through the
+    # proxy from inside the proxy — needs a TLS-capable client in an image whose
+    # busybox wget is not one, and every workaround weakens what it checks: a
+    # plaintext probe on a second listener proves the proxy is alive and nothing
+    # about the path a browser takes.
+    #
+    # More to the point, it would be verifying the deployment from inside it,
+    # which §12's rule for this phase forbids for exactly this reason. §13.27's
+    # walk makes that assertion from outside, over TLS, against the published
+    # port — which is both stronger and where the check belongs.
 
 volumes:
   postgres-data:

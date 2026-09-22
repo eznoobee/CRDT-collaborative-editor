@@ -82,7 +82,7 @@ public sealed class ArchitectureTests
     [Fact]
     public void EditorDomain_uses_no_infrastructure()
     {
-        var offenders = typeof(Editor.Domain.AssemblyMarker).Assembly
+        var offenders = typeof(Editor.Domain.Document).Assembly
             .GetReferencedAssemblies()
             .Select(a => a.Name)
             .Where(n => n is not null
@@ -100,6 +100,26 @@ public sealed class ArchitectureTests
     public void Declared_project_references_point_inward()
     {
         var src = RepoRoot().CreateSubdirectory("src");
+
+        // Every project under src/ must appear in Allowed, checked before the
+        // edges are. The guard used to iterate the allow-list, which means a
+        // project absent from it was not permitted — it was unexamined. A fifth
+        // project referencing anything at all would have passed silently, and
+        // "project references point inward" would have been true of the four
+        // projects the test knew about rather than of the repository (§13.19,
+        // and §13.34: found by asking what this scans, not what it matches).
+        var present = src.EnumerateDirectories()
+            .Where(directory => directory.EnumerateFiles("*.csproj").Any())
+            .Select(directory => directory.Name)
+            .ToArray();
+
+        var unexamined = present.Except(Allowed.Keys).Order().ToArray();
+        Assert.True(
+            unexamined.Length == 0,
+            "A project under src/ is not in this test's allow-list, so nothing checks where it "
+            + "may point (PROJECT_SPEC.md §4). Add it to Allowed with the references it is "
+            + $"permitted: {string.Join(", ", unexamined)}");
+
         var violations = new List<string>();
 
         foreach (var (project, allowed) in Allowed)

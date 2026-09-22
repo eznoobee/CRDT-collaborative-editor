@@ -1,0 +1,279 @@
+import {
+  HubConnectionBuilder,
+  HttpTransportType,
+  type HubConnection,
+  type IHttpConnectionOptions,
+} from '@microsoft/signalr';
+import { MessagePackHubProtocol } from '@microsoft/signalr-protocol-msgpack';
+
+import { ConnectionRefused, type CatchUpOutcome, type Session, type SubmitOutcome, type Transport } from './SyncController';
+import { REJECTION } from './rejections';
+import { SignInRequired, type TokenSource } from '../auth/tokenSource';
+
+/** What `negotiate` answers (§7). */
+interface Negotiated {
+  ticket: string;
+  documentId: string;
+  replicaId: string;
+  role: number;
+  resumed: boolean;
+}
+
+/** What the hub answers a submission with. */
+interface SubmitResult {
+  Code: string | null;
+  Accepted: number;
+
+  /** Milliseconds until a throttled batch may go back up (§7). */
+  RetryAfterMs: number;
+}
+
+/** What the hub answers a catch-up with. */
+interface CatchUpResult {
+  Code: string | null;
+  Snapshot: Uint8Array | null;
+  Operations: Uint8Array;
+}
+
+/** A batch the server broadcast (§8). */
+interface Broadcast {
+  DocumentId: string;
+  Operations: Uint8Array;
+  ServerSeq: number;
+}
+
+/**
+ * How the client fetches; overridable so a harness can supply credentials.
+ */
+export type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
+
+export interface SignalRTransportOptions {
+  readonly baseUrl: string;
+  readonly documentId: string;
+  readonly fetch?: Fetcher;
+
+  /**
+   * Where the bearer token for `negotiate` comes from (§7).
+   *
+   * @remarks
+   * Read on every connect rather than captured once. A token has an expiry and
+   * a reconnect can happen long after the first one was issued, so a captured
+   * token turns a recoverable expiry into a permanent 401.
+   */
+  readonly tokens?: TokenSource;
+
+  /** Builds the connection. Overridable for a non-browser harness. */
+  readonly build?: (url: string) => HubConnection;
+}
+
+/**
+ * The real connection, as a {@link Transport} (§7, §8).
+ *
+ * @remarks
+ * <p>
+ * Deliberately thin. Everything worth reasoning about — when to reconnect, what
+ * to do with a refusal, when to catch up — lives in `SyncController`, where it
+ * can be driven through failures a real socket only produces by accident. This
+ * class turns hub calls into promises and nothing else.
+ * </p><p>
+ * Payloads cross as opaque bytes in §6's encoding, which MessagePack frames
+ * without inspecting (§13.13a). The only things named here belong to the
+ * envelope.
+ * </p><p>
+ * SignalR's own automatic reconnect is **not** used. It would reconnect the
+ * socket without re-running `negotiate`, so the client would come back with a
+ * ticket already redeemed and a replica claim it no longer holds — and §8's
+ * catch-up would never run, leaving a client that is connected and silently
+ * behind. Reconnection is a session-level concern, and the controller owns it.
+ * </p>
+ */
+export class SignalRTransport implements Transport {
+  private readonly options: SignalRTransportOptions;
+  private assigned: string | null = null;
+  private readonly http: Fetcher;
+  private connection: HubConnection | null = null;
+  private broadcastHandler: ((operations: Uint8Array) => void) | null = null;
+  private closedHandler: (() => void) | null = null;
+  private closing = false;
+
+  constructor(options: SignalRTransportOptions) {
+    this.options = options;
+    this.http = options.fetch ?? ((url, init) => fetch(url, init));
+  }
+
+  async connect(replicaId: string | null): Promise<Session> {
+    await this.close();
+    this.closing = false;
+
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+
+    if (this.options.tokens !== undefined) {
+      try {
+        headers['authorization'] = `Bearer ${await this.options.tokens.token()}`;
+      } catch (error) {
+        // §9: this is a state, not an exception. The controller keeps the
+        // outbox, goes offline, and shows that a sign-in is needed — rather
+        // than an unhandled rejection discarding unsent work at exactly the
+        // moment the user is being asked to log in again.
+        if (error instanceof SignInRequired) {
+          throw new ConnectionRefused(REJECTION.signInRequired, error);
+        }
+
+        throw error;
+      }
+    }
+
+    const response = await this.http(
+      `${this.options.baseUrl}/documents/${this.options.documentId}/negotiate`,
+      { method: 'POST', headers, body: JSON.stringify({ replicaId }) },
+    );
+
+    // §7 makes the membership decision here, so negotiate's statuses are §9's
+    // codes and not transport noise. Left as a generic failure, a 404 reached
+    // the user as a client that had simply gone offline — no message, no
+    // reason, and a retry loop against a document they will never be allowed to
+    // open. §13.13: a rejection the rejected party cannot observe is not a
+    // rejection. Found by the account-switch test in 6.5, which is the first
+    // thing in this project ever to open a document as the wrong person.
+    if (response.status === 401) {
+      // The token was rejected rather than absent, which is the same recovery:
+      // get a new one.
+      throw new ConnectionRefused(REJECTION.signInRequired);
+    }
+
+    if (response.status === 403) {
+      throw new ConnectionRefused(REJECTION.forbidden);
+    }
+
+    if (response.status === 429) {
+      // §7's per-user connection cap. Without this line a 429 is an unlabelled
+      // transport failure: the controller goes offline and retries forever with
+      // nothing on screen saying why, which is exactly the defect 6.5 found in
+      // the 404 path four phases after it was introduced.
+      throw new ConnectionRefused(REJECTION.tooManyConnections);
+    }
+
+    if (response.status === 404) {
+      throw new ConnectionRefused(REJECTION.notFound);
+    }
+
+    if (!response.ok) {
+      throw new Error(`negotiate failed: ${response.status}`);
+    }
+
+    const negotiated = (await response.json()) as Negotiated;
+    const url = `${this.options.baseUrl}/hub/editor?access_token=${encodeURIComponent(negotiated.ticket)}`;
+
+    const connection = this.options.build?.(url) ?? defaultConnection(url);
+
+    connection.on('ReceiveOperations', (broadcast: Broadcast) => {
+      this.broadcastHandler?.(broadcast.Operations);
+    });
+
+    connection.onclose(() => {
+      // Suppressed while this class is closing on purpose: a deliberate stop is
+      // not a lost connection, and reporting it as one would have the
+      // controller schedule a reconnect to something it just left.
+      if (!this.closing) {
+        this.closedHandler?.();
+      }
+    });
+
+    await connection.start();
+    this.connection = connection;
+
+    // Kept because every submission carries it: §7's tier-1 check compares the
+    // batch's replica id against this connection's binding, and the binding is
+    // whatever negotiate assigned — which is not necessarily what was asked
+    // for.
+    this.assigned = negotiated.replicaId;
+
+    return { replicaId: negotiated.replicaId, resumed: negotiated.resumed };
+  }
+
+  /** §5's timed report of what this replica holds. */
+  async acknowledge(known: Record<string, number>): Promise<void> {
+    await this.require().invoke('AcknowledgeAsync', known);
+  }
+
+  async submit(operations: Uint8Array, known: Record<string, number>): Promise<SubmitOutcome> {
+    const connection = this.require();
+    if (this.assigned === null) {
+      throw new Error('Not connected.');
+    }
+
+    const result = await connection.invoke<SubmitResult>('SubmitAsync', {
+      DocumentId: this.options.documentId,
+      ReplicaId: this.assigned,
+      Operations: operations,
+      // §5's second report path, on a message that was going anyway (row 32).
+      Known: known,
+    });
+
+    return { code: result.Code, retryAfterMs: result.RetryAfterMs };
+  }
+
+  async catchUp(
+    known: Record<string, number>,
+    forceSnapshot: boolean,
+  ): Promise<CatchUpOutcome> {
+    const connection = this.require();
+    const result = await connection.invoke<CatchUpResult>('CatchUpAsync', known, forceSnapshot);
+
+    return {
+      code: result.Code,
+      snapshot: result.Snapshot,
+      operations: result.Operations,
+    };
+  }
+
+  onBroadcast(handler: (operations: Uint8Array) => void): void {
+    this.broadcastHandler = handler;
+  }
+
+  onClosed(handler: () => void): void {
+    this.closedHandler = handler;
+  }
+
+  async close(): Promise<void> {
+    const connection = this.connection;
+    this.connection = null;
+
+    if (connection === null) {
+      return;
+    }
+
+    this.closing = true;
+    await connection.stop();
+  }
+
+  /** Drops the socket without saying goodbye, as a network does. */
+  async simulateNetworkLoss(): Promise<void> {
+    const connection = this.connection;
+    this.connection = null;
+
+    if (connection !== null) {
+      await connection.stop();
+    }
+  }
+
+  private require(): HubConnection {
+    if (this.connection === null) {
+      throw new Error('Not connected.');
+    }
+
+    return this.connection;
+  }
+}
+
+function defaultConnection(url: string): HubConnection {
+  const options: IHttpConnectionOptions = {
+    transport: HttpTransportType.WebSockets,
+    skipNegotiation: true,
+  };
+
+  return new HubConnectionBuilder()
+    .withUrl(url, options)
+    .withHubProtocol(new MessagePackHubProtocol())
+    .build();
+}

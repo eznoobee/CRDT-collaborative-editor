@@ -1,6 +1,8 @@
 import { compareElementId, elementKey, type ElementId } from './elementId';
+import type { ElementState, VersionVectorEntry } from './elementState';
 import type { InsertOperation, DeleteOperation, Operation, Side } from './operation';
 import { compareReplicaId, formatReplicaId, type ReplicaId } from './replicaId';
+import { PendingSetOverflowError } from './pendingSetOverflow';
 
 interface Node {
   id: ElementId;
@@ -39,6 +41,27 @@ export class Replica {
   private readonly versionVectorByKey = new Map<string, { replica: ReplicaId; count: bigint }>();
   private readonly log: Operation[] = [];
   private pending: Operation[] = [];
+
+  /**
+   * Operations discarded because this replica had already applied or buffered
+   * them.
+   *
+   * Diagnostic, not a health check. §5 guarantees this is non-zero in normal
+   * operation; what is worth alerting on is its rate.
+   */
+  duplicatesDropped = 0;
+
+  /**
+   * How many operations may wait in the pending set (§5).
+   *
+   * Unbounded by default, deliberately: §5 bounds the pending set *per
+   * connection*, and a replica is not a connection. A replica replaying a
+   * stored trace legitimately buffers as much as the trace demands. Whoever
+   * attaches a replica to a network connection sets this, because that is the
+   * layer where an unbounded buffer fed by a remote peer is a denial-of-service
+   * vector and one fed by a local file is not.
+   */
+  maxPending = Number.MAX_SAFE_INTEGER;
   private nextSeq = 0n;
 
   constructor(id: ReplicaId) {
@@ -97,6 +120,26 @@ export class Replica {
     return this.pending.length;
   }
 
+  /**
+   * Which operations are waiting, as element keys (§5).
+   *
+   * @remarks
+   * For the connection layer's age bound. §5 measures a pending operation's age
+   * from when it entered the set, and the count alone cannot express that: a set
+   * that stays at four because four different operations passed through it is a
+   * healthy one, and a set that stays at four because the same four are stuck is
+   * the failure the age bound exists for. Identity is what tells them apart, so
+   * identity is what this returns.
+   *
+   * The core keeps no clock, deliberately. A replica that read the time would
+   * replay a committed trace differently depending on when it ran, which is the
+   * one thing §9's corpus cannot tolerate — so the bound is applied by the layer
+   * that already has a timer and knows what a connection is.
+   */
+  get pendingKeys(): readonly string[] {
+    return this.pending.map((operation) => elementKey(operation.id));
+  }
+
   /** Inserts a code point at a visible index, returning the operation. */
   insert(index: number, value: string): InsertOperation {
     const all = this.inOrder();
@@ -153,13 +196,139 @@ export class Replica {
   }
 
   /** Applies an operation, buffering it if a dependency is missing. */
+  /**
+   * Every element in traversal order, tombstones included — the basis of a
+   * snapshot (PROJECT_SPEC.md §6).
+   *
+   * Tombstones are in it because operations arriving after the snapshot still
+   * attach to them: a `rightOrigin` can name a tombstone (§5), so dropping them
+   * would make a snapshot unable to accept operations a full replay accepts.
+   */
+  export(): ElementState[] {
+    return this.inOrder().map((node) => ({
+      id: node.id,
+      value: node.value,
+      parent: node.parent !== null && !node.parent.isRoot ? node.parent.id : null,
+      side: node.side,
+      rightOrigin: node.rightOrigin !== null ? node.rightOrigin.id : null,
+      isDeleted: node.isDeleted,
+    }));
+  }
+
+  /** This replica's version vector in the shape `import` takes back. */
+  get versionVectorEntries(): VersionVectorEntry[] {
+    return [...this.versionVectorByKey.values()].map((entry) => ({
+      replica: entry.replica,
+      count: entry.count,
+    }));
+  }
+
+  /**
+   * Rebuilds a replica from exported elements and a version vector.
+   *
+   * Mirrors the C# `Replica.Import`, deliberately including the parts that look
+   * like overkill. Elements are placed with the live sibling ordering rather
+   * than trusting the order they arrive in, so a snapshot written wrongly builds
+   * a different tree here instead of quietly restoring a corrupt one. And
+   * placement iterates to a fixpoint because traversal order does not guarantee
+   * parents precede children — a left child is traversed before its parent.
+   *
+   * Each pass rebuilds the unplaced list rather than splicing out of it: the
+   * splice version is quadratic in exactly the common case where everything
+   * places on the first pass, which is what §13.9 records finding at 100k.
+   */
+  static import(
+    id: ReplicaId,
+    elements: readonly ElementState[],
+    versionVector: readonly VersionVectorEntry[],
+  ): Replica {
+    const replica = new Replica(id);
+    let remaining = [...elements];
+
+    while (remaining.length > 0) {
+      const deferred: ElementState[] = [];
+
+      for (const element of remaining) {
+        const parentPresent =
+          element.parent === null || replica.byId.has(elementKey(element.parent));
+        const originPresent =
+          element.rightOrigin === null || replica.byId.has(elementKey(element.rightOrigin));
+
+        if (!parentPresent || !originPresent) {
+          deferred.push(element);
+          continue;
+        }
+
+        const parent =
+          element.parent === null ? replica.root : replica.byId.get(elementKey(element.parent))!;
+        const node: Node = {
+          id: element.id,
+          value: element.value,
+          isDeleted: element.isDeleted,
+          isRoot: false,
+          parent,
+          side: element.side,
+          rightOrigin:
+            element.rightOrigin === null
+              ? null
+              : replica.byId.get(elementKey(element.rightOrigin))!,
+          leftChildren: [],
+          rightChildren: [],
+        };
+
+        replica.byId.set(elementKey(node.id), node);
+        insertAmongSiblings(node, parent);
+      }
+
+      if (deferred.length === remaining.length) {
+        throw new Error(
+          `${deferred.length} elements reference a parent or right origin that is not in the ` +
+            'snapshot. The snapshot is incomplete or was written out of order.',
+        );
+      }
+
+      remaining = deferred;
+    }
+
+    for (const entry of versionVector) {
+      replica.versionVectorByKey.set(formatReplicaId(entry.replica), {
+        replica: entry.replica,
+        count: entry.count,
+      });
+      if (compareReplicaId(entry.replica, id) === 0) {
+        replica.nextSeq = entry.count;
+      }
+    }
+
+    return replica;
+  }
+
   apply(operation: Operation): void {
     if (this.hasSeen(operation)) {
+      // Counted, not merely skipped (§5). Duplicate delivery is guaranteed —
+      // the backplane can repeat a broadcast, catch-up re-sends what a client
+      // already has, a client dropped for backpressure recovers by being resent
+      // state — so this is never zero and is not itself a problem. A sudden
+      // rise in it is how a resend loop announces itself, and that signal does
+      // not exist if duplicates are silently absorbed.
+      this.duplicatesDropped += 1;
       return;
     }
 
     if (!this.isReady(operation)) {
-      if (!this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+      if (this.pending.some((p) => compareElementId(p.id, operation.id) === 0)) {
+        // Already buffered. This is the duplicate the watermark cannot see,
+        // because the operation has not been applied yet, and buffering it
+        // twice would apply it twice when the gap closes.
+        this.duplicatesDropped += 1;
+      } else {
+        if (this.pending.length >= this.maxPending) {
+          // §5: a protocol violation, not something to absorb by dropping the
+          // oldest. Dropping would leave this replica permanently missing an
+          // operation with nothing to indicate it — divergence arrived at
+          // quietly, which is the one outcome this project exists to prevent.
+          throw new PendingSetOverflowError(this.pending.length, this.maxPending);
+        }
         this.pending.push(operation);
       }
       return;
@@ -304,22 +473,44 @@ export class Replica {
     }
   }
 
+  /**
+   * Depth-first in-order traversal, tombstones included.
+   *
+   * Iterative, not recursive, for the same reason as the C# side: typing left to
+   * right makes each character a right child of the previous one, so a
+   * document's tree depth equals its length. A recursive walk exceeds the call
+   * stack well below the document sizes §8 targets — and in a browser that takes
+   * the tab, not just the call.
+   */
   private inOrder(): Node[] {
     const result: Node[] = [];
-    visit(this.root, result);
-    return result;
-  }
-}
 
-function visit(node: Node, into: Node[]): void {
-  for (const child of node.leftChildren) {
-    visit(child, into);
-  }
-  if (!node.isRoot) {
-    into.push(node);
-  }
-  for (const child of node.rightChildren) {
-    visit(child, into);
+    // Each frame is [node, phase, next child index]: phase 0 walks the left
+    // children, 1 emits the node, 2 walks the right children.
+    const stack: [Node, number, number][] = [[this.root, 0, 0]];
+
+    while (stack.length > 0) {
+      const [node, phase, index] = stack.pop()!;
+
+      if (phase === 0) {
+        if (index < node.leftChildren.length) {
+          stack.push([node, 0, index + 1]);
+          stack.push([node.leftChildren[index]!, 0, 0]);
+        } else {
+          stack.push([node, 1, 0]);
+        }
+      } else if (phase === 1) {
+        if (!node.isRoot) {
+          result.push(node);
+        }
+        stack.push([node, 2, 0]);
+      } else if (index < node.rightChildren.length) {
+        stack.push([node, 2, index + 1]);
+        stack.push([node.rightChildren[index]!, 0, 0]);
+      }
+    }
+
+    return result;
   }
 }
 

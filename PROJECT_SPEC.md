@@ -36,6 +36,18 @@ anticipation of them:
 - Public document sharing or anonymous access.
 - **Undo/redo.** Undo in a CRDT is not "apply the inverse" and is a research
   problem in its own right. Out of scope for every phase.
+- **Presence — remote cursors and selections.** Carried as register row 14 for
+  five phases and cut at the close-out, deliberately rather than by running out
+  of time. It is a *feature*, and this project's value is in its correctness and
+  verification work; the remaining effort buys more as findings than as a
+  cursor. Two things made the cut easy rather than reluctant. Presence is the
+  highest-frequency message a collaborative editor sends — a cursor moves on
+  every keystroke — so it would land on the broadcast path whose p99 already
+  misses §8's target by an order of magnitude, and be measured against a target
+  under an unresolved contradiction (§8's number against §8's own batching
+  window). And §11 gave it its own phase precisely because, sharing a phase with
+  anything else, *"it would be the row someone closes badly to finish the
+  phase."* Not building it is the honest form of that concern.
 
 ## 3. Stack
 
@@ -89,6 +101,66 @@ weaken either with a shared "common" project.
 The server is a **relay plus durable log**, not an authority on document content.
 It validates, persists, orders causally, and fans out. It does not transform or
 resolve operations.
+
+### The deployment shape
+
+Stated here because it had no owner for eleven phases and rotted quietly under
+green CI (§13.27, §13.28). Each decision names the alternative rejected **and
+the reason**, because a note saying "rejected" is not something anyone can
+overturn later on evidence — and circumstances change.
+
+```
+  browser ──TLS──▶ reverse proxy ──plaintext, private network──▶ api
+                                                                  │
+                                                   postgres ◀─────┤
+                                                   redis    ◀─────┘
+       migrator ──runs to completion, then exits──▶ postgres
+```
+
+**TLS terminates at the reverse proxy, not in Kestrel.** The API speaks
+plaintext on a network no client can reach, and learns its external scheme from
+`X-Forwarded-Proto` — accepted only from the proxy's address, never from a
+client.
+
+- *Rejected: terminating in Kestrel.* Not because it cannot — it can — but
+  because every deployment target this is likely to meet (a load balancer, an
+  ingress controller, a platform router) terminates in front anyway, so an API
+  that only works when it holds the certificate is an API that has to be
+  reconfigured to be deployed. The forwarded-header path is the one that will
+  actually run, so it is the one that gets tested.
+- *Rejected: accepting `X-Forwarded-Proto` from anywhere.* A client-supplied
+  header would let a plaintext request claim to be secure, which turns §7's HSTS
+  and secure-cookie decisions into ones the caller makes. Known networks are
+  configured explicitly.
+- **The API's port is not published.** Only the proxy's is. A published API port
+  is a plaintext route around the TLS this section exists to require — a control
+  that exists and does not apply — and it is exactly the sort of thing added
+  back for debugging convenience, so the reason lives in a comment beside the
+  configuration rather than in the absence of a line.
+
+**The schema is applied by a migration job that runs to completion before the
+API starts**, from the same image with a different entrypoint.
+
+- *Rejected: migrating on API startup.* §8 forbids sticky sessions and therefore
+  assumes more than one instance; two instances starting together race the same
+  migration, and EF's locking turns that into one instance blocked behind
+  another's transaction for as long as the migration takes. A rolling deploy
+  makes that a startup timeout rather than a queue.
+- *Rejected: a documented operator step.* That is what the project already had —
+  an undocumented one — and register row 19 is the result: both test harnesses
+  ran `dotnet ef database update` themselves, which made them the only things
+  that ever applied the schema, and nothing noticed for eleven phases.
+- The API does not depend on the migrator having *run*; it depends on it having
+  **succeeded**. A job that fails leaves the stack down rather than up and empty.
+
+**The client is built into the image**, not mounted or served separately.
+
+- *Rejected: a separate static-hosting service.* It would be a second origin,
+  and §9's same-origin decision exists to avoid a CORS allow-list on a service
+  that issues connect tickets. One origin, one artefact, one thing to deploy.
+- *Rejected: building the client outside the image and copying it in.* The image
+  is then only correct if whoever built it remembered a step, which is the class
+  of defect this whole section is about.
 
 ## 5. The CRDT
 
@@ -275,6 +347,101 @@ configurable). Exceeding the bound is a protocol violation: reject, log, and
 close. An unbounded pending set is a denial-of-service vector, because origins
 are client-supplied.
 
+**The bound is expressed in operations and in seconds**, not in bytes. Bytes are
+the natural unit for a transport buffer (§8's outbound channel) and the wrong one
+here: what makes a pending set dangerous is the number of distinct missing
+dependencies being tracked and how long they are held, and a thousand one-code-point
+inserts cost the same memory as a thousand large ones. Age is measured from
+when an operation entered the set, not from its arrival, so a cascade that
+releases and re-buffers does not reset the clock.
+
+**Closing for a bound violation must be distinguishable, by the client, from the
+connection dropping.** §13.13: a rejection the rejected party cannot observe is
+not a rejection, and a client that reads "pending set overflowed" as a network
+blip will reconnect and do it again.
+
+### Duplicate delivery
+
+**A client will receive operations it has already applied.** This is guaranteed,
+not incidental: the backplane can deliver the same broadcast twice, catch-up
+after a reconnect re-sends from a version vector that overlaps what was already
+applied, and a client dropped for backpressure (§8) recovers by being sent state
+it partly has. Every one of those paths is required for other reasons.
+
+The server side is covered by the primary key on
+`(document_id, replica_id, seq)`, which makes a duplicate insert a no-op at the
+database (§6). The client side is a decision, and it is made here rather than
+left to be inferred:
+
+> **The client dedupes explicitly before applying, and application remains
+> idempotent underneath it.** Both. Neither alone.
+
+The dedupe is the fast path: an operation whose `Seq` is below the applied
+watermark for its replica is dropped without being applied, and the drop is
+**counted**. The counter is the point — a sudden rise in duplicate deliveries is
+how a resend loop or a misbehaving backplane announces itself, and it is
+invisible if duplicates are silently absorbed.
+
+**That watermark test is complete, and the reason is worth writing down because
+it is not local.** Readiness requires the *exact* next sequence number for the
+replica, not merely that an operation's structural dependencies are present. So
+a replica's operations are applied strictly in order, the applied set never
+contains a per-replica gap, and "below the watermark" is exactly "already
+applied" rather than an approximation of it. The two rules are coupled across
+two private methods and nothing about either says so, which is why
+`CausalReadinessTests` pins it: an operation whose only structural dependency is
+the root is still buffered when it skips a sequence number.
+
+**The second check is the pending set's, and it is the one that is genuinely
+load-bearing.** A duplicate that arrives while the original is still buffered is
+below no watermark — it has not been applied — so the watermark says nothing
+about it, and the pending set has to recognise it by id. Buffering it twice
+applies it twice when the gap closes.
+
+Idempotent application is the floor beneath both. It is not currently reachable:
+between the watermark and the pending set, no duplicate gets as far as being
+applied. It is stated as a constraint rather than a tested path precisely
+because of that — a test for an unreachable path asserts nothing, and writing
+one would be §12's vacuity risk landing on a specification claim rather than on
+code.
+
+> **The trigger.** If the density rule in readiness is ever relaxed — if an
+> operation is applied because its structural dependencies are present, despite
+> skipping a sequence number — then the applied set acquires per-replica gaps,
+> the watermark stops being a complete test for "already applied", and
+> **idempotent application moves from constraint to load-bearing.** At that
+> point it needs its own tests, and they must land in the same change, not
+> after it.
+
+That is written as a trigger rather than a caution because of how the change
+would arrive. Relaxing readiness looks like a latency optimisation — an
+operation that could be applied now is being made to wait — and it is local, one
+comparison in one method. Nothing at the site of the change mentions duplicate
+detection. The coupling is pinned from the readiness side, in
+`CausalReadinessTests` on both implementations, so the relaxation fails a test
+that explains why; this paragraph is what that test's failure should send the
+reader to.
+
+Three consequences worth stating, because they bind future changes:
+
+- **Applying an operation must stay idempotent.** Applying an insert whose id is
+  already present, or a delete whose target is already tombstoned, is a no-op.
+  Anything added to the apply path that is not idempotent — a counter, an
+  activity log, an undo stack, a metric incremented per operation — breaks a
+  guarantee nothing else checks, and breaks it silently.
+- **Dedupe is not a substitute for causal readiness.** An operation may be new
+  *and* not ready; the two tests are independent, and the dedupe check runs
+  first only because it is cheaper.
+- **Relaxing readiness is not a local change.** Applying an operation whose
+  structural dependencies are present but whose sequence skips one looks like a
+  latency optimisation and would silently break duplicate detection, because the
+  watermark test depends on density holding at apply time.
+
+The reason this is written down rather than left to the algorithm: CRDT
+idempotency is real, but it is a property of §5's data structure, not a decision
+the transport made. An assumption nobody wrote down breaks silently the first
+time either path changes — and 3b changes both of them.
+
 ### Tombstones and garbage collection
 
 Deleted elements are tombstoned, not removed. Implement GC based on **causal
@@ -314,6 +481,116 @@ converges: one browser tab that never returns blocks GC forever. A replica is
 - Replica liveness is tracked in `document_replicas`.
 - A retired replica that reconnects is told to resync from a snapshot and
   discard local state.
+- **`retired_at` must actually be set**, by a background job on `T_retire` of
+  inactivity. The column has existed since Phase 2 and nothing writes it, which
+  makes every rule above true on paper and inert in fact. Two things depend on
+  it: §9's offline window, which warns a user before their work is discarded and
+  cannot be verified end to end while no replica is ever retired; and Phase 7's
+  GC, whose causal-stability frontier never advances while one abandoned tab
+  counts as live. **Owned by Phase 7** and named here so it is not rediscovered
+  there — a Phase 4 client that warns correctly about a discard that never
+  happens is the shape §13.15 warns about.
+
+#### The stability frontier, precisely enough to implement
+
+§5 has said since Phase 1 that an operation is collectable when "every
+non-retired replica's version vector shows it has been observed". That is the
+right rule and it is not implementable as written, because **the server does not
+know any replica's version vector.** It knows what each replica has *sent*. What
+a replica has *received* is a different thing, and it is the thing causal
+stability is about.
+
+**Definition.** For a document, let `R` be its replicas with `retired_at IS
+NULL`. Each `r ∈ R` has an *acknowledged version vector* `A(r)`: the largest
+version vector for which `r` holds every operation at or below it, with no gaps.
+The frontier is the pointwise minimum:
+
+> `F[s] = min over r ∈ R of A(r)[s]`, for every replica `s` that has ever
+> written to the document.
+
+An operation `(s, n)` is causally stable exactly when `n < F[s]`. Rules 1–4 above
+then decide collectability; stability alone never does.
+
+**The frontier is stored in next-expected form, the same form a version vector
+already has, and the strictness of that `<` is the whole reason.** `A(r)[s]` is a
+*count*: the number of operations from `s` that `r` holds, so `0` means it holds
+none of them. The tempting alternative — store the highest sequence number held,
+and test `n ≤ F[s]` — is off by one at exactly the end that matters. Sequence
+numbers start at zero, so in that form `0` means "holds `(s,0)`", and there is no
+value left for "holds nothing from `s`". A replica that has acknowledged nothing
+is then indistinguishable from one holding the first operation, and the first
+operation of every author is marked stable while a live replica has never seen
+it. Dropping the entry instead of storing a zero does not escape this: a minimum
+taken over the authors that exist must read a missing key as "holds nothing",
+which lands on the same zero.
+
+The consequence is narrow and it is not benign. It is one element per author —
+`(s,0)` — and it is collectable during the window between a replica appearing
+(negotiate writes the row with an empty acknowledgement) and its first catch-up
+landing, which is precisely when a reconnecting client holds offline state the
+server has not seen. The representation, not a guard, is what removes it:
+`Replica.Collect` tests `Seq < F[s]`, the client sends next-expected, and no
+conversion sits in between to get wrong.
+
+**`A(r)` is a prefix, not a maximum**, and the distinction is load-bearing. §8
+makes broadcast unordered, so a replica can hold `(s,105)` without `(s,100)`;
+recording 105 would mark 100 stable while a replica is still missing it, and 100
+would then be collected out from under a client that is about to ask for it.
+This is the same reason §8's catch-up is by version vector and never by a
+server_seq watermark, and it is the same mistake one layer down.
+
+**How the server learns `A(r)`.** The client already computes it — it is what
+catch-up sends. It is reported in three places:
+
+1. On catch-up, as today.
+2. Piggybacked on every submission, which costs nothing: a client that is
+   writing has just recomputed it.
+3. By an explicit acknowledgement the client sends on a timer.
+
+**The third is not redundant, and leaving it out is the defect this clause
+exists to prevent.** A viewer submits nothing and catches up once. Under (1) and
+(2) alone its `A(r)` is frozen at the moment it connected, so **one person
+reading a document holds the frontier still for as long as they keep the tab
+open** — and the symptom is not an error, it is GC quietly reclaiming nothing.
+Every test in which the participants type would pass. §13.32's shape again: a
+mechanism attached to writing does not cover principals who only read.
+
+**7.7's finding: two of those three paths did not exist, and the one that did
+reports nothing useful.** The piggyback was never built, and the timed
+acknowledgement existed only as a hub method that nothing in the browser
+called — `AcknowledgeAsync` was added in 7.2 with a C# test client as its only
+caller. That leaves catch-up, which runs once per connection and reports what
+the client held *before* it received anything: for a fresh replica, nothing. So
+the frontier stayed where catch-up left it for as long as anyone had the
+document open, and collection could only ever run on a document whose replicas
+had all been retired — seven days of nobody touching it.
+
+Every server-side test passed throughout, because they drive the hub method
+directly. **§13.41's question has to be asked across the client/server boundary,
+not only within one side of it:** "does anything invoke this" means anything in
+the product, and the product is both halves. The clause above was written to
+stop a viewer freezing the frontier, and the defect it warned about arrived
+anyway, one layer out — with *every* replica in the viewer's position, because
+none of them reported either.
+
+*Rejected: inferring `A(r)` from what the server delivered.* The broadcaster
+knows what it sent each connection, and sent is not received — a dropped socket
+loses the difference, and GC would collect what a client never got. *Rejected:
+deriving stability from `server_seq` alone.* A single number per replica is
+exactly the watermark §8 already refused, for the reason above.
+
+**What `retired_at` does.** A retired replica leaves `R`, so the minimum is taken
+over a smaller set and the frontier advances past whatever it was holding. That
+is the entire mechanism by which GC ever runs, and it is why row 1 blocks this
+work rather than merely preceding it. A retired replica that reconnects is told
+to resync from a snapshot, because the frontier may have moved past state it
+still holds.
+
+**The frontier only ever moves forward.** It is recomputed, not accumulated, and
+a recomputation that produced a lower value would mean a replica un-observed
+something. Store the last value and refuse to lower it: a frontier that moved
+backwards is a bug that would otherwise present as GC collecting an element and
+then a client legitimately naming it.
 
 **GC watermark.** Each document has a watermark: the causal-stability frontier
 below which elements may have been collected. An operation referencing an
@@ -321,6 +598,95 @@ unknown id is buffered if that id is above the watermark, and **rejected with a
 structured `resync-required` response** if it is at or below it. This is the one
 case where a pending operation is dropped, and it is why §5's "do not drop"
 rule has an exception rather than a contradiction.
+
+**GC transparency, and what it is compared against.** A replica that has
+collected and one that has not must produce **identical §9 normalised form in
+every field except `elements`**, for the same trace and for any continuation
+applied afterwards. Each half of that sentence is doing work:
+
+- **`elements` is excluded because it is the representation, and representation
+  is exactly what GC changes.** Requiring it to match would make the property
+  false by definition and there would be nothing left to test.
+- **`text` and `versionVector` are the meaning, and must not move.** The version
+  vector especially: collecting an element does not un-observe it, so a GC'd
+  replica that forgets an author has lost the ability to refuse a duplicate.
+- **Comparing only `text` would be convergence, which is not the check.** A
+  collected tombstone that is still referenced resolves to nothing, and the
+  algorithm is total: the reference is simply dropped and every replica agrees
+  on text that is *wrong*. Convergence holds, the document is incorrect, and
+  nothing anywhere reports it. The comparison has to be against a replica that
+  did not collect, because only that replica knows what the text should have
+  been.
+- **The continuation is required, not optional.** Comparing two replicas at the
+  moment of collection tests nothing about the future references collection was
+  supposed to make impossible. The continuation must include an insert whose
+  right origin is a retained tombstone and one adjacent to a collected region.
+
+This is the phase's headline property. It is the one place in this system where
+being wrong destroys data silently, convergently, and everywhere at once, and it
+is the reason §5's four collection rules are stated as necessary conditions
+rather than as a heuristic.
+
+**The continuation must also be concurrent, and this clause was written after
+the first version of the test was found to be vacuous.** Composing one operation
+on the collected replica and applying that same operation to the uncollected one
+proves nothing: whatever right origin the collected replica computed, the other
+simply accepts. Deleting rule 4 outright left that comparison green. A right
+origin exists to order an insert *against a competing one*, so the two replicas
+must each compose an insert at the same position from their own view and then
+exchange. With rule 4 removed and the comparison made concurrent, the collected
+replica names end-of-document where the uncollected one names the retained
+tombstone, and the resulting operation cannot be applied at all — observed as
+`"collect m!"` against `"collect m?!"`.
+
+#### What collection actually reclaims, which is less than it sounds
+
+Rule 2 (a collectable element must be a leaf) combines with the tree a text
+editor produces to make **a tombstone in the middle of forward-typed text
+uncollectable, permanently.** Typing left to right makes each character the right
+child of the previous one, so the document is a chain; a deleted character in the
+middle still has a visible right child hanging off it, is therefore not a leaf,
+and remains as a structural placeholder. Only a *trailing* run collects, from the
+tail inwards, down to the run's leader.
+
+That is correct behaviour and it is not a defect to be fixed by relaxing rule 2
+— the placeholder is what keeps a concurrent insert ordering the same way on
+every replica. It is recorded here because the consequence is easy to miss and
+expensive to discover later: **deleting a word from the middle of a paragraph,
+the most ordinary editing action there is, reclaims nothing.** Every collection
+test written before this clause deleted from the end of the document, so the
+suite could not distinguish "GC works" from "GC works on the one shape we
+happened to test", and 7b would have gone on to measure a reclamation rate that
+does not occur in use. 7b measures against realistic edit traces or it measures
+nothing; whether the payload of a placeholder tombstone can be dropped while its
+position is kept is a 7b question, on evidence.
+
+#### The periodic snapshot, and why it is a sweep
+
+§6 says a snapshot is taken every 500 operations. For four phases
+`SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` existed, were correct,
+and were reachable only from tests: **nothing in the running server called
+either**, so every document was rebuilt by full replay of its log and the
+collector's own write was the only snapshot the product stored. A policy
+specified, implemented, and never installed — §13.40 at the scale of a
+subsystem, and register row 28.
+
+7b.3 installed it as a **background sweep**, because §8 puts snapshot
+compaction in a background service and is right to: a snapshot is a full replay
+plus a write, and taking one on whichever submission happens to cross the
+threshold puts it inside the segment §8's p99 target measures.
+
+That changes what "every 500 operations" means in code. *Did this batch step
+over a multiple of N* is the right question for a caller that sees every batch
+and the wrong one for a sweep that sees documents, so the predicate is **how far
+the log has run past the latest snapshot**. It is also the self-healing form: a
+crossing missed — to a restart, or to a sweep that failed — left a document
+unsnapshotted for another N operations, whereas a gap only widens until
+something closes it.
+
+The sweep is ranked by that gap rather than rotated round-robin, because unlike
+collection there is a correct order here: the document furthest behind is the
+one whose load costs most, and §8's document-load target is what this defends.
 
 `T_retire` therefore also bounds offline editing. See §9.
 
@@ -484,6 +850,371 @@ document_replicas  (document_id, replica_id, user_id, last_seen_at, max_seq,
   retirement (§5). `retired_at` is set by the background job after `T_retire`.
 - Snapshot every N operations (configurable, default 500). Loading a document
   reads the latest snapshot plus operations after its `server_seq`.
+
+### Two encodings, two roles
+
+The project carries **two** encodings of the same data, and which one is
+normative is not the same question as which one is stored.
+
+**Normalised JSON (§9) is normative.** It defines what a correct serialisation
+*is*. The conformance corpus is JSON, the cross-implementation comparison is
+byte-for-byte over JSON, and JSON is the form a human reads when diagnosing a
+divergence. Nothing about this changes.
+
+**Binary is the storage and wire form.** `document_snapshots.state` holds
+binary, and operations travel the wire as binary. The layout is specified below
+under *Binary encoding*.
+
+The two are tied together by a rule, not by convention:
+
+> **Binary correctness derives from JSON correctness.** The corpus asserts
+> `binary → JSON → binary` is byte-identical, and `JSON → binary → JSON` is
+> byte-identical, on **both** implementations. A binary codec that round-trips
+> but disagrees with the normative form fails the build.
+
+This is what preserves the cross-implementation guarantee through the format
+change. Without it, binary would be a second definition of correctness that
+nothing checks against the first, and the two would drift the way any unchecked
+pair of implementations drifts.
+
+**Why binary at all.** Phase 2 measured the JSON snapshot at 100k live elements:
+22,277,866 bytes — 222.8 bytes per element — loading in 501–941 ms against §8's
+500 ms target, with no tombstones. §13.9 has the numbers and the reasoning. The
+short version is that 222.8 bytes carries on the order of 50 bytes of actual
+data, and §8's stated case adds 500k tombstones, stored in full: roughly 130 MiB
+to move before it reaches a browser. Phase 1 established that tombstones cannot
+be collected on causal stability alone, because a `RightOrigin` can name one
+(§5), so 500k is a realistic accumulation rather than a pessimistic one.
+
+**Why now, and not in Phase 4.** Phase 4 binds the format into the client's
+IndexedDB schema. After that, changing it is a migration on every user's
+machine; before it, it is a codec swap behind two tests.
+
+#### The hub protocol carries opaque bytes — a constraint, not a description
+
+**The transport protocol frames messages. It does not encode operations.** A hub
+message carries the §6 binary form as an **opaque byte string**, and §6 remains
+the *sole* authoritative encoding of an operation or a snapshot. This holds
+whatever protocol the hub negotiates, MessagePack included.
+
+Concretely, and these are prohibitions rather than preferences:
+
+- An operation, an element, an id, or a version vector **must not** be passed to
+  the transport's serialiser as a structured object, however convenient. It is
+  encoded by §6's codec first and handed over as bytes.
+- The transport's own type system — MessagePack's maps, arrays, extension types,
+  or any successor's — **must not** appear in the definition of what an operation
+  is. A hub method's parameters carry a document id, a replica id, and a byte
+  string; nothing structural travels outside those bytes.
+- **No canonical-form rule may live in the transport layer.** §6 has exactly one
+  set of canonicality rules and one place they are enforced.
+
+The reason is §13.11, which is where the last serious bug came from. Two
+encodings of the same data, each with its own notion of a correct spelling, is
+precisely the shape that produced a rule both implementations read the same way
+and both got wrong. MessagePack is adopted for framing because it moves a byte
+string without base64-inflating it; adopting its *object model* would buy nothing
+and would recreate that shape — a second encoding, with its own canonical form,
+checked against nothing.
+
+Stated as a constraint because the failure is a later convenience rather than a
+present mistake: the moment someone finds it easier to send an object than to
+call the codec, the second encoding exists, and it will look like a
+simplification in the diff that introduces it.
+
+### Binary encoding — normative layout
+
+Written before either implementation, for the same reason §9's trace schema was:
+two codecs written from one description agree or the build says so, whereas a
+second codec written from the first only inherits its mistakes.
+
+All integers are **unsigned LEB128 varints** unless stated otherwise: seven bits
+per byte, least significant group first, high bit set on every byte but the last.
+A varint encoding a value in more bytes than necessary is invalid. Replica ids
+are the raw sixteen bytes in the §5 order — never a text form.
+
+#### Header
+
+| Bytes | Meaning |
+|---|---|
+| 4 | magic `43 52 44 54` (`CRDT`) |
+| 1 | format version, currently `01` |
+| 1 | body kind: `01` snapshot, `02` operation batch |
+
+**A reader that does not recognise the version rejects the input** with an error
+naming the versions it supports, and reads no further. Never a best-effort parse
+— §9 says why, and it is the one rule in this section with no exceptions.
+Unrecognised *kind* is the same.
+
+#### Replica table
+
+Both body kinds begin with it.
+
+| Field | Encoding |
+|---|---|
+| count | varint |
+| ids | `count` × 16 raw bytes, **ascending in §5 order**, no duplicates |
+
+Every replica named anywhere in the body — element ids, parents, right origins,
+delete targets, version vector — appears exactly once here, and every reference
+afterwards is a varint index into this table. This is the first of the three
+structural savings: a 16-byte id becomes one byte at every reference, and a
+document has a handful of replicas and hundreds of thousands of references.
+
+#### Element flags
+
+One byte, in element and insert records alike.
+
+| Bit | Meaning |
+|---|---|
+| 0 | side: `0` left child, `1` right child |
+| 1 | deleted |
+| 2–3 | parent: `0` root, `1` **the element immediately before this one in document order**, `2` explicit, `3` invalid |
+| 4 | right origin, **only when bit 0 is set**: `0` end of document, `1` explicit |
+| 5–7 | reserved, must be zero |
+
+A left child has no right-origin field at all, so "absent because left child" and
+"absent because end of document" are distinguished by *shape* rather than by a
+flag value. The pair that §6's `right_origin_is_end` CHECK constraint exists to
+keep apart, and that trace `0050` exists to catch, is unrepresentable here.
+
+Reserved bits must be zero and a reader rejects a record that sets them. That is
+the forward-compatibility trap: a future version that assigns them is a version
+bump, and an old reader must refuse rather than ignore what it cannot see.
+
+#### Snapshot body (kind `01`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| vector count | varint |
+| version vector | `count` × (replica index varint, count varint), ascending by index |
+| element count | varint |
+| records | element and run records, in document order, totalling exactly `element count` elements |
+
+The version vector carries exactly the entries the replica holds — an absent
+replica is not written as zero, because a round trip must reproduce the input
+byte for byte and "absent" and "zero" are different inputs even though §5 treats
+them alike.
+
+**Element record**
+
+| Field | Encoding |
+|---|---|
+| tag | `00` |
+| flags | 1 byte |
+| id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2`: replica index varint, seq varint |
+| right origin | present only when bit 0 is set and bit 4 is set: replica index varint, seq varint |
+| value | byte length varint (1–4), then that many UTF-8 bytes of one code point |
+
+**Run record** — the third structural saving, and the one that pays for
+sequential typing.
+
+| Field | Encoding |
+|---|---|
+| tag | `01` |
+| count | varint, ≥ 2 |
+| flags | 1 byte, describing the **first** element |
+| first id | replica index varint, seq varint |
+| parent | present only when flags bits 2–3 are `2` |
+| deleted bitmap | ⌈count/8⌉ bytes, element *i* at bit *i* mod 8 of byte *i* / 8; **bits past the last element must be zero** |
+| values | total byte length varint, then the concatenated UTF-8 of all `count` code points |
+
+A run stands for `count` elements whose ids are `(r, s)`, `(r, s+1)`, …
+`(r, s+count-1)`, where every element after the first is a **right child of the
+one before it with its right origin at end of document**. The bitmap carries
+every element's deleted state, the first included, and bit 4 must be clear
+because a run's interior right origins are end-of-document by construction and
+the first element's must be too for the run to be one shape. Bit 1 must be zero, since the bitmap already carries the first
+element's deleted state and two spellings of one document is what canonical form
+forbids. Bit 0 is the first element's own side: a run may begin at a left child,
+and every element after it is a right child regardless.
+
+That is exactly the shape typing left to right produces: each character a right
+child of the previous one, nothing following it at the time. It is also, not
+coincidentally, the shape whose tree depth equals document length (§13.10).
+
+The deleted bitmap is what keeps §8's stress case affordable. Five hundred
+thousand tombstones cannot be collected — a `RightOrigin` can name one (§5) — so
+they are stored, and in a run they cost one bit each rather than a record.
+
+#### Operation batch body (kind `02`)
+
+After the replica table:
+
+| Field | Encoding |
+|---|---|
+| op count | varint |
+| ops | `op count` × operation record |
+
+**Insert** — tag `00`, then flags, id, parent, right origin and value exactly as
+an element record. Parent flag `1` refers to the element inserted by the
+immediately preceding operation in this batch.
+
+**Delete** — tag `01`, then id (replica index varint, seq varint) and target
+(replica index varint, seq varint).
+
+**Run insert** — an insert record under a different tag, followed by a count and
+the remaining values. Everything up to and including the first element's value
+is byte-for-byte an insert record, which is what lets one reader serve both.
+
+| field | type |
+|---|---|
+| tag | `02` |
+| flags | 1 byte, as an insert record |
+| id | replica index varint, seq varint — the **first** element |
+| parent | absent for flags 0 and 1, else replica index varint + seq varint |
+| right origin | present only when bit 4 is set — the **first** element's |
+| value | the **first** element's, as an insert record |
+| count | varint, ≥ 2 and ≤ the §7 run cap |
+| values | `count − 1` × UTF-8 code point, for elements 1 … `count − 1` |
+
+Element *i* of the run has id `(replica, seq + i)`. Element 0 takes the record's
+parent, side and right origin. Every later element is a **right child of the
+element before it, with no right origin** — the placement a client produces by
+typing left to right, which is what §5's rule yields for consecutive insertions
+at one position.
+
+Unlike a snapshot run, the first element **may** carry an explicit right origin.
+A snapshot run record has nowhere to put one; this record does, and the case it
+serves — a paste into the middle of a document — is the common one rather than
+an edge case. Later elements never carry one, because each is placed against the
+element before it.
+
+A decoder **expands the run before anything else sees it** and rejects a `count`
+over the §7 cap **before allocating**, not after. A run naming four billion code
+points is one varint; expanding it first and checking the cap afterwards is a
+denial of service written into the format.
+
+Canonical form for the operation batch, in addition to the rules below: a run
+has `count` ≥ 2, runs are maximal **up to the cap**, and an insert record that
+could have joined the run before it is invalid. The cap is the one exception to
+maximality and it has to be: a paste of 300 code points is a run of 256 followed
+by a record that continues it, and a maximality rule with no exception would
+make that batch unencodable. So a record boundary is valid exactly where the
+record before it is a run already at the cap. The run shape here is **not** the snapshot's
+pairwise rule. It is one-sided: the later element must be a right child of the
+earlier one, with the next sequence number on the same replica and no right
+origin of its own. Nothing is required of the earlier element, because a run's
+first element may carry a right origin — it starts the record rather than
+continuing one, and a mid-document paste is precisely the case where it does.
+Only the snapshot form needs the two-sided rule, because a snapshot run record
+has nowhere to put a right origin at all.
+
+#### Canonical form
+
+There is **exactly one** valid encoding of a given document, because §9 requires
+`binary → JSON → binary` to be byte-identical and that is not a property an
+encoder can have if it may choose between encodings.
+
+1. The replica table is ascending, duplicate-free, and contains exactly the
+   replicas referenced by the body — no more.
+2. Version vector entries ascend by replica index.
+3. **Runs are maximal.** Two or more adjacent elements that satisfy the run shape
+   are one run record, and a run is extended as far as the shape holds. A single
+   element record that could have joined an adjacent run is invalid, and so is a
+   run that could have been longer. "Satisfy the run shape" is a condition on
+   **both** elements: the earlier one must be able to be in a run at all — no
+   right origin — and the later one must continue it. An element carrying an
+   explicit right origin can neither start a run nor sit inside one, so whatever
+   follows it begins a new record however well it would otherwise continue.
+4. A run record has `count` ≥ 2. One element is an element record.
+5. Parent flag `1` is used whenever it applies; spelling the same parent out as
+   flag `2` is invalid.
+6. Varints are minimally encoded.
+7. **A run's deleted bitmap has zero in every bit past the last element.** A run
+   of five occupies five bits of one byte; the other three are not spare, they
+   are required to be zero. Left free they would give one document eight
+   spellings per partial byte, which is the one thing canonical form forbids.
+8. No trailing bytes after the last record.
+
+A reader **rejects** every violation above, all of which are checkable while
+decoding. Maximality reduces to one local rule, stated over a *pair*:
+
+> The first element of any record must not be able to continue the element
+> immediately before it — where "able to" requires the earlier element to have
+> **no right origin**, and the later one to be a right child of it with
+> consecutive sequence number on the same replica and no right origin of its own.
+
+An element record that could have joined the previous element fails it, and so
+does a run whose first element could have extended the preceding run, which is
+the same condition stated once.
+
+**The right-origin half of that condition is not decoration.** An earlier
+draft omitted it, and both codecs — written independently from that draft, as
+§13.11 records — implemented a decoder that rejected documents its own encoder
+produced. The shape is an element carrying an explicit right origin followed by
+a right child of it with the next sequence number: the encoder cannot begin a
+run there, so it writes two records, and a rule that ignores the earlier
+element's right origin then calls its own correct output non-canonical.
+
+Rejecting non-canonical input is not pedantry: a reader that accepts two
+spellings of one document turns the byte-identity check into a check of
+whichever spelling the writer happened to choose.
+
+#### Measuring it honestly
+
+The 100k document §13.9 measured is a **single forward chain** — one replica
+typing left to right, never deleting. That is the best case this format has: it
+collapses to one run record plus a bitmap, roughly one byte per element, and
+reporting it alone would overstate the format by a wide margin.
+
+So the metric reports **both**:
+
+- the **chain** case, which is what the JSON number was measured on and the only
+  way to compare like with like; and
+- a **fragmented** case — several replicas interleaved, a realistic proportion of
+  tombstones, backward runs among the forward ones — where most elements cannot
+  join a run and pay the full element-record price.
+
+The fragmented figure is the one to quote when asking whether this reaches §8.
+A format whose headline number comes from its best case is a format nobody has
+measured.
+
+**Predicted from the layout above, before any codec existed**, at 100k elements,
+with the measurement beside it:
+
+| Case | Predicted | Measured |
+|---|---|---|
+| chain (one maximal run) | 1.13 bytes/element | **1.13** |
+| fully fragmented (no runs at all, every parent and right origin explicit, four replicas) | 16.00 bytes/element | **8.45** on the fragmented document actually built |
+
+The prediction was recorded so the measurement could disagree with it. The chain
+matched exactly. The fragmented document came in under its bound because the
+bound assumed no run ever forms and every parent is spelled out, while a real
+fragmented document still chains most parents to the previous element — the
+prediction was a worst case, and it holds as one. §13.9 has the full table
+including §8's 600k stress case.
+
+#### What a reader rejects
+
+Every one of these is an error naming what was wrong, never a partial document:
+
+- Unrecognised magic, version, body kind, record tag or operation tag.
+- Reserved flag bits set; parent kind `3`.
+- Bit 4 set on a run record.
+- A replica index past the end of the table.
+- Parent kind `1` on the first record of a body.
+- A value that is not exactly one UTF-8 code point, or is a lone surrogate.
+- A non-zero bit past the last element of a run's deleted bitmap.
+- Truncated input, or bytes remaining after the declared element or operation
+  count is met.
+- Any canonical-form violation from the list above.
+
+### Serialisation lives in Editor.Infrastructure
+
+`Crdt.Core` references nothing but the BCL (§4), so the mapping from its types to
+database rows and to the wire lives in `Editor.Infrastructure`.
+
+That mapping is now a **second implementation of the same encoding**, alongside
+the TypeScript serialiser, and the two must agree for the same reason the two
+algorithm cores must. §9's corpus therefore includes at least one trace that
+round-trips through the **serialised form** on both sides rather than only
+through the algorithm, so an encoding divergence fails the build exactly as an
+algorithm divergence does. A shared format that nothing checks is a shared format
+that drifts.
 - `document_ops` is partitioned by `document_id` hash. Include the migration.
   The partition key is part of the primary key, as Postgres requires.
 - All writes through parameterized commands. Zero string-concatenated SQL
@@ -504,19 +1235,42 @@ lock keyed by `document_id`, reusing the 50 ms batching window from §8 so the
 lock is taken once per batch rather than once per operation. Ops become visible
 in `server_seq` order because the batch commits under the lock.
 
-### Wire and trace encoding — normative
+### JSON encoding — normative
 
 All 64-bit values (`Seq`, `server_seq`, and any counter that can exceed 2^53)
-serialize as **decimal strings** in JSON — on the wire, in snapshots, and in
-conformance traces. The TypeScript side parses them as `BigInt`.
+serialize as **decimal strings** in JSON — in snapshots read for diagnosis, in
+conformance traces, and anywhere else the normative form appears. The TypeScript
+side parses them as `BigInt`.
 
 JSON numbers are IEEE 754 doubles. Values above 2^53 do not round-trip, which
 would break the byte-identical requirement in §9 silently and only after a
 replica had been running long enough to matter.
 
-Every operation and message carries a `v` protocol-version field from the first
-commit. Adding one after the conformance corpus and client IndexedDB schema
-exist is a migration; adding it now is a field.
+**This rule binds the JSON form only.** It exists because JSON cannot represent
+a 64-bit integer, which is a fact about JSON. The binary form of §6 encodes the
+same values as varints and has no such problem — restating the decimal-string
+rule there would be cargo cult, not consistency.
+
+### Versioning — both forms
+
+Every operation and message carries a protocol version from the first commit.
+Adding one after the conformance corpus and the client's IndexedDB schema exist
+is a migration; adding it now is a field.
+
+It appears differently in each form, carrying the same meaning:
+
+- **JSON:** a `v` field.
+- **Binary:** the header's version byte (§6).
+
+**An unrecognised version is rejected in both forms**, with a structured error
+naming the versions the reader supports. Never a best-effort parse, in either
+form, for any reason.
+
+A codec that guesses at a format it does not know produces a document that is
+wrong but well-formed — and this system's entire job is to make every replica
+agree. Every replica agreeing on a corrupt document is not a degraded outcome;
+it is the precise failure the project exists to prevent, arrived at by a path
+that leaves no error behind. Refusing to parse is loud, local, and recoverable.
 
 ### Run operations
 
@@ -537,6 +1291,13 @@ chaining each element onto the previous one. It must not assign every element in
 the run the same parent and side — that would make them siblings and reintroduce
 exactly the interleaving invariant 8 forbids.
 
+Because expansion produces exactly the chain a left-to-right typist produces, a
+batch decoded from runs and one decoded from individual inserts are the same
+operations; §6's canonical form then re-encodes both to the same bytes. That is
+what makes the run form a transport optimisation rather than a second dialect,
+and it is testable: expanding a run and encoding the result must reproduce the
+run.
+
 ## 7. Security
 
 Treat every one of these as a hard requirement with a corresponding test.
@@ -554,12 +1315,171 @@ Treat every one of these as a hard requirement with a corresponding test.
   `Referer` headers — none of which your own log redaction controls. A ticket
   that is single-use and expires in a minute is a bounded loss; a bearer JWT is
   not.
+
+  **The ticket lives in Redis and is redeemed atomically.** Not in process
+  memory: §8 forbids sticky sessions, so the instance that issues a ticket is
+  usually not the one that redeems it. "Single-use" must be a single atomic
+  operation — `GETDEL`, not a read followed by a delete — because two
+  simultaneous connects against a read-then-delete both find the ticket present
+  and both succeed, which is exactly the replay the single-use rule exists to
+  stop.
+
+  **The ticket carries the binding, and the server chooses it.** A ticket names
+  the user, the document, and the **replica id the server assigned**, and the
+  role check happens at `negotiate` before the ticket is issued. The client does
+  not pick its own replica id.
+
+  That last point is load-bearing rather than tidy. §5 makes `ReplicaId` the
+  tie-break that orders concurrent insertions, and this section rejects
+  operations whose replica id does not match the connection's — but a binding
+  the client chose is not a check, it is a formality. A client that picked
+  another live replica's id would be authenticated, bound, and able to author
+  operations attributed to someone else, and every replica would converge on the
+  result. Server assignment, recorded in `document_replicas` against the user,
+  is what makes the per-operation comparison mean anything.
+
+  **A client may ask to resume a replica it already owns, and the server
+  verifies rather than trusts.** `negotiate` accepts an optional claimed replica
+  id. The server reissues it only if every one of these holds:
+
+  1. the `document_replicas` row exists;
+  2. its `user_id` is the caller;
+  3. its `document_id` is the document being negotiated;
+  4. its `retired_at` is null;
+  5. no live connection currently holds it.
+
+  Check 4 is not redundant with the others and follows from §5: a retired
+  replica's operations may already have been collected, so resuming one would
+  let it keep authoring under an id the GC has forgotten. §5 says a retired
+  replica that reconnects is told to resync and discard local state, and minting
+  a fresh id is how that instruction reaches the client — the response names an
+  id the client did not ask for, which is the signal to discard.
+
+  If any check fails the server mints a fresh id instead of refusing, and the
+  response always names the id that was actually assigned. It is never an error
+  to ask: a client whose stored replica has been retired, or whose tab crashed
+  and left a stale claim, needs to get a working session rather than a 4xx it
+  cannot act on (§13.13). It also never tells the caller *which* check failed —
+  "that replica belongs to someone else" is a fact about another user's session.
+
+  **The security property, stated so it cannot be eroded by a later
+  convenience: resumption is authorization to CONTINUE a replica, not
+  authorization to author as one.** Tier-1 stays exactly what it is — the
+  submitted `ReplicaId` must equal *this connection's binding*, not "one of the
+  ids you own". Widening it to a set would reopen §13.12's attack from inside
+  the owner's own account: a user with two documents, or two replicas on one
+  document, could attribute operations to whichever replica suited them, and
+  every peer would converge on it.
+
+  Check 5 is what keeps the two statements consistent, and it is a claim on the
+  replica taken at `negotiate` — not at connect. The ticket exists before the
+  connection does, so a claim taken only when the socket opens leaves a window
+  in which two `negotiate` calls both succeed for one replica. The claim is
+  therefore atomic (Redis `SET … NX`), scoped to `(document, replica)`, taken
+  before the ticket is issued, held while a connection is bound, refreshed by
+  the hub, and released on disconnect — with a TTL, because a process that dies
+  holding a claim must not strand the replica forever. Two tabs cannot hold one
+  replica id, which is the whole point: §5's tie-break assumes one author per
+  id, and two live authors sharing one id can produce two different operations
+  with the same `ElementId`.
+
+  **Why resumption rather than the alternatives.** A client that reloads holds
+  an outbox of operations it authored under its previous replica id, and tier-1
+  will reject every one of them under a fresh binding. Re-authoring the outbox
+  under the new id changes operation identity, so any operation the server
+  already received arrives a second time under a new name and the CRDT — which
+  deduplicates by id and is right to — inserts the characters twice. That is
+  silent text corruption, and it happens precisely in the case the outbox exists
+  for: a partially-delivered batch. Accepting submissions from a
+  retired-but-owned replica is the same widening of tier-1 described above.
+  Resumption is the only one of the three that leaves both the outbox and the
+  anti-forgery check intact.
 - The ticket and any token must never be written to logs. Configure request
   logging to redact them explicitly, and add a test that drives a connection
   using a **known sentinel value** through the real logging pipeline —
   including request logging and exception paths — asserting the sentinel
   appears in no sink. "No log line contains a token" is not testable as stated;
   this is.
+
+**How the browser obtains a token (Phase 4.9)**
+- **Authorization Code with PKCE, and no client secret.** A public client cannot
+  keep one; shipping a secret to a browser is publishing it. The code verifier
+  is generated per attempt from a CSPRNG, the challenge is `S256`, and the
+  verifier is discarded the moment the code is redeemed.
+
+  PKCE's mechanism is that the token endpoint refuses a code presented without
+  the verifier that produced its challenge — which means a login that succeeds
+  proves nothing about PKCE, because a compliant server enforces it and a client
+  that omitted the verifier entirely would simply fail later. What has to be
+  tested is the challenge derivation, the freshness of the verifier across
+  attempts, and one exchange against an endpoint that actually checks.
+- **The access token lives in memory only.** Never `localStorage`, never
+  `sessionStorage`, never IndexedDB, never a cookie this application sets,
+  never a URL. The requirement is a sweep rather than a lookup: after a complete
+  login, no browser store and no URL the page can reach contains the token or
+  the code verifier.
+- **The token must never reach the SignalR connection URL.** §7 puts a
+  single-use 60-second ticket in the `access_token` query parameter precisely so
+  a bearer JWT is not there — URLs reach proxy logs, browser history and
+  `Referer`, none of which this application's redaction controls. 4.9 changes
+  how tokens are obtained and therefore has to re-assert that guarantee rather
+  than inherit it: the hub URL carries the ticket and nothing else.
+- **Refresh is delegated to the provider's library, not hand-rolled.** Token
+  refresh looks simple and has a long history of subtle bugs — clock skew,
+  concurrent refreshes racing, a rotated refresh token discarded on retry — and
+  none of them are what this project is for.
+- **A refresh that fails is a client state, not an exception.** §9's contract:
+  the client goes offline with its own problem code, keeps its outbox, and says
+  a sign-in is needed. Anything else loses unsent work while a login prompt is
+  pending, which is the §9 failure this whole path exists to avoid.
+- The redirect URI is exact-match, and the `state` parameter is verified on
+  return.
+- **Signing out is three separate things, and doing one of them is the defect.**
+  Closing the tab already drops the in-memory token; that is not a sign-out, and
+  a button that only does the same is worse than none, because it reports
+  success. All three are required:
+
+  1. **The client's token and replica state go.** The access token, the user
+     store, and the local replica for any open document — a second person at the
+     same machine must not resume the first person's session or read their text
+     out of IndexedDB.
+  2. **The issuer's session ends** via its `end_session_endpoint`. Without this
+     the next load silently re-authenticates as the same person, because the
+     provider's cookie is still there and the authorization request never
+     prompts. This is the half that is invisible from inside the client: sign-out
+     appears to have worked, and it is only the *next* sign-in that shows it did
+     not. Where a provider advertises no `end_session_endpoint`, the client says
+     so plainly rather than pretending — a silent local-only sign-out on a shared
+     machine is the defect this rule exists for.
+  3. **Unsent work is accounted for.** Signing out with a non-empty outbox
+     either sends it first or tells the user what will be lost, and never
+     discards it silently. This is the same rule as `sign_in_required`'s in §9,
+     arriving from the other direction: there the session ended without being
+     asked, here the user asked, and in both cases unsent work disappearing
+     without a word is the failure.
+
+  Switching accounts is sign-out followed by sign-in and has no path of its own.
+  What it adds is an assertion: after switching, nothing of the previous user's
+  documents is reachable — not from the API, and not from any client-side store
+  keyed by document id alone.
+- **A membership change reaches a live connection, not only the next one.** A
+  user revoked or demoted while connected must be refused within the same
+  five-second bound; a bound proven only against a fresh `negotiate` is a bound
+  on new sessions, and the session that matters is the one already open. A
+  revoked member's next submission is refused with `not_found` and the
+  connection is closed; a member demoted to viewer is refused with `forbidden`
+  and stays connected receiving broadcasts, which is what §9's table already
+  says that code means.
+
+  **The per-operation check does not cover this, and that is the point.** A
+  client that only reads submits nothing, so nothing re-checks it, and it keeps
+  receiving every broadcast on the document until its socket closes. A sweep
+  over the connections each instance holds is what closes them, and **its bound
+  is composed rather than asserted**: the worst case from revocation to close is
+  the role cache's staleness plus the sweep's interval, so those two numbers are
+  checked against the five seconds at startup and a configuration that would
+  exceed it refuses to run. That composition has to hold with the pub/sub
+  channel down, since that channel is best effort by construction.
 
 **Authorization**
 - Every hub method and every endpoint re-checks document membership.
@@ -582,6 +1502,13 @@ Treat every one of these as a hard requirement with a corresponding test.
   see — do not leak document existence. A viewer attempting a write gets 403:
   they can already see the document, so there is nothing to conceal.
 
+  Those are HTTP statuses and they apply to `negotiate`, which is where the
+  membership decision is made. A hub method has no status code, so it fails with
+  an error carrying the equivalent **code** — `not_found` or `forbidden` — and
+  the same rule about what may be revealed. The distinction is not cosmetic: a
+  hub that answers "forbidden" for a document the caller cannot see has leaked
+  its existence just as surely as a 403 would.
+
 **Input validation**
 - Reject operations whose `ReplicaId` does not match the one bound to the
   authenticated connection. A client must not be able to forge operations
@@ -589,6 +1516,11 @@ Treat every one of these as a hard requirement with a corresponding test.
 - Reject operations whose `Seq` is not the next dense value for that replica.
   Density is a correctness property of the version vector (§5), not a
   convention.
+
+  The expected next value is **reconstructible from Postgres** — the maximum
+  `seq` stored for that `(document_id, replica_id)` — and any in-memory copy is
+  a cache. §8 requires exactly that: an app server may hold per-document state
+  for speed, and must not need it for correctness after a failover.
 - Caps: single element value = exactly 1 code point (≤4 bytes UTF-8); run op
   ≤ 256 code points; batch ≤ 256 ops; message ≤ 64 KB; document ≤ 5 MB of live
   text; ≤ 50 concurrent replicas per document; pending-set bound per connection.
@@ -600,16 +1532,172 @@ Treat every one of these as a hard requirement with a corresponding test.
 **Abuse resistance**
 - Per-user and per-connection rate limits on operation submission, backed by
   Redis so limits hold across instances. Return a structured throttle response,
-  do not silently drop. Rate limits are expressed in code points per interval,
-  not messages, so run ops cannot bypass them.
+  do not silently drop.
+
+  **The unit is code points per interval, not messages**, so a run op cannot
+  buy 256 characters for the price of one. That is a statement about what is
+  counted and it has to be tested as one: a single 256-code-point run and 256
+  single-character inserts must consume the same budget. A test written with
+  single-character operations passes against a message counter, which is the
+  bypass this clause exists to forbid.
+
+  **"Across instances" is the requirement, not a note about the
+  implementation.** A limiter that holds per process is not a weaker version of
+  this rule, it is a different rule — one an attacker escapes by reconnecting
+  until they land elsewhere. It follows that **this cannot be marked done from a
+  single-instance run**: the budget is exhausted on one instance and the refusal
+  observed on another, or nothing has been shown. Third occurrence of 3b.2's
+  shape — a control that appears to work on one instance and does not exist
+  across two.
+- **Rate limits on the document API too**, per user: creating documents, and
+  granting or revoking membership. §7 named only submission and connections for
+  five phases, which left `POST /documents` an unbounded write path that nothing
+  in this specification forbade — the spec was incomplete rather than the
+  implementation. Units here are requests per interval, since a REST call has no
+  natural size.
+
+  **Applied to the route group, not to the three endpoints that write.** A limit
+  added by hand to each write endpoint is 5b.4's shape — a control applied to
+  the endpoints someone remembered — and the failure is silent, because an
+  endpoint nobody thought of looks exactly like an endpoint that does not need
+  it. On the group, the next write endpoint added to that file is limited before
+  its author has considered the question. The filter charges by method, so the
+  test drives *every* write route past the budget rather than one of them.
+
+  **Charged before the handler decides.** A loop of calls that will all be
+  refused with 404 still costs a role lookup and a Postgres round trip each, so
+  a limit that only counted the calls reaching a write would leave the cheapest
+  abuse unbounded.
+
+  **Reads are excluded deliberately**, and the exclusion is asserted rather than
+  assumed: a test drives a read well past the write budget and expects it to
+  answer. "Reads are excluded on purpose" and "reads were forgotten" look
+  identical in the code, and only one of them is a decision.
+
+  **`negotiate` is not covered by this limit** and is not an omission: the
+  resource it consumes is a connection, not a row, and §7's per-user connection
+  cap is what bounds it.
 - Connection limits per user. Reject new connections past the cap.
+
+  Distinct from the per-document replica cap, which already exists. The two are
+  observationally identical against one user on one document, so **the test
+  opens connections across different documents**, where only a per-user limit
+  can refuse (§13.31: two mechanisms, one observable).
+
+  **The slot is taken at `negotiate`, above the resumption branch, and keyed on
+  the replica.** All three parts are requirements rather than implementation
+  notes:
+
+  - *At `negotiate`*, because that is the last point where a refusal can carry a
+    code. A cap enforced when the socket opens can only close it, and a closed
+    socket is indistinguishable from a network failure — §13.13's defect, which
+    is how the 404 from `negotiate` went unnoticed for four phases.
+  - *Above the resumption branch*, because that branch **returns before the
+    replica cap ever runs**. Placing the connection cap beside the replica cap
+    is the obvious choice and it leaves every reloaded tab uncounted; a test
+    that only opens fresh sessions passes either way (§13.32).
+  - *Keyed on the replica*, so a reload re-scores the slot it already holds. A
+    tab that reconnects all afternoon costs one slot, not one per attempt, and
+    a client in a reconnect loop cannot exhaust its own cap.
+
+  Held as a sorted set per user, scored by last renewal and purged before every
+  count, so an instance that dies holding slots leaves entries that age out
+  rather than a user locked out of their own account. A plain counter cannot
+  distinguish a slot nobody released from a slot in use and drifts upward
+  forever. The stale window must outlast two renewal ticks, and **that
+  relationship is enforced at startup** rather than stated in a comment — the
+  two numbers live in different files, and a window shorter than the interval
+  expires live connections' slots between ticks, refusing users who are well
+  under the cap, intermittently, with nothing in the logs but a count.
 - A malformed or oversized message closes the connection after logging.
 
 **Client**
-- Content Security Policy with no `unsafe-inline`. HSTS. `X-Content-Type-Options`.
+- **Content Security Policy, stated as a policy rather than as a prohibition.**
+  "No `unsafe-inline`" is satisfied by `default-src *`, which is why the
+  directives are written here and the test parses them rather than grepping the
+  header:
+
+  | Directive | Value | Why |
+  |---|---|---|
+  | `default-src` | `'none'` | Deny by default; every capability below is granted deliberately |
+  | `script-src` | `'self'` | The build emits one external module and no inline script — verified, not assumed (§13.26's build is the one that ships) |
+  | `style-src` | `'self'` | Same, and inline `style` attributes are blocked with it |
+  | `connect-src` | `'self'` **and the configured issuer's origin** | `/config`, the document API and the hub socket are same-origin; the PKCE token exchange, metadata and JWKS are not |
+  | `img-src` | `'self' data:` | `data:` for anything the build inlines |
+  | `form-action` | `'self'` | Nothing posts a form off-origin |
+  | `frame-ancestors` | `'none'` | Clickjacking; this application is never framed |
+  | `base-uri` | `'none'` | A `<base>` injection reroutes every relative URL, the hub included |
+  | `object-src` | `'none'` | No plugins, ever |
+
+  `connect-src` carrying the **configured** issuer is the load-bearing part and
+  the most likely thing to break silently: a policy assembled without it passes
+  every header assertion and every API test, and fails only in a browser, only
+  after a real sign-in. Hence the done-when below.
+
+  **The policy is enforced, never `Content-Security-Policy-Report-Only`.** The
+  two are indistinguishable in a header dump and one of them enforces nothing.
+
+  **Done when the application does something under it.** Zero violations on a
+  page that has signed in, loaded a document, opened its socket and had text
+  typed into it. Zero violations on an empty page is not weak evidence, it is
+  evidence of nothing: a policy that forbids everything the application needs
+  scores perfectly until the application tries.
+- **HSTS, with a deliberate difference between what is shipped and what is
+  tested — named here rather than left in a comment.**
+
+  | Where | `max-age` | Why |
+  |---|---|---|
+  | Production | 31536000 (one year), `includeSubDomains` | The value that makes HSTS worth having |
+  | This project's Compose stack | 60 seconds | A long `max-age` served once from a development host pins that browser profile to HTTPS for that host for a year, and nothing in the application can undo it |
+
+  The divergence is written down because **a comment in a compose file is the
+  artefact that stops being read**, and a deliberate test/production difference
+  is the highest-value thing for a reader to find. It carries its own row in the
+  §7 requirement map (below) rather than being a footnote to the HSTS row.
+
+  What is under test is not the browser's HSTS implementation: it is that the
+  header is present, enforced, and carries **the configured value**. A short
+  value proves all three.
+- `X-Content-Type-Options: nosniff`.
 - The editor renders text into a DOM text node — never `innerHTML`, never
   `dangerouslySetInnerHTML`. Add a test that a document containing
   `<script>alert(1)</script>` renders as literal text.
+
+**Verified against the application as Compose starts it**
+
+Every requirement in this section is proven by a request that **entered through
+the published port** of a stack brought up from `docker-compose.yml` and a
+`.env`, with nothing reconfigured by the test. That phrasing is deliberate and
+each clause is load-bearing:
+
+- *Through the published port*, so the proxy, the forwarded headers and the
+  routing are in the path. A header asserted at the API is a header the browser
+  may never see.
+- *From `docker-compose.yml` and a `.env`*, so the configuration under test is
+  the shipped configuration. A control that works when the test supplies its
+  settings is §13.28's shape: the check passes and the artefact is broken.
+- *Nothing reconfigured by the test*, because a test that enables the control it
+  is about to verify is testing the framework.
+
+A test host remains the right place for the cases a deployment cannot easily
+produce — a forged replica id, a malformed frame, a clock at an expiry boundary.
+Those keep their existing tests. What changes is that **a test-host test alone
+no longer discharges a §7 requirement**, and the map below is where that is
+tracked.
+
+**The §7 requirement map** lives in `docs/section-7-map.md` and is enforced by
+`Section7MapTests`, which fails the build in three directions: a §7 bullet with
+no row, a row anchored to text §7 no longer contains, and a row naming a test
+that does not exist. The third caught seven wrong names on the commit that
+created the map, and what was left after correcting them is register row 26.
+
+Every requirement in this section has a row naming
+the test that proves it, and **a check fails the build when a requirement has no
+row**. The list is derived from this section's text rather than from the suite:
+deriving it from the tests makes the map a restatement of whatever was written,
+which is the circularity §13.22 warns about — a criterion that cannot be false.
+A requirement genuinely owned by a later phase says so and names the phase,
+rather than being quietly absent.
 
 **Secrets**
 - Nothing in `appsettings.json` but non-secret defaults. Local secrets via
@@ -625,17 +1713,116 @@ Treat every one of these as a hard requirement with a corresponding test.
   SignalR messages. Proven by a test that kills an instance mid-session and
   asserts clients still converge.
 
+  **"Converge" is asserted against §9's normalised JSON of each client's full
+  element state — tombstones included — not against the visible text.** Two
+  replicas can render identical text while disagreeing about the tree beneath it,
+  and that disagreement is exactly what produces divergence on the *next*
+  concurrent edit, so comparing rendered text would pass on documents that are
+  already broken. This is the comparison the conformance corpus already makes,
+  which means a convergence failure is diagnosable with the tooling that exists.
+
   "Stateless" was the original wording and it is not achievable: validating an
   operation without loading the document requires a cached version vector.
   Reconstructible is the property that actually matters.
 - Hot path (receive op → validate → persist → broadcast) must not load full
   document state. Validate against the version vector and the referenced parent
   and right origin only.
-- Batch operation persistence: buffer for up to 50 ms or 100 ops, whichever
-  comes first, then write in one round trip under the per-document advisory lock
-  (§6).
-- Backpressure: bounded per-connection outbound channel. If a client cannot keep
-  up, drop it to catch-up-via-snapshot rather than growing the buffer unbounded.
+- **Broadcast carries `server_seq` and is not ordered by it.** The server assigns
+  `server_seq` under the per-document advisory lock (§6) and sends it with every
+  operation, but the fan-out makes no ordering promise: the backplane does not
+  guarantee order across instances, and building on the assumption that it does
+  would make correctness depend on a property Redis pub/sub does not offer.
+  Ordering is the receiver's problem and it already has the machinery — causal
+  readiness (§5) is what makes an out-of-order arrival safe, and `server_seq` is
+  what makes catch-up queries answerable. Requiring ordered fan-out would also
+  serialise it, which is the opposite of what §8 is for.
+- Batch operation persistence: **write as soon as there is no write in flight
+  for that document, and batch whatever arrives while one is**, capped at 100
+  operations, in one round trip under the per-document advisory lock (§6).
+
+  **This said "buffer for up to 50 ms or 100 ops, whichever comes first" until
+  9.4, and the 50 ms contradicted this section's own first performance target.**
+  The wait happens inside the segment target 1 measures, so §8 required a 25 ms
+  p99 across a span it also required to contain a 50 ms delay. 7b.4 measured
+  the consequence — `editor.persist` never below 28 ms, p50 57-59 ms, overall
+  p99 234 ms — and recorded it as a contradiction in this document rather than a
+  defect in the implementation, which is what it was.
+
+  **Adaptive is not "no batching", and it needed no new mechanism.** One
+  consumer loop per document drains the queue, writes, and only then looks
+  again, so every submission arriving during a write is waiting when it returns
+  and goes out as the next batch. The batch size is therefore the offered load,
+  measured continuously and for nothing. The amortisation the window existed for
+  is intact; what is gone is paying for it when there is nothing to amortise.
+  There is no threshold and so no mode to switch, which is why the measured
+  curve has no cliff in it.
+
+  Measured across six rates under both policies: the window costs a flat
+  50 ms of p50 at every rate — it is a constant, not a proportion, because the
+  timer is what the loop waits on and twenty typists never fill a 100-operation
+  batch before it expires — and past sixteen batches a second per editor it also
+  becomes a throughput ceiling, 326/s against adaptive's 630/s. Numbers in
+  `docs/phase-8-measurements.md`.
+
+  **The cap stays, and stays in operations.** It bounds one write's size; a long
+  burst becomes several bounded writes rather than one unbounded one.
+
+  **The correctness this rests on is the loop, not the lock.** `server_seq` is
+  assigned by reading the high-water mark under the advisory lock, so two
+  overlapping writes for one document would each be correct and their
+  *completion* order would be whichever transaction committed first — a client
+  could be told about sequence 12 before sequence 11 existed. The lock orders
+  transactions, not completions. One consumer per document removes the case by
+  construction. It is per document: different documents overlap freely, which is
+  what the per-document queues are for, and a test asserts both halves because
+  a globally serialised writer satisfies the first and is the cost this design
+  exists to avoid.
+- Backpressure: bounded per-connection outbound channel, **bounded in bytes**,
+  because what exhausts an app server here is buffered payload rather than
+  message count. If a client cannot keep up, drop it to catch-up-via-snapshot
+  rather than growing the buffer unbounded.
+
+  **"Drop to catch-up" means the connection is closed and the client reconnects
+  and resyncs**, not that the server quietly stops sending and hopes. A client
+  that is silently starved cannot tell it is missing operations and will render a
+  document that is wrong without knowing; closing is observable, starving is not
+  (§13.13). The close carries a reason the client can act on, and the client's
+  response is the catch-up path — one of the three guaranteed sources of
+  duplicate delivery (§5).
+- **Cross-instance delivery carries the batch, not a group send.** Each
+  instance subscribes to a Redis channel per document, while it holds a
+  connection for that document, and publishes every batch it accepts. Every
+  instance then fans out to its own connections under its own §8 deadline.
+
+  SignalR's own backplane would deliver a group send across instances and is
+  deliberately not what carries this: a group send lands on the remote instance
+  as a write into each member's channel with no timeout, so one slow client
+  there stalls that instance's backplane consumer — the stall the per-connection
+  deadline exists to prevent, moved one hop away and invisible from the sender.
+
+  Publishing is best effort. The operations are already committed before the
+  fan-out, so a lost publication costs a remote client latency until its next
+  catch-up rather than an operation; failing the submission instead would turn a
+  backplane hiccup into a rejected keystroke for an operation the server holds.
+- **Catch-up is answered from the client's version vector, never from a
+  `server_seq` watermark.** The client says what it holds, per replica, and the
+  server returns what that does not cover. A watermark would be wrong for the
+  same reason the bullet above makes broadcast unordered: a client can hold
+  `server_seq` 105 without holding 100, so "everything after your highest" skips
+  whatever fell in the gap — and skips it silently, leaving a client that
+  renders a plausible document and converges with nobody. What a client actually
+  knows is per replica and dense (§5), which is exactly what a version vector
+  expresses and what a single number cannot.
+
+  Above a configured operation count the answer is a snapshot instead, because
+  replaying a week of deltas costs more than sending the state. The threshold is
+  configuration, not a constant: where the two cross depends on the document.
+  The snapshot path is also reachable on demand, which is not a convenience —
+  it is the only way to exercise a floor that otherwise runs solely behind a
+  working fast path (§13.14).
+
+  Catch-up returns the whole document, so it is a read and is authorized like
+  one: the §7 role check runs on every call, not once at connect.
 - Snapshot compaction and tombstone GC run in a background service, jittered and
   guarded by an advisory lock so multiple instances do not duplicate work.
 
@@ -645,16 +1832,86 @@ measurement point is not a falsifiable claim.
 
 | Target | Measured |
 |---|---|
-| p99 < 25 ms, server-side `receive → broadcast enqueue` | 20 concurrent editors on one document |
+| p99 < 25 ms, server-side `receive → broadcast enqueue` | 20 concurrent editors on one document. **Judged only over runs that agree**: five runs of 10,000 samples, with the spread of their p99s at most 20% of the median. A p99 over twelve observations is not a measurement (§13.61) |
 | p99 < 150 ms, client keystroke → remote client render | 20 concurrent editors, loopback network |
 | 1,000 concurrent connections per instance at < 2 GB RSS | connections spread over 100 documents, 10 each |
 | Document load < 500 ms, **server-side**, 100k live characters + 500k tombstones | cold cache, from snapshot + tail |
+| Document load, **browser**, 100k live characters + 500k tombstones | reported, no threshold — see below |
 
-The document-load target is a **server-side** number. The browser replica has no
-equivalent target in this phase; if one is wanted later it constrains the
-snapshot format and must be specified separately. Note also that 500k
-accumulated tombstones implies GC is not keeping up — this is a stress target,
-not a steady state.
+**A measurement is not done until something has been deliberately broken and the
+measurement said which thing** (7b.0). This is §13.22's rule generalised from
+dashboards to every number in §8. A threshold nobody has seen fail is a
+threshold nobody has shown to be attached to anything: it passes on a harness
+that measures the wrong segment, on a generator that saturates before the server
+does, and on a sample too small for the percentile to mean what it says. Each
+target therefore records what was broken to make it fail and what the
+measurement then reported.
+
+Three ways a performance number looks right and is not, all of them seen or
+narrowly missed in this project:
+
+1. **The wrong segment.** 3b.1's near-miss: a length measured on the payload
+   rather than the frame showed two protocols as identical, because the
+   inflation being measured lived in the frame. Each target's endpoints are
+   named above; the harness must assert it instruments that segment.
+2. **The generator is the bottleneck.** If the load harness saturates first, the
+   number describes the harness. The generator's own utilisation is reported
+   beside every result, or the result is not one.
+3. **Too few samples for the percentile.** A p99 over 50 requests is the worst
+   of 50. **The sample count is part of the reported result**; a percentile
+   without one is decoration.
+
+**Every performance number is reported with the build that produced it**, and a
+number without one is not a result. At minimum: the runtime configuration
+(`Debug`/`Release` for .NET, the resolved `NODE_ENV` and whether minification
+ran for the client), the runner class (§13.7), and the commit. A figure missing
+any of these cannot be compared to a later figure, which makes it unfalsifiable
+— it can never be shown to have regressed, only replaced.
+
+This is a rule written from a near-miss rather than a failure (§13.26). The
+end-to-end harness was found to be building a development bundle, and the first
+instinct was that §13.13a's client-bundle figures — which a design decision
+turned on — had the same problem. They did not: that harness uses esbuild, pulls
+in no React, and sets minification explicitly. But **neither measurement
+recorded which build it measured**, so answering the question took reading the
+harness rather than reading the number, and the answer could easily have gone
+the other way.
+
+It is stated here, before §8's outstanding targets are measured, because the
+cost of adding it afterwards is re-running everything — and because the pressure
+at that point will be to accept the numbers already in hand.
+
+**Document load is two numbers, not one.** The original §8 scoped the 500 ms
+target to the server and said explicitly that a browser target, if wanted later,
+"constrains the snapshot format and must be specified separately". That
+condition has now fired: Phase 2's measurement is what moved the storage and
+wire form to binary (§6), so the browser figure is specified here.
+
+Both numbers are required, and each names where it is measured, because
+"document load" without a measurement point is not a falsifiable claim:
+
+- **Server-side**, C#, from snapshot plus tail, cold cache. Target < 500 ms.
+- **Browser**, the TypeScript core of §9, in **headless Chromium** on a
+  **standard GitHub-hosted `ubuntu-latest` runner** (2 vCPU, 7 GB) — the
+  hardware class is part of the number, and the exact Chromium version is
+  recorded alongside each measurement. **Cold** means a fresh page load with
+  **empty IndexedDB**: the first-time-user case, where the document arrives over
+  the network and nothing is cached. A warm figure may be reported alongside it
+  but the cold one is the number that matters.
+
+The browser figure carries **no threshold in this phase** — it is reported, the
+way §6's snapshot metric was reported, because setting a bound before anyone has
+seen the number is how §8 acquired a 500 ms target nothing had measured. It will
+be worse than the server figure and it is the one that decides whether this
+works on a slow connection.
+
+Measured by `scripts/browser-metrics.sh`, and by the `browser-metrics` CI job on
+the runner class named above. §13.9 carries the first readings; the short version
+is that §8's document takes about six seconds in a browser, and that placement —
+not parsing, and not the network — is where it goes.
+
+Note also that 500k accumulated tombstones implies GC is not keeping up — this
+is a stress target, not a steady state.
 
 ## 9. Client
 
@@ -664,9 +1921,182 @@ not a steady state.
   ops merge in. There is no server round trip in the typing path.
 - IndexedDB persists the local replica and an outbox of unsent operations, so a
   full offline session survives a page reload and syncs on reconnect.
+
+  **Both are stored in §6's binary encoding**: the replica as a snapshot body,
+  the outbox as operation-batch bodies. Not a JSON shape invented for the
+  browser. §6 is the sole authoritative encoding and a second one acquires
+  canonical-form rules of its own, which is where §13.11's bug came from — and
+  this store is read by a *different build* from the one that wrote it more
+  often than any other artefact in the system, because a browser holds whatever
+  version the user last loaded.
+
+  The store carries its own schema version alongside §6's format version, and
+  **an unrecognised version at either level is rejected explicitly** — §6's rule,
+  which that section calls the one with no exceptions, applies here with the
+  most force. A best-effort parse of a store written by a newer build produces a
+  replica that is subtly wrong and then submits operations derived from it.
+  Rejection means discarding local state and resyncing, which loses unsent work
+  and says so; a bad parse loses correctness and does not.
+
+  **A reload resumes the replica rather than becoming a new one** (§7). The
+  outbox holds operations authored under the stored replica id, and they are
+  submittable only under a binding for that same id.
+
+- **Every code in this table has exactly one defined client recovery, and each
+  produces a visible change of state.** A code the client swallows is a client
+  that appears to work and silently is not (§13.13).
+
+  Most of them are refusals the server returns. **Two are raised by the client
+  about itself** — `sign_in_required` and `pending_overflow` — and they are in
+  the same table deliberately: what matters to the user is that something
+  stopped and why, and a second mechanism for the client's own failures would
+  be a second place for one of them to acquire the recovery "nothing happens".
+  The table said "every rejection the server can return" until 9.2, by which
+  point it had one entry no server emits and a sentence that did not cover it.
+
+  | Code | Recovery |
+  |---|---|
+  | `not_found` | The document is gone or access was revoked. Stop the session, surface it, do not retry. |
+  | `forbidden` | Demoted to viewer mid-session. Drop to read-only, keep receiving, surface it; the outbox is unsendable and must not be discarded silently. |
+  | `malformed` | A bug in this client. Stop submitting, surface it, keep local state for diagnosis; retrying cannot help. |
+  | `too_many_replicas` | §7's per-document cap. Retry with backoff, having released any claim held; surface it if it persists. |
+  | `too_many_connections` | §7's per-user cap: this person holds too many connections, across every document. Same recovery as `too_many_replicas` — retry with backoff — and a **different sentence to the user**, which is why it is a separate code. That one means the document is full and closing your own tabs cannot help; this one means exactly that it can. A client that collapsed the two would tell half the people who hit them the wrong thing. |
+  | `unknown_origin` | The server does not have an operation this batch references. Catch up by version vector, then resubmit once. Repeated occurrence is a bug, not a race. |
+  | `rate_limited` | §7's abuse budget is spent. Wait the delay the refusal carries, then resubmit **the same bytes** — no catch-up, because nothing about the document changed. Unbounded retries, unlike `unknown_origin`: a repeat means the window has not rolled over, which is the server working. |
+  | `resync_required` | §5's GC watermark: the referenced id is at or below it and is gone. Discard local state, take a snapshot, and report the unsent operations as lost — this is the one case where §5's "do not drop" rule has an exception, so it is the one the user has to be told about. |
+  | `pending_overflow` | **Client-raised.** §5's pending-set bound — in operations or in seconds — has been exceeded by what arrived on the connection. Catch up by version vector, which asks for exactly the dependencies being waited on; do not touch the outbox and do not report anything lost, because nothing was dropped. Once per stuck operation: a catch-up that succeeded and left the same operation waiting has established that the dependency is not coming, and that is a `stop`. |
+
+  **`rate_limited` is the one refusal that carries a number, and the number is
+  the server's.** A client left to invent the delay either hammers the limit it
+  just hit or backs off for longer than the window lasts, and only the server
+  knows which. It is also the one recovery with no attempt budget: `unknown_origin`
+  is capped at one retry because a second occurrence is a bug here, while a
+  throttle repeating is the limiter doing its job. What bounds it instead is a
+  floor and a ceiling on the delay itself, both the client's own — a zero would
+  turn the recovery into a spin against the limiter, and an implausible number
+  would park unsent work on a live connection with nothing on screen changing.
+
+  **The retry is byte-identical, and that is a requirement rather than an
+  optimisation.** A refused batch has already spent its sequence numbers on the
+  client; a client that rebuilt the batch instead would leave a hole and be
+  refused with `sequence_gap`, which is a stop. The server holds up its half:
+  the expected sequence advances only on a successful append, never on a
+  refusal.
+
+  **When the server emits it (Phase 7).** The client contract above was written
+  first, deliberately; this is the rule the server is written against. On
+  ingest, for each operation naming an id `(s, n)` the server does not hold:
+
+  | Condition | Answer | Why |
+  |---|---|---|
+  | `n ≥ F[s]` — at or above the frontier | `unknown_origin` | Not everyone held it, so it is not evidence of collection. |
+  | `n < F[s]` — below | **`resync_required`** | Everyone was known to hold it, so it is not in flight: it existed and was collected. |
+  | `s` is not in the frontier at all | `unknown_origin` | A replica nobody has heard from is not evidence that anything was collected. |
+  | operation `n` from `s` exists but is not an insert | `unknown_origin` | A delete's sequence number is not an element id. |
+
+  The middle row is the whole of it, and the others are what stop a new
+  replica's first operation being answered with an instruction to throw its
+  state away.
+
+  **Three corrections to this table, made in 7.4 when the server was written
+  against it.** Each was a place where the table, written from the client's side
+  before any server existed, did not survive contact with the server that exists.
+
+  1. **The comparison is strict, and against a count.** §5's frontier is stored
+     in next-expected form, so `F[s]` is *how many* of `s`'s operations everyone
+     holds and an operation is stable exactly when `n < F[s]`. The original
+     `n ≤ F[s]` was written against a highest-held frontier that §5 no longer
+     uses, and reading it literally now would answer `resync_required` for the
+     first operation past the frontier — one that is still legitimately in
+     flight.
+  2. **The server does not buffer, so "buffer" was never its answer.**
+     `IngestValidator` has no pending set by design: at ingest a non-ready
+     operation is a bug or an attack rather than a race, because a client can
+     only name its own earlier operations or ones it learned from a broadcast
+     the server sent after committing them. Buffering there would be buffering
+     an id that may never arrive. The server's answer for those rows is
+     `unknown_origin`, which is what it already emitted before this clause
+     existed; `resync_required` narrows that code rather than replacing it.
+  3. **A reference to a delete's sequence number is not a collected element.**
+     Deletes consume sequence numbers, so `(s, n)` can name an operation that
+     exists and is not an insert. Such a reference resolves to nothing and sits
+     below the frontier, and the first three rows alone would answer
+     `resync_required` — telling a user to destroy their unsent work because of
+     a client bug. That is the widening this section forbids, arriving from the
+     opposite direction, so the server distinguishes "no such operation" from
+     "not an insert" and only the former can be a collection.
+
+  **The frontier is clamped to the log, or none of this means anything.**
+  `F[s]` never exceeds the number of operations the log holds from `s`.
+  Acknowledgements are client-supplied and the pointwise minimum bounds a liar
+  only while an honest replica is also live — a client alone on a document
+  controls the minimum outright. Measured before the clamp existed: three
+  operations in the log, one client, one acknowledgement claiming a thousand,
+  and a stored frontier of 1000. Since collection tests `Seq < F[s]` and the
+  frontier never moves backwards, that single message made every tombstone in
+  the document permanently collectable. **The log is evidence; an
+  acknowledgement is a claim; the frontier is the smaller of the two.**
+
+  **It is emitted for a reference the server cannot resolve, never for an
+  operation it merely dislikes.** A malformed batch is `malformed`; a batch from
+  the wrong replica is `replica_mismatch`. Widening `resync_required` to mean
+  "something is wrong with this" would make the one refusal that legitimately
+  destroys a user's unsent work the catch-all, which is precisely backwards.
+
+  `resync_required` is specified here before anything emits it. §5 defines the
+  condition and the server side arrives with GC; defining the client contract
+  now means that implementation is written against a stated shape rather than
+  inventing one late, when the pressure will be to make it whatever the client
+  already happens to tolerate.
+
+  **`sign_in_required` joins the table** and is the one entry no server emits:
+  it is raised by the client itself when the token source cannot produce a
+  valid token — the refresh failed, the session expired, the user signed out
+  elsewhere. It behaves like a lost connection and not like a rejection: state
+  goes `offline`, the outbox is kept in full, submission stops, and the message
+  says a sign-in is needed. §7 requires this rather than an exception, because
+  an unhandled rejection in the refresh path discards unsent work at exactly
+  the moment the user is being asked to log in again.
+
+  **`pending_overflow` joins the table** and is the second entry no server
+  emits. §5 bounds the pending set *per connection*, in operations and in
+  seconds, and names the layer that attaches a replica to a connection as the
+  one that sets it — which in this product is the browser client and nothing
+  else, because the server refuses a non-ready operation rather than buffering
+  it.
+
+  **The recovery is a catch-up, not a resync, and the difference is the whole
+  point.** The core throws rather than dropping, so when this fires nothing has
+  been discarded: some of the batch applied, the rest did not, and the version
+  vector says precisely what is missing. Asking for it closes the gap, the
+  pending set drains, and the user's unsent work is never involved.
+  `resync_required` remains the only code that destroys unsent work, and
+  widening this one to behave like it would lose typed text to a peer's backlog
+  arriving out of order.
+
+  **The two halves of the bound share one code because they mean one thing:**
+  this replica is missing a dependency that is not going to arrive by itself.
+  The size half catches a flood. The age half catches the quieter failure the
+  size half cannot see — four operations stuck permanently, far below any size
+  bound, leaving the client rendering a document missing them, converging with
+  nobody, and reporting `live` throughout.
+
+  **Age is enforced by the connection layer, not by the core, and that is not a
+  compromise.** §5 already puts the bound at the connection, and a core that
+  read a clock would replay a committed trace differently depending on when it
+  ran — which §9's corpus cannot tolerate. The core exposes which operations are
+  waiting; the client, which already has a timer, records when each was first
+  seen and measures from there. That satisfies §5's rule that age runs from when
+  an operation *entered* the set rather than from the last time the set changed:
+  a cascade releasing part of a backlog removes those entries and leaves the
+  rest with their original timestamps.
+
 - Reconnect with exponential backoff and jitter. On reconnect, send the local
   version vector and receive only the missing operations.
-- Presence (remote cursors) is ephemeral and never persisted.
+- Presence (remote cursors) is ephemeral and never persisted. **Deferred beyond
+  Phase 4**, explicitly: it needs a hub surface that does not exist, §11's Phase
+  4 done-when does not require it, and leaving it implied invites it being
+  half-built as a side effect of the editor. It is its own task when it comes.
 - **Cursors are anchored to `ElementId`, not to integer indices**, with a
   left/right bias for the gap between elements. An integer index is invalidated
   by any concurrent edit earlier in the document, which makes remote cursors
@@ -676,6 +2106,97 @@ not a steady state.
   owns an explicit translation layer between the two, and it is unit-tested with
   astral-plane characters. Deleting an emoji ZWJ sequence removes one code
   point, not the whole visible glyph — this is accepted behaviour, not a bug.
+
+  **The layer lives above the core, not inside it.** §1 makes the core
+  code-points-only and dependency-free; a core that knew about UTF-16 offsets
+  would be a core that knew about the DOM, and the same code has to run in the
+  conformance runner where there is no DOM at all.
+
+### The document API
+
+Everything above assumes a document that exists and a membership that was
+granted. Until Phase 6 nothing in the product created either: both test
+harnesses seeded through `psql`, and the application opened `/d/{id}` for an id
+it had no way to produce. That was a hole *between* criteria rather than a
+deferral — §13.27's subject, and register rows 15 and 16.
+
+A small REST surface, same origin as the client, bearer token in a header:
+
+| Method and path | What it does | Who may |
+|---|---|---|
+| `GET /me` | The caller's own user id and display name | Any authenticated caller |
+| `POST /documents` | Creates a document; the caller becomes its owner | Any authenticated caller |
+| `GET /documents` | The documents the caller can reach, most recently updated first | Any authenticated caller |
+| `GET /documents/{id}` | One document's metadata and the caller's role on it | Anyone with a role on it |
+| `GET /documents/{id}/members` | Who has a role on it | Owner |
+| `PUT /documents/{id}/members/{userId}` | Grants or changes a role | Owner |
+| `DELETE /documents/{id}/members/{userId}` | Revokes a role | Owner |
+| `DELETE /documents/{id}` | Removes the document | Owner |
+
+**Removal is soft, and writing `deleted_at` is not the whole of it.** §11 keeps
+the operation log, so this is the document leaving every place a person can
+reach it rather than the history being destroyed. Every path that *reads the
+document row* has filtered on `deleted_at` since Phase 2 — which is why a
+handler that only wrote the column would look completely correct from this
+table and leave the person who already had the document open typing into it.
+A live connection is checked against the role cache, and so is the sweep that
+would close it, so removal invalidates the cached role for **every member**;
+§13.32, with "the user who never performs the action" being the one who never
+performs a read. `negotiate` is on that side of the line too, so on a stale
+cache even a *fresh* connection to a removed document would still be granted.
+
+**Every membership decision goes through `IDocumentRoles` and
+`IDocumentRoleWriter`**, never through a query of its own against
+`document_members`. A second path to the same table is a second place for §7's
+five-second bound to be right or wrong, and §13.31 is about how invisible the
+wrong one is: the requirement is still met, by the TTL, and every test passes.
+
+**The two listings are the exception, and it is a real one rather than a
+loophole.** A cache keyed on `(document, user)` answers one question at a time
+and cannot produce "every document I can reach", so the listings are their own
+interface (`IDocumentMemberships`) — implemented on the same class, so that
+table still has exactly one place that queries it and the owner-column rule is
+written once, and **deliberately uncached**. A listing is an enumeration rather
+than a decision: nothing is permitted on the strength of appearing in one,
+because opening a document still calls `negotiate` and every operation is
+re-checked after that. And the staleness would run the wrong way — a user
+revoked five seconds ago should not still be shown what they can no longer
+reach — so there is no TTL here to be inside of.
+
+**Status codes follow §7 exactly**, which for this surface means the 404/403
+distinction is load-bearing rather than cosmetic:
+
+- A document the caller has no role on answers **404**, whether or not it
+  exists. This applies to reads and writes alike.
+- A caller with a role that is insufficient — an editor or viewer attempting to
+  manage membership — answers **403**. They can already see the document, so
+  there is nothing to conceal.
+- A soft-deleted document is a 404 to everyone, matching `DocumentRoleReader`,
+  which already refuses to return a role for one.
+
+**Limitation, stated rather than discovered: a role can be granted only to a
+user who has already signed in.** There is no user directory and no invitation
+by email address. The owner grants by user id, which they obtain from a listing
+of members or from the other person — which is what `GET /me` is for, and why it
+is part of this surface rather than a convenience. Without it the grant path has
+an input nothing in the product produces, and that is register row 15's shape a
+second time: found by trying to use the path, not by reading it.
+
+The rejected alternative is invite-by-email, and the reason is that it is a
+feature with its own failure modes, none of which are what this project is
+about. It requires deciding what a pending membership means before the invitee
+ever arrives, whether it expires, whether it is a state the owner can see and
+withdraw, and — the one with real security weight — what happens when that email
+address later belongs to a different OIDC subject. Identity here is the pair
+(issuer, subject) precisely because a subject is unique per issuer and nothing
+else (§6); an email address is not identity, and binding a grant to one would
+make it identity by the back door.
+
+The consequence is that §11's Phase 6 criterion says *grant to a user who has
+signed in* rather than "invite another". The wording matters: a criterion that
+describes a richer feature than the one built is §13.22 in reverse — the
+deliverable is real and the criterion has drifted past it — and the drift is
+discovered by whoever next reads the criterion as a promise.
 
 ### Offline window
 
@@ -687,6 +2208,41 @@ window in the UI.** It must warn as the window nears expiry and must not
 silently accept edits that will be discarded. Accepting an hour of offline work
 and then throwing it away without warning is a data-loss bug, not a limitation.
 
+The client half of this is Phase 4 and the server half is not: nothing sets
+`retired_at` until Phase 7 (§5). So the warning can be built and tested against
+a clock, and **the discard it warns about cannot be observed end to end until
+retirement exists.** That is stated rather than glossed, because a client that
+warns correctly about something that never happens passes every test anyone
+would write for it — §13.15's shape, and §12's rule that a task whose
+verification needs infrastructure that does not exist yet is written, not done.
+
+**What 7.5 found when retirement finally existed: the discard was silent.**
+`SyncController` handled a declined resumption by emptying the outbox and
+reporting nothing, so `problem` stayed null and the user was told nothing — the
+exact data-loss bug the paragraph above forbids, sitting in the code for three
+phases. The test that covered the path asserted only that the queue emptied, and
+its fixture held a single *empty* batch, so a correct implementation and a silent
+one produced identical observations (§13.19). It now reports
+`resync_required` with the count, which is the code §9 already defines for this
+condition and the message the client already had written for it — the
+contract-first decision paying off exactly as intended, in that the sentence
+shown to the user needed no invention when the event finally became possible.
+
+**Note which branch was reachable.** The `resync` recovery in the rejection
+table is reached only by a server-sent `resync_required`, which 7.4 established
+cannot be emitted while the log is intact. So the branch that reported the loss
+correctly was the unreachable one, and the branch that actually ran did not
+report it. Two mechanisms for one condition, and the tests covered the one that
+never fires.
+
+**The seam is its own test.** The client's entire discard is keyed on two fields
+of negotiate's JSON — `resumed` false, `replicaId` changed. Every other test of
+this path asserts against a shape it declared itself: the C# ones through a typed
+record, the TypeScript ones through a fake transport. A rename or a casing change
+on either side leaves all of them green and the discard silently dead in the
+browser, which was confirmed by giving the property a different JSON name and
+watching six retirement tests pass while only the raw-body one failed.
+
 ### Conformance testing
 
 `tests/Conformance/traces/` holds shared JSON traces. Both implementations replay
@@ -697,6 +2253,31 @@ asserts the two files are byte-identical. Any divergence fails the build.
 runner is a vitest suite. Neither invokes the other — coupling the .NET test run
 to a Node toolchain buys nothing and makes each side harder to run alone. The
 comparison is a third step over two artefacts.
+
+**And a second check the corpus cannot make: the two implementations meeting
+over a real socket.** The conformance runner compares two files; it never opens
+a connection, never frames a message, and never exercises the path where one
+implementation's bytes reach the other's decoder. Neither does the .NET suite,
+which drives the server over an in-memory transport with the C# core on both
+ends — an arrangement that agrees with itself by construction.
+
+So the interop suite starts the published API as its own process and connects
+the TypeScript core to it over TCP, with three requirements that are what make
+it worth running:
+
+- **The harness uses the shipped core's own codec.** A second encoder written
+  for the test would check the harness against the server rather than the
+  product against it.
+- **The decisive assertion is on bytes the server produced** — above all the §6
+  snapshot the C# core encodes from state it rebuilt out of Postgres, which the
+  TypeScript core has to decode into an identical normalised document. Two
+  TypeScript replicas agreeing with each other is not interoperability.
+- **Authentication is real, with no bypass added to the product.** §7's rules
+  hold in this configuration too, so the harness generates a certificate and
+  serves OIDC metadata over genuine HTTPS rather than relaxing the requirement
+  that metadata be fetched over TLS. A development bypass is a permanent
+  weakness bought to make a test easier, and it would also make every other
+  assertion in the suite a statement about a configuration nobody deploys.
 
 Because the comparison is byte-for-byte, **both the trace schema and the result
 format are specified here, in full, before either runner is written.** Neither
@@ -757,17 +2338,18 @@ contradicting a cited paper.
 `versionVector` is optional and maps replica id to a decimal-string `Seq` high
 water mark (§6).
 
-#### Normalised result format (v1)
+#### Normalised result format (v2)
 
 Each runner writes exactly this, and the comparison is `diff` over the bytes:
 
 ```jsonc
 {
-  "v": 1,
+  "v": 2,
   "implementation": "csharp",              // or "typescript"; EXCLUDED from comparison
   "results": [
     {
       "name": "rga-backward-interleaving",
+      "snapshot": "4352445401010100…",     // §6 binary snapshot, lowercase hex
       "text": "abx",                        // final text after the last op
       "replicaTexts": {                     // every replica's final text
         "00000000-0000-0000-0000-000000000001": "abx",
@@ -782,6 +2364,22 @@ Each runner writes exactly this, and the comparison is `diff` over the bytes:
 `replicaTexts` is present so convergence is visible in the artefact itself rather
 than asserted only inside a runner: a trace where replicas disagree is a failure
 you can see in the diff.
+
+**`snapshot` is what makes the binary encoding a build requirement rather than a
+local assertion.** Each runner encodes the document per §6 and writes the bytes
+as hex, so two implementations that disagree about the encoding produce different
+artefacts and the comparison fails — exactly as it does for an algorithm
+disagreement. Asserting the round trips separately on each side would prove each
+codec self-consistent and say nothing about whether the two agree.
+
+Before writing that hex, each runner checks both directions locally, because a
+failure there names the document rather than showing up as an opaque hex diff:
+
+- `binary → JSON → binary` is byte-identical.
+- `JSON → binary → JSON` is byte-identical.
+
+Version 1 of this format had no `snapshot` field; it was added when §6 made
+binary the storage and wire form.
 
 Serialisation is pinned, because "byte-identical" is otherwise not well defined
 across two languages:
@@ -818,11 +2416,101 @@ across two languages:
      `----------` and `##########` between `<` and `>`; permitted results are
      `<----------##########>` and `<##########---------->`.
    - A trace pinning `ReplicaId` byte ordering (§5).
+   - A trace exercising the **serialised** round trip: operations encoded to the
+     wire form, decoded, and replayed, on both implementations. This checks the
+     encoding rather than the algorithm, and is what keeps the
+     `Editor.Infrastructure` mapping in step with the TypeScript serialiser (§6).
 2. **Generated traces**, from the property-test generator, so the corpus grows
    with the fuzzer.
 
 Fixed traces come first because a generated corpus only proves the two
 implementations agree with each other, which they would even if both were wrong.
+
+#### Characterising the corpus
+
+**A count is not coverage.** "1,000 traces" is satisfied by one trace generated a
+thousand times, which is why §11's Phase 5 criterion asks instead for the
+corpus's *distribution over named dimensions*, reported, with any dimension at
+zero failing the phase. This is the same defect as "dashboards exist" (§13.22):
+a criterion measuring the artefact's size rather than its reach.
+
+The dimensions are named **here, before the generator is tuned**, and in §5's
+terms rather than the generator's. Naming them afterwards is how a corpus gets
+tuned to satisfy a metric — and adding a dimension in order to make a number
+look better is expressly not allowed; a dimension is added because §5 says
+something about it.
+
+| Dimension | Why it is a dimension |
+|---|---|
+| **Concurrent inserts at one position** | The tie-break §5 defines. Zero of these and the corpus never exercises `ElementId` ordering at all |
+| **Interleaving pressure** — runs of ≥2 inserted concurrently by ≥2 replicas at one position | The property FugueMax exists for (§13.1). A corpus of single-character concurrent inserts cannot distinguish it from RGA |
+| **Backward runs** — a replica prepending, so its run grows right-to-left | §13.6: the replica-count boundary for backward runs was wrong once already, and only a backward case can find that |
+| **Deletion of concurrently-inserted elements** | Tombstones whose neighbours are themselves concurrent, which is where `RightOrigin` handling gets tested rather than assumed |
+| **Causally delayed delivery** — an operation delivered after later ones from the same replica | §5's readiness rule. Without it every trace is effectively in causal order and the pending set is never entered |
+| **Replica count** ≥3 | Two replicas cannot produce the three-way tie-breaks TPDS Fig. 6 is about |
+| **Document scale** | §13.10: the generator explored shape exhaustively and scale not at all. Traces are small by nature, so this dimension is *deliberately* covered by the property tests at 150k rather than by the corpus, and is listed here so that exclusion is a decision rather than an omission |
+
+**Reported, not merely computed.** The corpus manifest states the counts, and
+the runner fails when any dimension listed above is zero. A dimension the corpus
+does not reach is a hole in exactly the way §13.27 describes: invisible from
+inside every individual trace.
+
+#### Generated traces: a seed and a manifest, both committed
+
+Generated traces are **not** committed one file per trace. Committed instead:
+
+- **The seed**, so any run reproduces the identical corpus.
+- **The manifest** — the dimension counts, the generator version, and a digest
+  of the produced corpus.
+
+The reason is reviewability. A thousand committed trace files turn every
+generator change into a thousand-file diff that nobody reads, and a diff nobody
+reads is a review that does not happen; whereas a changed seed or a changed
+manifest is a few lines that say exactly what moved. The digest is what keeps
+this honest: it fails if the generator produces something different from what
+the manifest describes, which is the case where "reproducible from a seed" would
+otherwise be an assumption rather than a check.
+
+**The generator is shared with the core's own property tests** (`Crdt.Simulation`,
+referenced by both `Crdt.Core.Tests` and `Conformance`), rather than duplicated.
+Duplicating it would mean the corpus and the property suite drifting into
+exploring different spaces while both claiming the same coverage, and §13.30 is
+about how invisible that is.
+
+**The failure mode that buys, written down because it is not obvious from the
+digest:** the digest changes when the *produced corpus* changes, and the produced
+corpus changes both when the generator changes and when the core changes. The two
+are indistinguishable in the manifest. A reviewer seeing the digest move cannot
+tell whether the fuzzer was retuned or whether the CRDT now behaves differently —
+those are wildly different reviews — and nothing in the manifest, the seed, or the
+generator version separates them. Only reading the diff does. This is accepted
+rather than fixed, because the alternative is a second generator that drifts; but
+it means a digest change is never self-explanatory, and a commit that moves it
+states in its message which of the two happened.
+
+**A failing generated trace is promoted to a committed file.** Once a specific
+trace has found a defect it stops being a sample and becomes a regression test,
+and it is written out in full with a `rationale` naming what it caught — the
+same requirement every hand-written trace carries.
+
+#### Fuzzing in CI
+
+- **A new seed each run**, printed. A fixed seed is a test, not a fuzzer: it
+  explores one path forever and its greenness after the first week means nothing.
+- **The seed is in the failure output**, and the round trip — take the printed
+  seed, reproduce locally — is exercised deliberately at least once. A recovery
+  path nobody has walked is not a recovery path (§13.13's shape).
+- **A minimum number of traces per run, and falling short FAILS the build.** It
+  does not warn. A fuzzer that gave up early and reported green is the same
+  class of defect as the CI that was not running (§13.20): a check reporting on
+  a thing it did not do.
+- **Blocking, not advisory.** An advisory fuzz job is a guard that cannot fail,
+  which is §13.19 again — it verifies that the job ran, not that the invariants
+  hold. The objection that a blocking fuzzer will be flaky points somewhere
+  useful rather than against this: a flake here is either genuine nondeterminism
+  in the cores or a trace whose expectation the corpus states wrongly, and both
+  are defects worth surfacing. **Any flake is a P0 corpus bug**, not a reason to
+  downgrade the job.
 
 ## 10. Observability
 
@@ -832,7 +2520,54 @@ implementations agree with each other, which they would even if both were wrong.
   latency histogram, active connections, GC reclaimed elements, snapshot age,
   retired replicas, resync-required responses.
 - Traces spanning receive → validate → persist → broadcast.
+
+**The metric list is a list of names that must exist and must move.** "The
+metric exists" is satisfied by a counter registered and never incremented, which
+is §13.15's shape and has been hit twice here already. Each name above needs a
+test that makes it move; a counter whose only states are zero and non-zero needs
+the pair — a case where it moves and a case where it does not — or "non-zero"
+is indistinguishable from "always non-zero".
+
+**The correlation id is per connection, not per request**, and the distinction
+is invisible to any single-request test. It is asserted by following one
+connection across several operations and requiring the same id, and across two
+connections and requiring different ones.
+
+**§13.32 applies to the metric list itself.** A metric keyed on submission
+covers writers and nobody else, so presence, catch-up and §5's acknowledgement
+timer must each be represented — otherwise the dashboards show a document being
+read as a document nobody is using, which is the same blind spot that let one
+viewer hold the stability frontier still for a whole phase.
+
+**Dashboards are judged by a diagnosis, and the diagnosis follows a procedure
+written before the break.** §13.22 rewrote "dashboards exist" into "the
+dashboards alone say which target broke and on which instance", and 7b adds the
+part that makes it a real constraint rather than a gesture. Whoever breaks a
+target and whoever reads the dashboard are, here, the same agent — holding the
+code just changed and the reasoning about where it would show. **A seed makes
+the selection mechanical without making the searcher ignorant of the search
+space**, so two further things are required:
+
+1. **The reading order is written before the break**: given a target violation,
+   which dashboard is consulted first and what each answer rules out. It is then
+   followed mechanically rather than reasoned freshly. If the procedure reaches
+   the right subsystem, the dashboards did the work; departing from it means
+   they did not, and the report says so.
+2. **The seed picks from a list written before any break is implemented, and
+   that list includes breaks expected to be undiagnosable.** A set of only
+   diagnosable failures is a set constructed to pass. The known-invisible entry
+   is what demonstrates the dashboards have edges, and the honest result reads
+   "the seed picked the one I expected to be invisible, and it was."
+
+This remains **weaker than having a second person diagnose it**, and the report
+says so rather than claiming the stronger result.
 - `/health/live` and `/health/ready`; readiness checks Postgres and Redis.
+- **A deployment smoke test asserts a request that reads a row**, never only
+  that a process answers. `/health/live` returning 200 means the process is
+  running, which is what it says and all it should say — and a stack that comes
+  up against an empty schema satisfies it completely (§13.28). The narrowest
+  thing that would break if the deployment were wrong is a query, so that is
+  what the smoke test does.
 
 ## 11. Build phases
 
@@ -844,11 +2579,85 @@ reviewed. At the end of each phase, stop and report.
 | 0 | Repo, solution, Docker Compose, CI, `AGENTS.md` | See below — the original "empty suites" gate had no signal |
 | 1 | `Crdt.Core` **and the TypeScript core**, property tests, conformance runner | All 8 invariants pass 10,000 randomized cases; ≥85% mutation score; transcribed fixed traces match across both implementations |
 | 2 | Postgres schema, op log, snapshots | Integration tests via Testcontainers; crash-during-write test passes |
-| 3 | SignalR hub, auth, causal delivery | Two real clients converge; auth tests pass |
-| 4 | React client wrapping the Phase 1 TS core | Offline edit for 5 min, reconnect, converge |
-| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations; runner fuzzes in CI |
-| 6 | Security hardening | Every requirement in §7 has a passing test |
-| 7 | Scale + observability | Load test hits the §8 targets; dashboards exist |
+| 2.5 | Binary storage and wire encoding; scale in the generator; mutation ratchet | `binary → JSON → binary` byte-identical on both implementations; invariants run at 150k; a score decrease fails CI; both §8 load numbers reported |
+| 3 | SignalR hub, auth, ingest validation | Auth tests pass; every §7 ingest cap has a test proving it rejects |
+| 3b | Wire protocol, causal delivery, scale-out | Protocol settled and measured — wire bytes **and** client bundle size — **before** any throughput number; two real clients converge on §9 normalised state; an instance killed mid-session and clients still converge |
+| 4 | React client wrapping the Phase 1 TS core | Offline edit, reconnect, converge on §9 normalised state — real disconnection, simulated clock for the window arithmetic only; a reload resumes its replica (§7) and its outbox survives; a store written by an unrecognised version is rejected, never best-effort parsed; **and the client exists as a client** — a browser loads the app, authenticates, opens a document and types, with the text visible (§13.22) |
+| 5b | The artefact runs at all | The walk in §13.27 reaches sign-in against `docker compose up` and a `.env`, with nothing seeded and nothing run by hand: the image contains the client, the schema is applied by something, TLS termination is stated, and the smoke test asserts an endpoint that touches Postgres |
+| 5 | Conformance corpus at scale | 1,000 generated traces match across both implementations **and the corpus is characterised** — every dimension §5 names is hit, the distribution over them is reported, and a dimension at zero fails the phase; the runner fuzzes in CI on a **new seed each run**, blocking, with a minimum-traces floor that **fails** the build when unmet |
+| 6 | Documents and membership | Create, grant, list-what-I-can-reach, revoke, sign out — the REST surface `document_members` has been waiting for since Phase 2. Every one re-checks authorization (§7) **through `IDocumentRoles`, so the eager invalidation and not the TTL is what meets the five-second bound** (§13.31), and the walk in §13.27 completes end to end **with nothing seeded by hand**: a new user signs in, makes a document, **grants a role to a second user who has signed in**, and both edit it |
+| 6b | Security hardening | Every requirement in §7 has a passing test **against the application as Compose starts it**, not only against a test host (§13.22); **the §13.19 guard audit is done** — every textual guard has been asked what defeats it without matching its pattern, and each answer is either fixed or recorded |
+| 7 | GC and lifecycle | `retired_at` is set by a background job on `T_retire` inactivity **and the job reports a non-zero count where retirements are expected**; the stability frontier advances **past a retired replica**, asserted as a number that moves; tombstones below the watermark are collected under §5's four rules. **The done-when is transparency, not convergence**: a replica that has GC'd and one that has not produce **identical §9 normalised form for the same trace**. Convergence alone is satisfied by a wrong document — a collected tombstone that is still referenced resolves to nothing and the algorithm is total, so every replica agrees on text that is wrong, silently and unrecoverably. `resync_required` is emitted against §9's stated contract, §9's offline-window discard is verified end to end, a document can be **removed** (row 23), and the walk observes GC's effect on the deployed stack |
+| 9 | **The close-out** | The register's remaining debts are settled or recorded with evidence: rows 36, 37 and 39 closed, rows 31 and 33 done against the deployed stack on CI, and §8's four outstanding decisions each taken with their measurement or escalated with what is needed to take them. **No case remains where the spec says one thing and the shipped product does another.** Presence (row 14) and row 38 are recorded as deliberate omissions in §2 and the register, not left as future phases. The phase report is certified by a preflight run against the commit that contains it (§13.49) |
+| 7b | Scale + observability | Load test hits the §8 targets, **each number reported with the build that produced it** (§8); **a §8 target is deliberately broken and the dashboards alone say which one and on which instance** — existence is not observability (§13.22); `/health/ready` probes Postgres and Redis; the deferred tests of rows 24–27 are written |
+| 8 | Presence | Remote cursors survive concurrent edits: a cursor anchored in text another replica is editing lands where §9's anchoring says it should, and nothing about presence is persisted or replayed |
+
+### The deferred register
+
+Everything this project has knowingly put off, and the phase that owns it. It
+lives here rather than in the entries that created it because a deferral scattered
+across five sections is a deferral nobody can count — and because Phases 6 and 7
+hold almost all of it, which is exactly where the pressure to declare done will
+be highest.
+
+**A row leaves this table when the thing is verified, not when it is written**
+(§12: a task whose verification needs infrastructure that does not exist yet is
+written, not done).
+
+| # | Deferred | Owner | Why it was deferred | Where it is stated |
+|---|---|---|---|---|
+| 1 | `retired_at` actually set by a background job on `T_retire` inactivity | **CLOSED (7.1)** | `ReplicaRetirement`, with a `ReplicaHeartbeat` beside it because the column was written only by `negotiate` and would otherwise have retired a live reader underneath an open socket. Its trigger test — nobody calls the sweep, the clock moves, the counter moves — is what §13.41 was written from | §5, §13.41 |
+| 2 | §9's offline-window discard verified end to end | **CLOSED (7.5)** | And the discard turned out to be silent: `SyncController` emptied the outbox and reported nothing, which is the data-loss bug §9 names, in the code since Phase 4. The branch that reported correctly was the unreachable one. Verified in three places — the server retires and declines, the client discards and reports the count, and the raw negotiate body carries the two fields the client keys on. The browser-level observation is row 31 | §9, §13.19 |
+| 3 | `resync_required` emitted server-side | **CLOSED (7.4)** | Emitted only where the server can say the element existed and was collected, with three corrections to §9's table. Also the task that found the frontier was unclamped, letting one client's acknowledgement decide what GC destroys. The condition itself is unreachable until the log is truncated, which is row 30 — stated rather than dressed up | §5, §9 |
+| 4 | GC of causally stable tombstones, and the watermark that gates it | **7** | Depends on 1: the stability frontier never advances while an abandoned tab counts as live | §5 |
+| 5 | §8's four performance targets — p99 receive→broadcast, p99 keystroke→render, 1,000 connections/instance under 2 GB, 500 ms document load | **MEASURED (7b.4); two missed, one qualified** | Connections passed with a sevenfold margin (285 MiB of 2 GB). Document load passes at p50 (432 ms) and misses at the tail (max 1,917 ms). The two latency targets are missed, and they are one finding seen twice: §6's 50 ms batching window sits inside the segment §8's 25 ms target measures — the two cannot both hold — and inside `SyncController.drain`'s serial send loop, which caps a client below eight characters a second under twenty-editor load, so 54% of a person's typing never left the browser while the UI said `live`. Recorded rather than retuned, per §8. Numbers, provenance and the deliberate breaks are in `docs/phase-8-measurements.md`; the decisions the two misses need are open | §8 |
+| 6 | §10 observability in full: correlation id per connection, the metric list, traces receive→validate→persist→broadcast | **CLOSED (7b.2)** | Every metric §10 names exists and moves under load; the correlation id is per *connection* and a test distinguishes that from per-request by submitting twice on one connection and requiring one id; traces cover receive→validate→persist→broadcast as one activity. **The register row was not updated when the work landed**, and 7b.11 found it stale two tasks later — which is the register's own failure mode and is why the preflight now reads it | §10, §13.40 |
+| 7 | `/health/ready` probing Postgres and Redis | **CLOSED (7b.1)** | Returns unhealthy with the dependency named when either is unreachable, and the endpoint stayed absent until it checked something rather than returning a hardcoded healthy (§12). **Closed late in the register for the same reason as row 6** | §10, §13.40 |
+| 8 | Dashboards that can diagnose a **deliberately broken** §8 target | **EXERCISED (7b.5); both findings acted on, and it detects but still does not localise** | §10's instruments had no exporter at all, so the first half of 7b.5 was building one. The exercise then ran as specified — list and procedure committed before any break existed, the break drawn from that commit's own hash — and **failed to find it**, without departing from the procedure. Two findings, both recorded in `docs/row-8-outcome.md`. First, a chronic miss hijacks the reading order: step 1 routed to "shared cause" because §8's 25 ms target is missed on every submission everywhere (row 5), so the three views where the break was visible were never read — a dashboard whose first discriminator is permanently red has no first discriminator. Second, and worse, **the break was invisible even in the view built for it**: §10's acknowledgement counter sits after the frontier write and counts method completions, not writes, so it read identically on the broken and the control instance while the broken one recorded nothing. A counter adjacent to an effect is not a measurement of the effect — §13.44, with the audit of every §10 instrument against it in `docs/section-10-audit.md`. Both were then fixed and the exercise re-run against the same break: `editor.replicas.silent` now reads **6 of 12 active** and the break is detected, while remaining **identical on both instances**, because one database means a derived reading cannot say which. State-derived readings detect; per-instance counters localise. Step 1 now branches on whether the instances differ rather than on a threshold. Two more of the same family surfaced in the fix — a silent count that was permanently red until windowed, and a scheduled reading that reported the past as the present until its age was reported beside it. The honest limit is unchanged and is not to be upgraded: still weaker than a second person | §11, §13.22, §13.44 |
+| 9 | §13.19's guard audit — what defeats each guard without matching its pattern | **6b** | A distinct piece of work: the answer per guard is specific, and reading the guard is not how it is found. Now covers nine guards, including 4.9's storage sweep and §13.26's production-build marker | §13.19 |
+| 10 | Per-user and per-connection rate limits on submission, backed by Redis | **6b — CLOSED** | Charged in code points through a Redis fixed window; the budget is exhausted on one instance and refused on another, and deleting the counters lifts the refusal, which is what separates a limiter that reads Redis from one that merely writes to it | §7 |
+| 11 | Per-user connection limits (distinct from the per-document replica cap, which exists) | **6b — CLOSED** | A slot per replica in a Redis sorted set, taken at `negotiate` above the resumption branch — beside the replica cap, which is where it belongs by symmetry, every reloaded tab goes uncounted | §7 |
+| 12 | CSP with no `unsafe-inline`, HSTS, `X-Content-Type-Options` | **6b** | Same. Now has somewhere to apply: before 4.10 there was no page to serve | §7 |
+| 13 | Every §7 requirement verified **against the application as Compose starts it** | **6b — CLOSED** | The criterion was rewritten (§13.22); every §7 test used to run against a test host, so a shipped configuration missing a header passed. `security.e2e.test.ts` now runs against the Compose stack in **its own CI job** — folded into the walk's job it could not be required by the preflight's expected-job list, which is this row's own failure mode reappearing inside the mechanism built to prevent it | §11, §13.22 |
+| 14 | Presence — remote cursors, ephemeral, never persisted | **OUT OF SCOPE (9.0)** | Cut at the close-out and moved to §2's non-goals, deliberately rather than by attrition. A feature, against a project whose value is correctness and verification — and the sequencing argues the same way: presence is the highest-frequency message an editor sends, so it would load the broadcast path whose p99 already misses §8's target tenfold, measured against a target §8 contradicts itself about. §11 gave it its own phase because beside the performance targets it would be closed badly to finish a phase; not building it is that concern's honest form | §2, §9 |
+| 15 | Creating a document, and granting membership | **6 — CLOSED** | Both harnesses seed through `psql` because there is no such path. See §13.27 — this is not a deferral, it is a hole nobody had stood in front of | §9, §13.27 |
+| 16 | Listing what you can reach, and revoking access | **6 — CLOSED** | 4.10 opens `/d/{id}` and nothing in the product produces an id | §9, §13.27 |
+| 17 | The Compose stack configured to serve and authenticate the application | **5b** | `docker-compose.yml` sets no `Oidc__ClientId` and no `Spa__RootPath`, so `/config` answers with an empty client id and the app refuses to start a login it cannot finish | §13.27 |
+| 18 | The published image containing a client at all | **5b** | The Dockerfile copies `src/` and the client lives in `client/`. The one artefact this project publishes has no application in it | §13.27 |
+| 19 | Something that applies migrations in a deployment | **5b** | The API deliberately does not migrate at startup and nothing else does either. A fresh stack comes up against an empty database — under a **green** Compose smoke test, because `/health/live` does not touch Postgres | §13.27 |
+| 20 | Where TLS terminates, stated anywhere | **5b** | Compose exposes plaintext 8080. Bearer tokens and connect tickets would cross it in the clear, and §7's HSTS requirement has nowhere to attach | §7, §13.27 |
+| 21 | Signing out, and switching accounts | **6 — CLOSED** | Absent from §7, §9 and the client. Closing the tab drops the in-memory token, but the issuer's session persists, so the next load silently re-authenticates as the same person — on a shared machine that is not a gap, it is a defect | §7, §9, §13.27 |
+| 22 | Rate limiting on the document API | **6b — CLOSED** | A gap in §7 rather than an omission in the implementation: §7's abuse-resistance list spoke only to operation submission and connections, so a `POST /documents` loop was an unbounded write path that nothing in the spec forbade. 6b.0 wrote the rule; 6b.6 applied it to the route group rather than to the three endpoints that write, charged before the handler decides | §7 |
+| 23 | Removing a document | **CLOSED (7.6)** | `DELETE /documents/{id}`, owner only, soft. The finding was that writing `deleted_at` is the half that already worked: removing the cache invalidation turns three tests red — a held connection stays open, the server goes on accepting operations into the removed document, and `negotiate` still grants a brand-new connection to it. The walk's step 10 no longer stops; it removes a document a person made. Its previous assertion, that no `[data-delete-document]` element existed, is worth recording as a near miss: that selector never matched anything either way, so the step would have gone on passing beside a working Remove button under a different name | §9, §13.19, §13.27, §13.32 |
+| 24 | The redaction sentinel driven through the document API | **CLOSED (7b.6)** | The endpoint list is read from the application's own `EndpointDataSource` rather than written by hand — a sentinel is keyed on traffic, so the endpoints nobody drives are exactly the ones that leak, and a written list is a list of what somebody remembered. Twelve routed endpoints are driven with the sentinel in the query, the `Authorization` header, a custom header and the body. Demonstrated by a redactor that skips `/documents` and `/me` alone: the old hub-only sentinel passes and the new test fails, which is this row's gap made visible. Originally found by 6b.2's guard audit | §7, §13.19, §13.36 |
+| 25 | The seeded-documents rule enforced on the C# harness too | **CLOSED (7b.6)** | Two failures, not one. The grep covered `client/src`, which is what this row named — *and* it lived in `client-gates.sh`, which **no CI job calls**, so it fired once per phase in preflight while `EditorApiFactory` added `Document` and `User` rows through the DbContext for two more phases. A rule whose scope is half the repository and whose trigger is once a phase is barely a rule. Now `scripts/check-seeding.sh`, covering both harnesses, with a CI job and a preflight gate of its own; the harness creates documents with `POST /documents`, users with `GET /me`, and deletions with `DELETE`. That last one matters: setting `deleted_at` by hand skipped the cache invalidation §7 requires, which is the half 7.6 found did not work | §12, §13.36, §13.43 |
+| 27 | A largest-legitimate-use test for every configured limit | **CLOSED (7b.7), and it found a defect in the client** | Thirteen limits, one test each, phrased as the action a person takes with numbers taken from the use and never from the configuration. **The defect was not in a configured number.** `DocumentSession.edit()` encoded every operation from one change event into a single batch, so a paste of more than 256 code points went out as one batch of 900, the server refused it as `batch_too_large`, and §9's recovery for that code is `stop` — the first paragraph anyone pasted halted their sync for the rest of the session. Typing produces one operation per change event and never came near the cap, which is why nothing noticed for two phases and why §13.37's own sentence applies exactly: the number that matters belongs to the action the limit is not named after. Headroom for all thirteen is measured in `docs/limit-headroom.md` by `scripts/limit-headroom.sh`, and the measurement corrected §13.37 itself — see §13.45 | §13.37, §13.45, §12 |
+| 26 | §7's PKCE clauses have no unit coverage — only the browser walk | **CLOSED (7b.6), and it found a defect** | `oidc-client-ts` defaults its state store to **`localStorage`**, and `pkce.ts` documented `sessionStorage` — with a reason for it — while shipping `localStorage` for two phases, because nothing asserted which was in use. `localStorage` survives the browser closing and is shared by every tab on the origin, so an abandoned sign-in left a live PKCE code verifier there until some later sign-in swept it. Now set explicitly and asserted. The challenge comparison is deliberately not circular: the expected value is computed by an implementation written in the test file, and *that* implementation is checked against RFC 7636 Appendix B's published pair — library → test → RFC, with no step comparing something to itself. Originally found by building 6b.7's requirement map, which is what the map is for | §7, §12 |
+| 28 | §6's periodic snapshot is never taken | **CLOSED (7b.3)** | Installed as a background sweep, and installing it changed the predicate: "did this batch step over a multiple of N" is the right question for a caller that sees every batch and the wrong one for a sweep that sees documents, so `IsDue` now asks how far the log has run past the latest snapshot — which is also the self-healing form, since a crossing missed to a restart left a document unsnapshotted for another N operations. Unblocks §10's snapshot-age gauge, absent until now for this row's reason. Originally found in 7.3 while sabotaging the collector's snapshot write — the sabotage was not caught, because the conflict it would cause could not arise. `SnapshotPolicy` and `DocumentStore.SaveSnapshotAsync` were implemented and correct, and nothing in `src/` called either: every document was rebuilt by full replay of its log, and the collector's write was the only snapshot the product stored. §13.40 at the scale of a subsystem. Deferred to 7b rather than fixed in 7 because installing it changes the load characteristics §8 is measured against, and the measurement is 7b's | §6, §8, §13.40 |
+| 29 | GC reclaims nothing from a mid-document deletion | **CLOSED (7b.8) — decided on measurement, and the measurement inverted the question** | Confirmed at scale first: mid-document deletion collects *zero*, not less — 0 of 17, 0 of 26, 0 of 114 across every realistic edit shape. Then the open question, whether a placeholder's payload can be dropped while its position is kept, came back the opposite way round from the intuition it was asked with. **Removing a placeholder entirely would make the snapshot bigger** on two of five shapes: §6 encodes contiguous elements as a run with one header and one concatenated string, so a placeholder inside a run costs its character and nothing else, and taking it out splits the run and pays for a second header. The position is nearly free; the payload is the whole cost, at 8–16% of snapshot bytes. Decision: **not now** — sound, but a coordinated §6 change across two codecs, the conformance corpus and §9's byte-identical rule, to take 8–16% off a snapshot already costing 1.2 bytes an element. Reversal condition and numbers in `docs/gc-reclamation.md`; the number worth attacking is row 38 instead | §5, §6, §13.37, §13.46 |
+| 30 | `resync_required` has no reachable path until the log is truncated | **CLOSED (7b.8)** | `LogTruncator` removes the rows behind a collected snapshot, and the end-to-end test reaches the state through the product — type, delete a trailing run, close the tab, retire, collect, truncate — with nothing constructing a frontier. **What it removes is not a prefix, and that was found before it was built.** §5 resolves a reference by asking whether the id is in `document_ops`, which is sound only while the log is the whole truth; delete a prefix and a live element visible on every screen has no row, and the classifier answers `resync_required` — telling that client to destroy unsent work. Predicted, then demonstrated, and `LogTruncationHazardTests` keeps the demonstration. So the rows removed are exactly those whose elements the snapshot no longer holds, derived as a difference rather than recorded by the collector (§13.44). Delete rows are kept so §9's 'that id names a delete' narrowing survives | §5, §9, §13.19, §13.44 |
+| 31 | The offline-window discard, observed in a browser | **CLOSED (9.6)** | 7.5 verified it in three places that need no Docker — the server retires and declines, the client discards and reports, the negotiate body carries the two fields — and none of them shows a person losing work and being told, which is the claim §9 makes. It is also where the discard was found to be *silent*: the reporting branch was unreachable and had been since Phase 4. Now a browser types, loses its link, keeps typing, returns past `T_retire` and reads §9's sentence with the count off the screen, against `docker compose up` with its own stack — `T_retire` is seven days and a browser cannot be left open that long, and a stack that retired in seconds would retire the walk's own tabs between its steps. Five CI iterations of ten budgeted; the predictions and the score are in `docs/row-31-predictions.md` and `docs/row-31-outcome.md`. Four of six predictions were wrong and the one I was least sure of was fine. Two findings fell out: the harness waited only on a probe §7 says checks nothing (§13.23), and the suite's own vacuity guard could never pass (§13.59) | §9, §12, §13.19, §13.23, §13.27, §13.51, §13.59 |
+| 32 | §5's acknowledgement piggybacked on submission | **CLOSED (7b.3)** | The saving is real only if the timer stops repeating what a submission already said, and the obvious way to arrange that — a flag meaning "a submission happened since the last tick" — is a race: whether the drain's microtask ran before the tick would decide whether a message went out. The client compares what it last reported instead, so whichever path reports first, the other finds nothing new to say. Originally: the second of §5's three report paths, still absent after 7.7 built the third. It needs a field on `OperationBatchMessage`, which is a wire change on the hot path and §13.13a's territory, and the timer already makes the frontier advance — so this is a message saved per submission rather than a correctness gap. Worth doing where the wire is being measured anyway | §5, §13.13a |
+| 33 | A walk step observing GC's effect on the deployed stack | **CLOSED (9.7)** | Not blocked by row 6 and not by Docker (§13.51). The real constraint stands and was respected: §10's counters are on an admin port the proxy deliberately does not forward, and publishing it for a test would undo a §7 control in the shipped artefact. So the suite observes what a client sees, which 7b.10 identified — a first-open client answered with a delta while the log is whole, and with a snapshot once collection and truncation have removed it. Both halves are asserted, because either alone passes against a server that always answers the same way, and the text is compared across the transition because a snapshot of damaged state would satisfy everything else. Four CI iterations of ten; `docs/row-33-predictions.md` and `docs/row-33-outcome.md`. The failure that cost three of them was §13.58: the test tombstoned the head of a chain, where §5's second condition forbids collecting anything, so a correct collector looked broken — **register row 38 arriving from the other side** | §5, §7, §10, §13.19, §13.27, §13.48, §13.51, §13.58 |
+| 35 | `editor.operations.applied` is a counter beside the log append, and the state-derived reading that would replace it is too expensive | **8** | §13.44's audit closed every other derivable instrument in §10 and left this one, which is the most important of them: it is the question *were the operations actually written* for ingest, the same question `editor.replicas.silent` now answers for the frontier. `count(*)` over `document_ops` is a sequential scan on the largest table in the schema, and a gauge costing a table scan every thirty seconds is a gauge somebody turns off. The cheap approximations are an estimate the planner may not have refreshed (`pg_class.reltuples`) or a sum over every document (`max(server_seq)`), and choosing between them is a design decision rather than a line of SQL. `editor.gc.elements_collected` sits behind it for the same reason, needing a per-document comparison rather than an aggregate | §10, §13.44 |
+| 34 | Audit the convergence tests for §13.42's shape | **CLOSED (7b.9), and the scoping lead was wrong** | `ScaleOutTests`' rejoin case does *not* adopt a snapshot — an empty version vector asks for everything, which is eleven operations, well under `MaxDeltaOperations`, so catch-up answers with a delta and the rejoining replica places every operation itself. Probed directly: `caught.Snapshot` is null. The file named as the worst case is one of the better ones. What the audit found instead is structural and larger: **a convergence assertion is invariant under any consistent ordering rule**, so none of the twenty-five two-party comparisons can detect a placement bug (§13.47). Inverting the sibling tie-break turns red 3 of 77 in `Crdt.Core.Tests`, 2 of 14 in `Conformance`, 1 of 393 in `Editor.Api.Tests` and **0 of 213** in the default client suite — every detection a comparison against a committed value. Repaired: `client/src/crdt/elementId.test.ts`, which TypeScript never had while `AGENTS.md` calls the comparator load-bearing *because* TypeScript has no `Guid`. `scripts/placement-probe.sh` makes it re-runnable; `docs/convergence-audit.md` names the property each file's comparison actually guards | §13.42, §13.47, §13.19 |
+| 36 | §5's per-connection pending-set bound is never set by the product | **CLOSED (9.2), and the bound had two halves, of which nobody had implemented either** | Found by row 27 asking what the largest legitimate use of the bound is. Both cores default `MaxPending` to unbounded, deliberately and with a written reason — a replica is not a connection — and both say *whoever attaches a replica to a network connection sets this*. Nobody did, for nine phases, while both cores carried a complete test of the mechanism that set the bound itself first (§13.54). Fixed in `DocumentSession`, at **10,000** operations: §13.37's largest legitimate use is one peer's offline afternoon at 2,000 (row 27's `BURST`) and the realistic worst case is five peers reconnecting at once. Installed at all three places a replica enters a session — the constructor, `restore` and `adopt` — because the last two are the paths that follow a reload and a snapshot catch-up, which is when a backlog is largest. **The second half was found while fixing the first:** §5 bounds the set *in operations and in seconds*, and the age bound existed nowhere in either core. It is enforced at the connection layer, keyed on element identity so a cascade cannot restart the clock, with the core kept clock-free so §9's corpus still replays deterministically. Recovery is §9's new `pending_overflow`: catch up by version vector, never touch the outbox, once per stuck operation | §5, §9, §13.37, §13.54 |
+| 37 | `PeriodicSnapshotTests` depends on what other tests left in the shared database | **CLOSED (9.3)** | `SnapshotSweeper` ranks laggards **globally** and sweeps a bounded batch, so a test asserting that *its* document was swept was asserting that no other test had left `BatchSize` documents further behind. The repair is the one the row proposed: the two claims are separated rather than the batch widened. The hosted timer's test now asserts only what does not depend on ranking — that it ticked and wrote *something*, which is §13.41's claim and the reason that test exists — and whether a given document reaches head is asserted through `SnapshotDocumentAsync`, where no batch is involved. The `BatchSize = 64` override is gone, so these tests run against the product's own default; widening it was tuning a control until the red went away (§13.37). **The condition is now constructed rather than waited for**: a test fills the default batch with seventeen documents each further behind than its own and requires the claim to hold anyway, which is exactly the shape that failed in 7b.7 and then passed on a re-run | §8, §13.31, §13.37, §12 |
+| 38 | An interior placeholder is never collected, and the fraction grows without bound | **MEASURED (7b.8) — left as a measurement by decision, not fixed** | 114 of 1220 elements in a normally edited document are tombstones rule 2 can never collect, and nothing in §5 bounds that fraction as a document ages. Row 29's measurement was asked about payloads and answered about positions: a placeholder costs about one byte, so this is a §5 correctness question about whether one can be spliced out by rewiring its child's parent while preserving Definition 4 for a concurrent insert naming it as a right origin — **not** to be attempted by relaxing rule 2, which 7.3 settled. Left deliberately at the close-out: it may not be resolvable, and starting without finishing would be worse than the measured, explained state it is in. **Reversal condition:** take it if §5's collection rules are reopened for another reason, or if a document's tombstone fraction is observed causing a real load problem. Numbers in `docs/gc-reclamation.md` | §5, §8, §13.46 |
+| 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
+| 40 | Row 31's offline-window suite is intermittent | **CLOSED (9.9), after the explanation and the repair were each wrong once** | **Named twice by the instrumentation.** `bdbf784`: `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for the host's network configuration changing under an in-flight request; the same job passed in one run of that commit and failed in another. `7be8c7a`, after a repair scoped to the sign-in prologue: `POST /documents`, four requests later, with the five preceding requests answered 200 and nginx logging 499. **The first explanation was falsified by the second sighting** — it blamed the stack starting, and the stack had been serving for a second. What survives: both failures land within the first two seconds of the browser's first navigation, the API answers either side of each, and `startWalk` launches the browser only after both health probes, so the stack's network is not being created under a running browser. Why a runner's network changes there is not visible from here, and the record stops there. **The repair was scoped to the evidence, not to a boundary** (§13.65), and is now the whole arrangement — everything before `setOffline` — rebuilt at most three times on a fresh context, on exactly that `errorText`. Nothing after `setOffline` retries for any reason. **Closed on the repair being exercised, not on a green run.** `01db35b` was green in all four runs and the rebuild never fired, which proves the fault absent rather than the repair working. The decision lives in `client/src/offline/networkChange.ts`, the default suite drives it through nine cases, and three sabotages confirmed each guard fails on its own. `docs/row-40-outcome.md` | §9, §12, §13.23, §13.29, §13.52, §13.55, §13.64, §13.65, §13.66 |
+| 41 | A transient failure during `bootstrap` is a dead end | **9** | Found while explaining row 40, not looked for. `bootstrap` wraps sign-in, the token exchange, `GET /me` and the document open in one `try` and returns `{ kind: 'failed', message }`; the composed app renders the message and offers nothing else, so a connection that blips for one request leaves the user on a dead page with the API healthy behind it. Row 40's CI log is the evidence: `Failed to fetch`, unchanged for sixty seconds, while the stack served. **Deliberately not fixed in the close-out** — a retry in the bootstrap sequence has its own failure modes (looping on a genuine 401, re-entering the PKCE exchange on reload) and deserves a test that distinguishes them, not a patch on the last day. Closes when a transient failure at any step of `bootstrap` is recoverable without the user knowing to reload, and a test drives that from the browser | §7, §9, §13.64 |
+
+**Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
+cold start with nothing seeded. None of them was deferred; each was a step
+nobody had tried to take. Rows 17–20 are about the deployment artefact rather
+than the code, and they are grouped as **Phase 5b** because they share a failure
+mode — the thing that ships is not the thing that was tested — and because
+until they are done the answer to "does this work?" is "no test can tell you".
+
+Row 14 is the one deferral here with a reason and, until now, no destination. A
+phase with no owner is not scheduled, and §13.22 is what happens to work nothing
+is committed to doing.
 
 **Phase 0 done when:** CI is green on a clean clone, and that run has
 (a) built every project with warnings-as-errors, (b) run at least one real
@@ -859,6 +2668,22 @@ and (f) run a secret scan.
 
 An empty test suite passing proves nothing, and `vitest` exits non-zero with no
 test files unless told otherwise.
+
+**Phase 2.5 exists because the hub and the codec must not change together.**
+Phase 2's measurement moved the storage and wire form to binary (§6, §13.9), and
+the wire form is an input to Phase 3's hub. Doing both in one phase means a red
+convergence test cannot say which of the two moved. The scale dimension and the
+mutation ratchet ride along because Phase 3's fan-out is where the
+correct-at-test-size, fatal-at-real-size class recurs, so the instrument has to
+exist before the phase that needs it.
+
+**Phase 3 is split by failure mode, not by size.** In Phase 3 a failing test
+means a security property is absent — that is the only thing it can mean. In
+Phase 3b a failing test might mean the property is absent, or the test is wrong,
+or a timing assumption slipped. Those want different reviewer attention, and
+reviewing them together means the security tests get skimmed on the way to the
+concurrency work. Run expansion sits in Phase 3 because it is ingest-path
+validation, and because 3b needs it working.
 
 **Phase 1 builds both cores together.** The TypeScript replica was originally
 written in Phase 4 and first compared against C# in Phase 5, which meant
@@ -888,6 +2713,464 @@ core in React rather than writing a second one.
   you believe a test is wrong, argue for changing this spec first.
 - **Say when you are unsure.** Distributed systems bugs hide in the cases where
   the implementer felt "this probably works." Flag those explicitly.
+
+### Sabotage the checks, on a schedule
+
+**Every check that exists to catch divergence gets deliberately broken on one
+side, periodically, to confirm it fires.** Not as a habit someone remembers — as
+a standing practice with a record of when it was last done.
+
+This has been performed twice and found something both times. In Phase 0 the
+architecture test that proves `Crdt.Core` references nothing outside the BCL was
+sabotaged by adding a forbidden reference, and it turned out the reflection check
+missed a *declared* reference the compiler had elided; both halves exist now
+because of it. In Phase 2.5 the cross-implementation binary comparison was
+sabotaged by dropping a run-encoding guard, the comparison did **not** fire, and
+investigating why produced a real bug in §6 that both codecs had implemented
+identically (§13.11).
+
+A green check is evidence about the code only if the check can go red. That is
+not a property anyone can read off the source; it has to be demonstrated. When
+sabotage does *not* produce a failure, the finding is not "the check is broken" —
+it is "the corpus does not reach this shape", and that is the more useful of the
+two answers.
+
+**The practice applies to a new test as much as to an established check**, and
+that is where it pays most often. Phase 3 ran sixteen sabotages; fifteen
+confirmed a check and one caught a *test* — a shutdown-race test written against
+the wrong path, which passed whether or not the code was correct and would have
+sat in the suite forever counted as coverage of a race it never touched. Right
+subject, wrong path is the most common way a test passes for no reason, and no
+amount of reading finds it: a test asserting something true either way looks
+exactly like a test asserting something true because the code is right.
+Coverage that would be relied on is worse than none.
+
+So: **a test written for a specific defect is not finished until the fix has
+been removed and the test has been seen to fail.**
+
+**A sabotage run reports on whatever was built, not on whatever is on disk.**
+Restore the file and rebuild before believing the next result — and restore it
+in a way the build system can see. The 3b.6 harness restored with `mv`, which
+preserves the backup's modification time; the restored source was therefore
+*older* than the artefacts compiled from the sabotaged version, so MSBuild
+skipped the recompile and every following run silently executed the previous
+sabotage. See §13.17: the direction that matters is not the one that showed up.
+
+**Where two mechanisms satisfy one requirement, sabotage the stronger one and
+require the fast assertion to fail** (§13.31). Breaking the requirement outright
+is caught by anything; the sabotage worth running is the one that leaves the
+requirement satisfied by the weaker path, because that is the state a real
+mistake produces — an endpoint wired to the undecorated writer, revocation still
+landing inside five seconds, and nothing red.
+
+**When a sabotage survives, the first hypothesis is that the test does not reach
+the code — not that the code is unreachable.** 4.8's end-to-end test stayed green
+with the reconnect catch-up removed entirely, which reads at first like a claim
+about the code: perhaps catch-up is redundant when broadcast covers the same
+ground. It was a claim about the setup. The author had nothing to catch up on,
+because nobody had written anything while it was away, so convergence held for a
+reason unrelated to the mechanism. Giving the other client an edit to make during
+the outage — reaching the author only by catch-up, since broadcast went to a group
+it had left — made the same sabotage fail.
+
+**Sabotage from a committed tree.** A sabotage is applied and then reverted, and
+in 6b.4 the revert was `git checkout` on a file whose rate-limit wiring had not
+been committed yet — which destroyed it, silently, in the middle of a run whose
+whole purpose was to make a test go red. Reconstruction was possible only because
+the diff happened to be in the session transcript. The practice writes to the
+working tree by design, so the working tree is exactly what must not hold the
+only copy of anything: commit first, or copy the file aside and restore from the
+copy. This is the second time a sabotage run has been wrong about *what was on
+disk* rather than about the code (§13.17's stale-build case is the first).
+
+**It happened again in 7.4, to the same rule, written down.** Two source files
+carried that task's whole implementation uncommitted; three sabotages were
+applied and reverted with `git checkout`, and the revert took the implementation
+with it. The tell was three sabotages producing *identical* failure lists — a
+sabotage that changes one comparison cannot break the same three tests as one
+that removes a clamp in a different file, and that mismatch is what exposed it
+rather than anything in the output saying so. Knowing the rule was not enough;
+what would have worked is mechanical, in §13.40's sense: **commit before the
+first sabotage, not before the first revert.** The temptation is to sabotage as
+soon as the tests are green, because that is the moment the question arises, and
+the commit feels like it belongs after the answer.
+
+Watch for the signature. **When two different sabotages fail the same set of
+tests, doubt the tree before doubting the tests.**
+
+**And the same order applies to a failing gate.** 7.7's preflight failed on
+`tests`, `interop` and `e2e`, and the first explanation reached for was that this
+environment has no Docker daemon — an explanation that required nothing of
+anybody and happened to be false. All three refuse without
+`EDITOR_TEST_POSTGRES` and `EDITOR_TEST_REDIS`, which that shell did not have;
+with them, every gate is green. `e2e` drives the pre-installed Chromium against
+an API it starts as a process, and the Docker lines in its log are
+Testcontainers falling back to the local services and passing. **A failure is
+evidence about the invocation before it is evidence about the code, and an
+environment-limitation story is the most comfortable wrong answer available** —
+the same preference for "the test does not reach it" over "the code is
+redundant" that this section already argues for, one layer out.
+
+This is the Phase 3 shutdown-race test again (right subject, wrong path), and it
+is now twice. The order matters because the two hypotheses lead opposite ways:
+"the code is redundant" invites deleting the mechanism, and "the test does not
+reach it" invites fixing the test. Prefer the second until the setup has been
+shown to exercise the path — a surviving sabotage is evidence about the test
+first and about the code only after that.
+
+### Three questions to ask of every mechanism
+
+Both come from patterns that have now recurred often enough to stop being
+observations and become things to check for. Ask them while proposing the work,
+beside the vacuity risk.
+
+**1. For any mechanism keyed on an action: who is the legitimate user that
+never performs it?** (§13.32.) Phrased to have an answer rather than to prompt
+thinking — every occurrence so far has been a specific person doing something
+ordinary: three viewers who only read, and a tab that reloaded. Any mechanism keyed on
+an action — a check on submission, a signal derived from writing, a limit
+charged at connect — covers only the principals who take that action. Name the
+principal who does not, and decide deliberately whether they are covered. Four
+occurrences, each found later and more expensively than this question would
+have cost:
+
+| Occurrence | The action | Who doesn't take it | What it cost |
+|---|---|---|---|
+| 6.4 | submitting an operation | a viewer, who only reads | a revoked reader kept receiving every broadcast |
+| 6b.5 | opening a fresh connection | a tab that reloads and resumes | every reloaded tab uncounted against §7's cap |
+| 7.1 | connecting | someone who stays connected and reads | a live replica retired underneath an open socket, advancing the frontier past state it holds |
+| 7.2 | catching up, or submitting | a viewer, again | one person reading holds the stability frontier still, and GC reclaims nothing |
+
+The fourth is the one that graduated this from a recorded pattern to a
+checklist item: it was *predicted* from the pattern before the code existed,
+found exactly where predicted, and the sabotage confirmed only the viewer's
+test could see it. A pattern that predicts is a pattern worth asking about
+every time.
+
+**2. Does anything invoke this, or only the test?** (§13.41.) For anything
+driven by a timer, a hosted service, or a background sweep, at least one test
+must exercise it with **nobody calling it**: arrange the state, move the clock,
+and require the mechanism's own counter to move on its own.
+
+**4. Does this start when the host starts, or when someone first asks?**
+(§13.44.) For anything with a lifecycle — a listener, a subscription, a cache, a
+reader, a background sweep — a component constructed lazily by its first caller
+observes nothing that happened before that call. 7b.5's metric listener
+subscribed when the DI container first resolved it, which was the first scrape,
+so every counter recorded before anyone looked read zero: the dashboards were
+blank in a service nobody scrapes until something is already wrong.
+
+The test written to guard exactly that passed, because it resolved the component
+from the container and *then* generated the traffic — which started the listener
+as a side effect. **That is question 2 nested inside a test written for
+question 2**: the test invoked the mechanism and so proved the mechanism works,
+not that anything invokes it. The check is mechanical: for any such component,
+does a test exercise it **without resolving it first**, and does the startup path
+construct it rather than the request path?
+
+**5. Does the party that must respect this limit know what it is?** (§13.37,
+§13.45.) For any cap the server enforces on something a *client* constructs — a
+batch size, a run length, a message size, a page size — the client is the only
+party that can build a conforming request, and it can only do that if the number
+is on its side of the wire. 7b.7 found `DocumentSession` encoding every
+operation from one change event into a single batch: typing produced one
+operation at a time and never came near the cap, pasting produced as many as the
+clipboard held, and a paste of more than 256 code points was refused with a code
+whose recovery is `stop`. Two phases of green tests, because every test that
+existed typed.
+
+The check is mechanical and it is not "is the limit tested": the limit's own
+tests were correct and passed throughout. It is **does a constant on the client
+side name this cap, and does something assert that the client's largest output
+respects it** — a question with an answer you can grep for. Where the answer is
+no, the limit is enforced against a client that cannot comply, which is an
+outage for whoever performs the action the limit was not named after.
+
+**3. In this comparison, does each side decide for itself?** (§13.42.) For any
+test that asserts two things agree — two implementations, two replicas, two
+encodings of the same state — check that neither side's answer was copied,
+adopted, or delivered from the other. 7.3's transparency test composed its
+continuation on the collected replica and handed the result to the control,
+which made agreement true by construction: it passed with the rule it existed to
+protect deleted from the code. The repair is to ask what the mechanism is *for*
+and make both sides exercise it independently.
+
+### Name the vacuity risk before writing the test
+
+**Every task in a phase breakdown states how its test could pass meaninglessly,
+written before the test exists.** Not after, and not as a review step — as part
+of proposing the work.
+
+### What the apparatus is worth, in numbers
+
+The vacuity statements, the sabotage runs, the guard audits, the probes and the
+gates cost a large fraction of this project's effort, and the case for them is
+not that they feel rigorous. It is Phase 7b, which was a backlog phase — every
+task a debt written down in an earlier phase, with no new feature and therefore
+the least surprising work available:
+
+> **Nine defects. Six of them in code that already existed and passed its tests.
+> Three in work written earlier in the same phase. Five of the nine were found
+> by sabotage or by a probe — not by writing the test, and not by running it.**
+
+Each clause is a separate argument.
+
+**Six in code that already passed its tests** is the case for the audits and the
+probes. Those tests were not bad; they were green, and the code was wrong
+anyway, so the only thing that could have found the defects was a question asked
+about the tests rather than another test.
+
+**Three in work written earlier in the same phase** is the case against trusting
+freshly-written code more than old code. Two of those three were in the task
+immediately before the one that found them, written with full attention by
+someone who had just reasoned carefully about the design.
+
+**Five of nine by sabotage or probe** is the case for the cost. A test written
+to check a property and a test that cannot check it look identical in a green
+run. Sabotage is the routine step that distinguishes them, and on this evidence
+it is not a supplement to writing tests — it is the majority of the yield.
+
+The ratio is recorded here rather than only in `docs/phase-7b-report.md` because
+a phase report is read once. This is the number to return to when the apparatus
+looks like overhead.
+
+Sabotage catches a vacuous check afterwards, by breaking the code and watching
+nothing happen. That works and it is why sabotage is a standing practice, but it
+only fires on checks someone thought to sabotage, and it costs a full cycle each
+time. Naming the risk up front is the same question asked earlier and cheaper:
+*what would make this test pass whether or not the code is right?*
+
+The Phase 3b breakdown was the first written this way and it paid immediately.
+The wire-protocol task's stated risk was "measuring `byte[]` length rather than
+the framed message" — which would have shown two protocols as identical, because
+the base64 inflation being measured lives in the frame and not in the payload.
+That measurement would have looked correct, produced a plausible number, and
+decided the protocol wrongly. Nothing about the resulting code would have looked
+wrong afterwards.
+
+**The required fields are checked, not remembered (7b.0).** `docs/breakdown-template.md`
+defines them and `scripts/check-breakdown.sh` enforces them from the preflight
+and from CI: every task section must carry *Done when*, *Vacuity risk*, and
+§12's three questions, and "Not applicable" must be followed by a reason,
+because an unexplained n/a is a required field decaying into a box to tick.
+**A breakdown missing a field is malformed and fails; it is not merely
+incomplete, which is a thing nobody notices.**
+
+§13.43 is why this is a gate. The vacuity-risk statement had been honoured by
+hand since Phase 3b and the three questions since Phase 7, and both were exactly
+the things predicted to go first when a phase ran long. The prediction was
+confirmed immediately and at the author's own expense: run against the Phase 7b
+breakdown — written one message earlier, by someone with the three questions
+explicitly in mind — the new checker reported **42 missing fields across 12
+tasks.** The questions had been answered where they felt relevant and silently
+omitted everywhere else, which is precisely the failure mode, and no amount of
+intending to do better would have surfaced it.
+
+The gate self-tests. A deliberately malformed fixture lives at
+`tests/fixtures/breakdown/malformed-breakdown.md`, the no-argument run checks
+that the fixture is *rejected*, and a checker that stopped rejecting fails
+rather than going quiet — §13.19 one level up from the tests it polices.
+
+A second thing this format surfaces: **a task whose verification needs
+infrastructure that does not exist yet is written, not done.** The breakdown says
+so, and the task stays open until the later task closes it, rather than being
+marked complete on the strength of a suite that cannot fail.
+
+3b.2 is the worked example and it paid. Its broadcast tests could not distinguish
+per-instance fan-out from a working backplane, so they were held open until
+3b.7's two-instance test existed — and the fan-out really was per-instance. A
+client connected to another server received nothing. Sabotaging the publish
+fails four of 3b.7's five tests and would have failed none of 3b.2's. Marked
+done in isolation, that ships covered by green tests until Phase 7's load
+testing puts two instances behind one load balancer.
+
+### Verify a deployment from outside it
+
+**Phase 5b's rule, stated phase-wide rather than per task, because a per-task
+rule erodes at the fourth task when one check is awkward: nothing in 5b is
+verified by anything running outside the Compose stack.** Where a test needs to
+reach in, it reaches in over the network at the published port, as a client
+would.
+
+The reason is the phase's whole subject. Every check in 5b is a check *about a
+deployment*, and for every one of them the cheapest way to pass is to assert it
+from the test host — where the schema was applied by a harness, the client was
+built by a script, and the ports are whatever the developer opened. That is not
+a hypothetical shortcut; it is precisely how eleven phases of green accumulated
+over an artefact that could not start (§13.28).
+
+The rule generalises past this phase: **a property of the deployed system is
+only tested by something that treats the deployment as opaque.** A test with
+privileged access to the inside of the thing it is verifying is testing its own
+access.
+
+**And it was broken three commits after it was written.** 5b.4 gave the proxy a
+container healthcheck that fetched the API through the proxy from inside the
+proxy — the exact thing this rule forbids, added by the person who had just
+written the rule, and caught by the walk rather than by remembering. Recorded
+because the interval is the interesting number: **a rule you wrote yourself is
+not self-enforcing, and three commits was enough to forget it.** Rules live in
+the checks that run, not in the memory of whoever wrote them; that is the whole
+argument for §12 being a set of scripts and gates rather than a list of
+intentions.
+
+### A guard runs on a schedule something else keeps
+
+**A check whose invocation is a judgement call is a check that is skipped exactly
+when it matters.** Attach every guard to something that happens anyway.
+
+§12's phase preflight was built after Phase 2.5's six silent red pushes, for
+precisely the failure that then recurred across seven tasks of Phase 3b
+(§13.20). The tool was not missing. Running it was left to discretion, and
+discretion said "the local suite is green" seven times.
+
+So the fix for that class is never a stronger intention. `check-workflows.sh`
+detects the specific defect, but the reason it will keep working is where it
+sits: first among the preflight's local gates, and the preflight runs at every
+task boundary rather than at the phase report. The same shape applies to any
+guard added later — bind it to the commit, the gate, or the build, not to
+someone remembering it is relevant.
+
+### Hand-written fixtures for every canonical form
+
+**Wherever this specification defines a canonical form, the suite carries
+hand-written documents the specification says are VALID that neither
+implementation generates.**
+
+Round-trip testing defines codec correctness as encoder-decoder agreement, which
+is circular: an encoder that never emits a legal shape and a decoder that rejects
+it agree perfectly and are both wrong. The property that actually matters is that
+**a decoder accepts every document the format admits**, and only a fixture
+written by hand from the specification can test it — by construction, the encoder
+cannot produce the cases that would expose the gap.
+
+The refusal fixtures are the mirror of this and are not a substitute: they prove
+a decoder rejects what the format forbids. Both directions are needed, and only
+the acceptance direction is circular without hand-written input.
+
+### No harness reaches past the product to create its fixtures
+
+Register rows 15 and 16 were one habit: every harness seeded documents and
+memberships with `INSERT` statements piped to `psql`, because nothing in the
+product could make either. Eleven phases of a green suite never noticed, and the
+walk stopped at sign-in for the same reason (§13.27).
+
+The rule, and it is checkable by grep rather than by judgement: **if
+`harness.ts` still contains an `INSERT INTO documents`, this phase is not done,
+whatever the endpoint tests say.** `scripts/client-gates.sh` runs that grep over
+every harness and fails the build on a raw insert into `documents`,
+`document_members` or `users`. A criterion checkable by grep beats one requiring
+judgement, because judgement at the end of a long phase is what produced those
+rows in the first place: one `INSERT` "just for this test" is easy to add and
+impossible to see later.
+
+Two things this immediately taught. The gate is written where the offending
+string cannot appear — the sentence above lives here rather than in the harness,
+because spelled out there in full it would *be* the string the grep looks for,
+and the comment explaining the guard would defeat it (§13.19, in miniature).
+And enforcing it turned up a second missing path: a grant names a user id, so an
+invitee needs to be able to read their own, and nothing in the product produced
+one until `GET /me` existed. A harness that keeps reaching into the database
+never discovers that, which is the whole argument for the rule.
+
+### Why Phase 7 is split, and why this split is different
+
+3b and 6b were **discovered**. Phase 3 turned out to contain a wire protocol
+nobody had scoped, and Phase 6 turned out to contain the hardening §7 had
+described for five phases; in both cases the split was a correction made after
+the phase had already started going wrong.
+
+Phase 7's split is **visible in advance**, and the deciding argument is not size
+or dependency but **failure mode**:
+
+- In Phase 7, a mistake **corrupts documents** — silently, convergently, and
+  with no way back, because GC is the only operation here that destroys data and
+  §5's convergence guarantee means every replica agrees on the damage.
+- In Phase 7b, a mistake means **you learn nothing** — a load test that reports
+  numbers nobody set a threshold for, a dashboard that exists and diagnoses
+  nothing.
+
+Those need different care and they reward different scepticism, which is reason
+enough not to run them as one phase where the second half is what gets
+compressed when the first runs long. The one real coupling runs one way and
+confirms the order: **7b's load test cannot be trusted until 7's GC exists**,
+because load against a system that never collects tombstones measures a document
+growing monotonically for the length of the run, which is not the steady state
+§8's targets describe.
+
+Recorded because "we split it because it was big" is not a reason anyone can
+check later, and because the next phase that wants splitting should be argued
+the same way — name the failure mode of each half, and if they are the same
+kind, the split is probably cosmetic.
+
+### No phase is reported complete without a CI preflight
+
+**`scripts/phase-preflight.sh` runs before any phase report, and a phase with any
+red job is not reported complete.** The script queries the actual CI status of
+the branch head; its output goes in the report.
+
+This is structural rather than a matter of diligence, deliberately. Phase 2.5's
+mutation gate was red for six consecutive pushes while six of seven jobs were
+green, and it went unnoticed because the report format had a slot for what was
+built and no slot for whether the build agreed. A checklist item that exists only
+in someone's intention is a checklist item that gets skipped exactly when things
+are busy.
+
+**Green means `conclusion == "success"`, for every job the workflows define.**
+Three clauses, each from a way the first version could be passed by a run that
+proved nothing:
+
+1. **The expected set is derived from `.github/workflows/`, never from the
+   report.** The original checked that every job it was *given* concluded
+   success, which is a check a status file passes by omitting a job. A status
+   file cannot be asked whether it is complete — the workflows are what say how
+   many jobs there should be and what they are called. A job missing from the
+   report is not a job that passed, and a job the report names that the workflow
+   does not define is drift.
+2. **The run's own conclusion is read, and cancelled is not green.** The
+   original read the run's `status`, and a cancelled run's status is
+   `completed`. Run 79 concluded `cancelled` with eight jobs green and the
+   mutation job cancelled at 7m32s; a status file listing those eight jobs
+   passed a check that only looked at the jobs in the file. Skipped and neutral
+   are refused for the same reason: all three are ways for a job to produce no
+   result while looking finished.
+3. **A superseded run is refused.** A green run on a commit that is no longer
+   head was already refused by the sha check. A green run that a *newer* run on
+   the same commit has replaced was not — and a re-run exists precisely because
+   someone doubted the first answer, so the newest one is the answer. The status
+   file must carry every run GitHub lists for the commit, across every workflow;
+   trimming that list is what the check is looking for.
+
+All three are the same mistake as the CI that was not running for seven tasks:
+**checking the values that are present instead of the values that are
+required.** Absence is what a hand-assembled report cannot be trusted to show,
+so absence is what the script derives for itself.
+
+### The mutation gate is not cancelled by a following push
+
+**`mutation.yml` is a separate workflow with `cancel-in-progress: false`, keyed
+on the commit rather than the ref.** CI keeps cancelling in-progress runs, which
+is right for a workflow whose value is fast feedback on the head: an older
+commit's test result stops being interesting the moment a newer commit exists.
+
+The ratchet is not that, and the reason is worth stating rather than assuming.
+It is the longest job in the repository at seven to eight minutes, so it is
+always the one still running when the next push lands — cancelled in runs 79 and
+80, twice in a row. And unlike every other job, being cancelled leaves **no
+result at all** rather than a stale one, because the ratchet's whole output is a
+comparison against a stored floor. A gate that only completes when nobody
+happens to push for eight minutes is enforced by luck, and the register would
+have gone on reading as though it were enforced by CI.
+
+*Rejected: accepting that it is graded only on a phase's final push.* That is
+the honest version of what was already happening, and it is worse than it
+sounds: the ratchet's value is telling you **which commit** dropped the score,
+and a gate that runs once per phase can only say that some commit in the phase
+did. *Rejected: turning off `cancel-in-progress` for all of CI.* It would fix
+this at the cost of making every burst of pushes queue behind a full run,
+slowing the loop that catches ordinary mistakes to protect the one gate that
+needs protecting. The cost of the split is concurrent runners during a burst,
+which is the right thing to spend.
 
 ## 13. Decision log
 
@@ -1061,14 +3344,124 @@ The first credible score was **54.63%**, and closing the gap took four rounds:
 | 3 | 76.86% | **nothing** — deep-tree tests that built nesting but never made two right siblings disagree about their right origin |
 | 4 | 81.22% | the ancestor case, constructed by reasoning about when that disagreement is possible at all |
 | 5 | **86.46%** | comparison operators at equality, argument validation, and the GC frontier boundary |
+| 6 | 85.44% | **nothing was added** — Phase 2's changes to `Replica` (iterative traversal, the `Import` rewrite) created new mutants and no tests reached them |
+| 7 | **87.74%** | those: `Import`'s argument guards, its refusal of a snapshot with a dangling reference, and its taking the next sequence from its own vector entry |
+
+Round 6 is the other one. The gate is a ratchet only if it is read after every
+change to the mutated project: Phase 2 touched `Crdt.Core` for performance
+reasons alone, added no behaviour it thought worth testing, and gave back 1.02
+points without any test failing. It stayed above 85% by 0.44 points, so nothing
+went red — the score reports a slide the build cannot.
 
 Round 3 is the instructive one: four plausible tests, written against the right
 file, moved coverage by exactly zero. Reaching the branch needed an argument
 about when the code could execute, not more scenarios.
 
+**The gate is now a ratchet.** The committed score is the floor, and any
+decrease fails CI regardless of the absolute number. An 85.44% that clears an
+85% threshold after a 1.02-point drop is exactly the erosion a threshold is
+supposed to catch and structurally cannot: a fixed bar only notices the last
+step of a slide, and by then the headroom that would have paid for the fix is
+gone.
+
+The known-undetected list lives in `mutation-floor.json` and
+`scripts/mutation.sh` enforces it. Improving coverage is an ordinary commit:
+cover a mutant, drop its entry. Giving coverage up requires adding an entry
+*and* an argued exception recorded in this section, naming what was removed and
+why the coverage it provided is not worth keeping. There is no third option,
+and in particular "the score went down but it still passes" is not a sentence
+the build will accept — nor is "the score went up", which is now known to mean
+very little on its own.
+
+A set comparison is exact by nature, which is what a tolerance could never be: a
+tolerance on a percentage would have to be about the size of the erosion being
+detected, and would therefore defeat the check.
+
+**The score is stable on one machine and is not stable across machines, and this
+was got wrong once.** An earlier draft of this section claimed the same commit
+produces identical status counts locally and on CI. That claim was made from
+four runs on a single machine plus one CI run predating the §13.10 scale cases,
+and CI disproved it immediately: commit `d20bc0c` scored **88.12%** locally
+(220 killed, 10 timed out, 17 survived) and **88.89%** on CI (216 killed, 16
+timed out, 15 survived). Two mutants that survive here time out there.
+
+The mechanism is that **a timeout counts as a detection**, which is right — a
+mutant that hangs the suite has been caught — but it means a slower machine
+detects mutants a faster one does not, and reports a *higher* score for
+identical code. It is not the scale cases: bounding them to 100 elements changes
+neither the score nor the timeout count here. It is the runner.
+
+That was first answered by enforcing the ratchet **in CI only**, so that the
+comparison at least happened between comparable runs. It was the right diagnosis
+and an insufficient fix, for the reason recorded below. The identity-based
+ratchet that replaced it is enforced **everywhere**, because it does not depend
+on timing at all. The two permanent guards — no tests discovered, nothing
+killed — always did, and still do.
+
+**The floor was hardware-coupled, and the very next commit proved it.** Pinning
+the ratchet to CI made the number comparable between runs; it did not make it a
+property of the code. A change to the runner image, its CPU allocation, or how
+loaded it is moves the timeout count and therefore the score, with no commit
+touching `Crdt.Core` at all — upward when the runner gets slower, since a slower
+machine detects mutants a faster one does not.
+
+The prediction was written into this section and disproved within the hour.
+Commit `9ffe234` changed `PROJECT_SPEC.md`, a script, and two files in
+`Editor.Infrastructure` and the client — **not one line of `Crdt.Core` or of
+`Crdt.Core.Tests`, which are the only things Stryker mutates or runs.** CI's
+score went 88.89% to 89.27%, because it timed out eight more mutants than the
+run before. A gate that fails on a diff it cannot possibly be measuring is not a
+gate, it is a coin toss with a good reputation.
+
+**So the ratchet stopped keying on the score.** `mutation-floor.json` now lists
+*which* mutants are known to go undetected, by file, line, column and mutator,
+and the build fails when a mutant appears outside that list. Coverage erosion is
+"something stopped being caught", and that is what the list measures directly:
+
+- A mutant flipping between `Killed` and `Timeout` never appears in the list at
+  all, so the runner's speed cannot move the check.
+- The list is the **union** of what has been observed undetected, so a fast
+  machine surfacing a mutant a slow one timed out is already accounted for —
+  every machine's undetected set is a subset of it.
+- Entries that *were* detected this run are reported, never failed. The script
+  cannot tell "a new test kills it" from "this runner timed it out", so it hands
+  the judgement over instead of guessing. Cleanup is a deliberate act.
+- The failure message names the mutants rather than a percentage, which is the
+  practical difference: "three mutants at `Replica.cs:317-319` stopped being
+  caught" is actionable where "86.97%, was 88.89%" is a starting point for an
+  investigation.
+
+The score is still computed and printed. It is a useful number to watch and a
+bad thing to gate on, and this section is the record of learning that the
+expensive way — twice. The first version compared it across machines and flapped;
+the second pinned it to CI and still moved with the runner. Stryker's own 85%
+break threshold stays as an absolute backstop underneath all of it.
+
+**The rule that survives all of this:** if the timeout count climbs, the score is
+measuring the clock. Running the §13.10 scale cases at full size once read 89.66%
+with thirty timeouts, five of them mutants that had survived moments earlier —
+the score rose while nothing new was caught. `scripts/mutation.sh` bounds
+document size under mutation (`CRDT_SCALE_ELEMENTS`) for that reason, and it is
+still worth doing even though it turned out not to be the cross-machine cause.
+
+**Demonstrated, not assumed.** Deleting one of the three `Import` tests still
+clears Stryker's own 85% break threshold — 86.97%, so Stryker exits 0 and the
+build would have passed. The ratchet fails it, and says why:
+
+```
+Coverage eroded: 3 mutant(s) went undetected that are not known:
+    Replica.cs:317:17:Statement mutation
+    Replica.cs:318:21:String mutation
+    Replica.cs:319:23:String mutation
+```
+
+Those three are the `Import` guard against a snapshot naming a parent it does not
+contain. Naming them is the practical gain over a percentage: the message is the
+diagnosis rather than the start of one.
+
 `scripts/mutation.sh` keeps both guards — no tests found, and nothing killed —
-permanently. They are what caught the false 0.00%, and a gate that cannot fail
-loudly is not a gate.
+permanently, alongside the ratchet. They are what caught the false 0.00%, and a
+gate that cannot fail loudly is not a gate.
 
 One survivor found along the way is genuine rather than tooling: flipping the
 `Seq` half of the `ElementId` comparison changes nothing observable, because two
@@ -1135,3 +3528,2972 @@ from `ElementId.CompareTo` — would contradict the paper, which specifies
 lexicographic order on whole ids, and would make correctness depend silently on
 an invariant holding rather than on a comparison being total. The survivor is
 evidence the reasoning above is sound.
+
+### 13.9 What the 100k snapshot metric measured, and the two bugs it found
+
+§6 required Phase 2 to build a 100k-element document, snapshot it, and report
+size and load time with no threshold. The number is now measured rather than
+assumed.
+
+Size is deterministic: **22,277,866 bytes — 21.25 MiB, 222.8 bytes per live
+element.** Timings vary with machine load, so they are given as observed ranges
+over four runs of the same test on one machine, Release build, Postgres 16 on
+loopback:
+
+| stage | observed |
+| --- | --- |
+| serialise | 467–591 ms |
+| deserialise (cold) | 733–924 ms |
+| write to Postgres | 483–730 ms |
+| load from Postgres | **501–941 ms** |
+
+**Load is at or over §8's 500 ms target on every sample, and that is the easy
+case.** The document has no tombstones and no operations after the snapshot;
+§8's stated case adds 500k tombstones, which the encoding stores in full. The
+cost is dominated by JSON parsing, not by the database — the row read is a
+single indexed lookup, and standalone deserialisation of the same string takes
+longer than the whole load does once the parser is warm.
+
+This does not by itself decide the format. It bounds the decision: normalised
+JSON as specified in §6 will not reach §8's target at §8's document size, so
+either the target moves, the snapshot stops being the whole document (a chunked
+or incremental encoding), or the encoding changes. Deciding is cheap now and
+expensive after Phase 4 binds the format into the client's IndexedDB schema,
+which is why §6 asked for the number in Phase 2.
+
+**Resolved: the encoding changes.** §6 now splits the roles — JSON stays
+normative, binary becomes the storage and wire form. Three facts decided it.
+
+*The overhead is structural, not incidental.* An element carries an id, a
+value, a parent, a side, an optional right origin, and a deleted flag: on the
+order of 50 bytes of actual information. JSON spends 222.8. The gap is field
+names repeated per element, 16-byte replica ids written out per reference,
+64-bit counters as decimal strings, and punctuation — none of which a tokeniser
+can skip, which is why parsing dominates the load time rather than the database
+does.
+
+*The stress case is four times worse than the case measured.* §8 asks for 100k
+live characters **and 500k tombstones**, and a tombstone is a full element in
+this encoding — it must be, because it can still be named as a `RightOrigin`.
+Six hundred thousand elements at 222.8 bytes is roughly 130 MiB to move before
+it reaches a browser.
+
+*Those tombstones are realistic, not pessimistic.* Phase 1 established that
+causal stability alone does not license collecting a tombstone, precisely
+because a `RightOrigin` can name one (§5, and the collection rule's four
+conditions). Accumulation is the expected behaviour of a correct implementation,
+not evidence of a broken one.
+
+The savings are structural too, and that is the reason to expect them to hold:
+interning replica ids into a per-snapshot table replaces a 16-byte value with a
+small index at every reference, varints replace decimal strings, and sequential
+typing — the most common editing pattern there is — produces long runs of
+consecutive `(replica, seq)` along a parent chain, which the run form collapses.
+
+**Measured, after the codecs existed.** Three documents, the same machine as
+above:
+
+| Document | JSON | Binary | Ratio |
+|---|---|---|---|
+| chain — 100k, one replica typing | 22,277,866 B (222.78/el) | 112,541 B (**1.13**/el) | 198× |
+| fragmented — 100k, four replicas, explicit right origins, 75% deleted | 23,379,876 B (233.80/el) | 845,359 B (**8.45**/el) | 27.7× |
+| **§8's case** — 600k: 100k live + 500k tombstones | 141,163,181 B (235.27/el) | 5,512,023 B (**9.19**/el) | 25.6× |
+
+The chain came out at 1.13 bytes per element, which is what the layout's own
+arithmetic predicted before a codec existed. The fragmented figure beat the
+predicted 16.00 worst case, because even a run-hostile document still chains
+most parents to the previous element.
+
+**§8's case is 141 MiB of JSON and 5.3 MiB of binary.** That is the number the
+decision was about, and it is settled.
+
+**What is not settled: the load target is still missed, for a different
+reason.** §8's document loads server-side in **1.3–2.1 s** against a 500 ms
+target. Splitting the cost says why:
+
+| | parse (bytes → elements) | place (elements → tree) |
+|---|---|---|
+| §8's 600k case | 540 ms | **1,164 ms** |
+
+Parsing 5.3 MiB is no longer the problem — the equivalent JSON parse was
+4,613 ms. **Placement is**, and no encoding change touches it: `Import` replays
+the §5 sibling ordering for every element, deliberately, so that a snapshot
+written wrongly builds a different tree rather than restoring a corrupt one
+(§13.9's `Import` note). Six hundred thousand replays is simply a lot of work.
+
+This is recorded, not fixed, and it is not Phase 2.5's to fix: §8's targets are
+load-test targets and Phase 7 owns them. What Phase 2.5 owed was the format
+decision and the number, and both are now here.
+
+**The two options are written out now so that the decision arrives with them
+already on the table.** Both change what a snapshot *means*, not how it is
+spelled, which is why neither belongs beside a codec swap.
+
+*Option A — a snapshot stores placement results rather than replaying them.*
+Today `Import` re-derives every element's position from the §5 sibling rule, so a
+snapshot is a set of claims that the reader checks. Under A it becomes a
+description of a tree the reader trusts: sibling order is stored, and loading is
+a linear rebuild instead of 600,000 comparisons.
+
+> What it costs: the guarantee that a wrongly written snapshot produces a
+> different tree rather than a quietly corrupt one. That guarantee is the whole
+> reason `Import` replays placement (§13.9 above), so trading it away needs
+> something in its place — a checksum over the stored order, a periodic audit
+> that re-derives and compares, or restricting trust to snapshots this replica
+> wrote itself, where the writer and reader share a version. The last is the
+> narrowest and probably the right one: a snapshot arriving from elsewhere is
+> exactly the case the replay defends against.
+
+*Option B — a snapshot stops being the whole document.* Load the visible text
+plus the elements needed to place incoming operations, and fetch the rest lazily
+or in chunks. §8's case is 100k live characters among 600k elements, so five
+sixths of the work is tombstones nobody is about to read.
+
+> What it costs: a replica that has not loaded everything cannot answer every
+> question about the document, and §5's placement rule can reach any element —
+> a `RightOrigin` may name a tombstone in an unloaded chunk. That makes
+> chunking a change to the algorithm's preconditions, not just to I/O, and it
+> interacts with GC (§5) which is the other mechanism for making tombstones stop
+> costing anything.
+
+They are not exclusive. A does more for the common case and B does more for §8's
+stress case, and the honest reading of the measurement is that A alone probably
+reaches the target while B is what makes the target insensitive to how long a
+document has been alive.
+
+**And the browser is worse, as expected.** §8's second number, from the
+`browser-metrics` CI job on the `ubuntu-latest` runner §8 names — the §9
+TypeScript core in **headless Chromium 151.0.7922.34**, 4 vCPU, cold meaning a
+fresh context with empty IndexedDB:
+
+| Case | fetch | parse | place | text | **cold total** | warm total |
+|---|---|---|---|---|---|---|
+| chain, 100k | 4 ms | 38 ms | 236 ms | 19 ms | **302 ms** | 297 ms |
+| §8's 600k case | 38 ms | 493 ms | 1,683 ms | 291 ms | **2,508 ms** | 2,045 ms |
+
+Two and a half seconds for §8's document, on a fast network with a 5.3 MiB
+payload. Reading the same bytes back from IndexedDB saves almost nothing,
+because the fetch was never the cost — which is the useful part: a warm cache
+does not rescue this, and neither will a faster network.
+
+**The hardware matters enough to be part of the number, which is why §8 names
+it.** The same commit measured **5,964 ms** for the 600k case on the 4 vCPU
+development container this was written in — more than twice CI's figure on a
+nominally identical core count. Quote the CI figure; treat a local run as the
+shape of the answer rather than the answer.
+
+**The same term dominates on both sides.** Placement is 1,683 ms of the
+browser's 2,508 and 1,164 ms of the server's ~1,700, in two independently
+written implementations. That is not two performance bugs; it is the cost of
+replaying §5's placement rule 600,000 times, and it is the thing to fix when
+§8's targets are addressed. The encoding was worth changing — 141 MiB became
+5.3 MiB, JSON parsing fell from 4.6 s to 0.5 s server-side, and the browser's
+parse is 493 ms of a 2,508 ms load — and it was not the whole problem.
+
+**The metric also found two defects that no correctness test had reached.**
+Both were only visible at this size, which is the argument for measuring at
+realistic scale rather than at test scale:
+
+1. **Traversal overflowed the stack in both implementations.** In-order
+   traversal of the element tree was recursive, and a document typed left to
+   right is a chain of right children 100k deep — so the recursion depth equals
+   the document length. It crashed the process rather than throwing, in C# and
+   in TypeScript alike, and every existing test was small enough to miss it.
+   Both are now iterative with an explicit stack, with a 150k-element regression
+   test on each side.
+2. **`Import` was quadratic.** Each placement pass removed placed elements from
+   the unplaced list one at a time; rebuilding the list per pass instead took
+   the .NET suite from 1m37s to 16s.
+
+Neither is a specification change. They are recorded because the conclusion is:
+the correctness suite verifies the algorithm at sizes where a linear-space bug
+and a quadratic-time bug are both invisible, and only a test that builds a
+realistic document exposed them.
+
+### 13.10 The generator explored shape exhaustively and scale not at all
+
+The stack overflow in §13.9 is the most instructive failure in the project so
+far, and the instructive part is not the bug. It is that eight invariants at
+10,000 randomised cases each, a nine-trace cross-implementation corpus, and an
+87% mutation score all passed over it.
+
+**Depth equals document length on left-to-right typing** — each character is a
+right child of the previous one — so a recursive traversal overflows at a
+document length users reach in an afternoon. That is the single most common
+thing anyone does to a text editor.
+
+It survived because every generated scenario built a few dozen elements. The
+magnitudes were literals in the generator: runs of two to four characters, at
+most five edits a round, a prefix of at most three. Nothing in the suite was
+wrong; the dimension simply was not there.
+
+Worse, randomisation works *against* finding it. A generator that picks
+positions uniformly produces balanced trees. The pathological shape is the
+degenerate one — a single chain — and that is precisely what uniform random
+insertion does not produce. More cases would never have found this. Only a
+different dimension would.
+
+**Scale is now drawn explicitly** (`ScenarioScale`), reported on every scenario,
+and printed in failure output beside the seed. Large scenarios are rare on
+purpose — roughly one seed in 250, about forty across the 10,000-case gate,
+reaching around 2,000 elements — because their value is in being reached at all,
+and because typing costs O(n²) in this implementation. `ScaleTests` carries the
+few very large cases: 10,000 characters through real typing, and 50,000 and
+150,000 through the import path that Phase 2 proved equivalent to typing.
+
+The shrinker gained a size phase for the same reason. Delta debugging a
+two-thousand-step scenario needs O(n log n) replays of an O(n²) simulation and
+never finishes; truncating to a prefix costs O(log n) replays and answers "was
+this about the tail?" immediately. A shrinker that hangs turns a reproducible
+failure into an unreadable one, so the shape phase also runs against a replay
+budget.
+
+**One asymmetry is worth knowing.** On .NET a stack overflow cannot be caught:
+reintroducing the recursive traversal kills the test host rather than failing an
+assertion. That is still a red build and it is the only signal the platform
+offers. The TypeScript side throws a catchable `RangeError`, and its regression
+test asserts on it directly — which is how that fix was verified.
+
+**The general form, for Phase 3 onward:** a property suite that passes at every
+size it tests is evidence about those sizes only. Where cost is superlinear in
+something — document length, connection count, fan-out width — the suite must
+name that quantity as a dimension and draw it, because the failure mode is
+correct at every tested size and fatal at real ones, and nothing in a green
+build distinguishes the two.
+
+### 13.11 Writing the spec first put the same bug in both implementations
+
+§6's binary layout was written before either codec, on the reasoning that two
+implementations derived from one description disagree loudly when either is
+wrong, while a second derived from the first inherits its mistakes silently.
+That reasoning is sound and the approach is kept. It has a failure mode worth
+naming.
+
+**A mistake in the description reaches both implementations, and they agree.**
+The canonical-form rule for run maximality was drafted as: *the first element of
+any record must not be able to continue the element immediately before it*. Both
+codecs implemented exactly that, agreed byte for byte on the whole corpus, and
+were both wrong.
+
+The rule needs a condition on the *earlier* element too. An element carrying an
+explicit right origin can neither start a run nor sit inside one, so whatever
+follows it begins a new record however well it would otherwise continue. Without
+that half, a decoder rejects documents its own encoder produces: encode an
+element with an explicit right origin followed by a right child of it with the
+next sequence number, and the encoder correctly writes two records while the
+decoder correctly-by-the-draft calls them non-canonical.
+
+**How it was found is the point.** Not by the corpus, which passed. By
+deliberately breaking one implementation to check the cross-implementation
+comparison would notice — the first sabotage chosen was dropping exactly this
+guard, and the corpus did *not* notice, which meant the shape was uncovered.
+Investigating why produced the real bug. The check works: a second sabotage,
+dropping the deleted flag, failed the build immediately.
+
+Two things follow, both now in place.
+
+1. **The shape has a test on each side**, not a trace. Ordinary typing cannot
+   reach it — a right origin records what followed at insert time and tombstones
+   keep it there — so it needs either garbage collection (§5) or a directly built
+   snapshot. A user-level trace cannot express it, which is why the corpus was
+   silent.
+2. **Agreement between two implementations is not evidence of correctness when
+   both were written from one description.** It is evidence they read it the same
+   way. The corpus catches divergence; only reasoning about the specification,
+   or an independent check like the round trips against the normative JSON,
+   catches a shared misreading. This is the same lesson as §13.6, where a
+   100.00% hold rate turned out to measure the generator, arriving from the
+   other direction.
+
+**The practice this produced immediately found a second bug of the same class.**
+§12 now requires hand-written fixtures for every canonical form — documents the
+specification says are valid that neither implementation generates. Writing the
+first batch turned up that a run's deleted bitmap had **unconstrained bits past
+its last element**: a run of five occupies five bits of one byte, §6 said nothing
+about the other three, and both codecs ignored them on read. Two byte strings
+differing in those bits decoded to the same document, which is precisely the
+canonical-form violation the whole rule exists to prevent — and it makes
+`binary → JSON → binary` byte-identity a check of whichever spelling the writer
+chose. §6 now requires them to be zero and both readers reject a non-zero one.
+
+The fixtures caught something else, less serious and more instructive: the first
+draft of the two-byte-replica-index fixture used a 130-entry table over a
+one-element document, which §6's canonical form forbids — the table holds exactly
+the replicas the body names. The *re-encode* half of the fixture check caught it,
+which is the argument for that half existing. A fixture that is merely accepted
+proves the decoder is permissive; a fixture that is accepted and re-encodes to
+the same bytes proves it agrees with the encoder about what the document is.
+
+### 13.12 Phase 3 decisions taken before the hub existed
+
+Four things §7 left open that had to be settled before any of it could be
+written, recorded here rather than discovered in the diff.
+
+**The client does not choose its replica id.** §7 already said an operation's
+replica id must match the connection's binding, and §5 already made `ReplicaId`
+the tie-break that orders concurrent insertions. Together those look like a
+complete defence and are not: if the client supplies the binding, the check
+compares a value against itself. A client naming another live replica's id would
+pass authentication, pass the per-operation comparison, and author operations
+attributed to that replica — and every other replica would converge on the
+forgery, because convergence is exactly what the algorithm guarantees. The
+server assigns the id at `negotiate` and records it against the user in
+`document_replicas`; §7 now says so.
+
+**The ticket is redeemed with `GETDEL`, not a read then a delete.** §8 forbids
+sticky sessions, so the issuing instance is usually not the redeeming one and the
+ticket has to be shared state. Under a read-then-delete, two connects arriving
+together both observe the ticket and both proceed: single-use that is not atomic
+is not single-use. This is the kind of thing that passes every test written
+against one client.
+
+**Dense `Seq` validation caches, it does not own.** The next expected value is
+the maximum stored for that `(document_id, replica_id)` in Postgres. An in-memory
+copy makes the hot path affordable (§8 forbids loading the document to validate
+an operation), and losing it on failover must cost a query rather than
+correctness.
+
+**A hub method has no HTTP status.** §7's 404-versus-403 rule is about not
+leaking document existence, and it survives the move to SignalR only if the hub
+carries the same distinction in its error codes. Answering `forbidden` for a
+document the caller cannot see would leak exactly what the 404 rule protects.
+
+None of these are changes of direction. They are the places where §7's rules,
+read literally, could each be satisfied by an implementation that defeated their
+purpose.
+
+### 13.13 A rejection the rejected party cannot observe is not a rejection
+
+Phase 3 refused an unauthenticated hub connection in `OnConnectedAsync`, first
+with `Context.Abort()` and then by throwing. Both are the documented way to
+refuse a SignalR connection. Neither is observable to the client: SignalR
+completes its handshake *before* invoking the hub, so `StartAsync` has already
+returned success by the time the connection is torn down. Every rejected client
+believed it was connected, and what it saw afterwards — a connection closing
+shortly after opening — is indistinguishable from a network blip.
+
+The server was correct throughout. It redeemed no ticket, established no
+binding, and would have refused every subsequent call. A server-side test suite
+asserting on server state would have passed, and did.
+
+**The general form: a rejection that is not observable to the rejected party is
+not a rejection, and no amount of server-side testing can detect that class of
+defect.** The server's own view is identical in both worlds. What separates them
+lives entirely in what the *client* can observe, so the test has to be written
+from the client's side and has to assert on what the client is told — not on
+what the server recorded.
+
+This is a security finding rather than a usability one, and the reason is the
+direction the failure runs in. A client that cannot tell refusal from a blip
+retries, and a retrying client is indistinguishable from an attacker probing;
+worse, a client that believes it is connected will surface a working editor to
+someone holding no valid credential, and only fail when they type. The failure
+is deferred to the moment of most confusion and attributed to the wrong cause.
+
+The fix was to move the observable part of the refusal to where the client can
+see it — SignalR's own negotiate request, before a transport exists, answering
+401 — while leaving the authoritative single-use redemption in the hub. Note the
+shape: the check that *enforces* and the check the client can *see* ended up in
+two different places, and both are needed. An enforcement point is not
+automatically a signalling point.
+
+**It applies again in 3b and Phase 4.** Every rejection either phase adds is
+subject to it: a batch dropped for exceeding a pending-set bound, a client
+refused during a scale-out failover, an offline client whose queued operations
+are refused on reconnect. In each case the question is not "did the server
+refuse" but "can the client tell it was refused, and tell it apart from a
+network failure". The second is what needs the test.
+
+### 13.13a MessagePack for framing, and the measurement that decides it
+
+§7 caps a hub message at 64 KB. Phase 3 found that the default JSON hub protocol
+base64-encodes a `byte[]` argument, so 64 KB of message admits roughly 47 KB of
+operations and every keystroke batch pays a third of itself in encoding overhead.
+
+Two fixes were on the table. **Raise the cap to ~88 KB** so 64 KB of payload fits
+inside base64: no protocol change, no client work, no new dependency, and 33% more
+bandwidth forever. Or **switch the hub protocol to MessagePack**, which carries a
+byte string without inflating it.
+
+MessagePack is chosen, on a narrower argument than "binary is better". The hub
+payload is already a single opaque `byte[]` holding §6's format, so MessagePack is
+used for **framing only** — its object model is not used, and §6 stays the sole
+authoritative encoding (see §6, *The hub protocol carries opaque bytes*). The
+alternative reading, where operations become MessagePack objects, would create a
+second encoding with its own canonical-form rules; §13.11 is what happens then.
+
+**The decision is contingent on two measurements, not one.** Wire bytes are the
+obvious one. The second is **client bundle size** with
+`@microsoft/signalr-protocol-msgpack`: bandwidth saved per keystroke is paid for
+once per page load, and on the slow connection this project keeps citing, a
+materially larger bundle is a real cost in the same currency. Both figures get
+reported, and the choice is made against both. If the bundle cost turns out to
+dominate, raising the cap is the honest answer and this entry gets amended rather
+than quietly ignored.
+
+The measurement itself carries the trap: **the inflation lives in the frame, not
+in the payload.** Measuring `byte[]` length would show the two protocols as
+identical and decide this wrongly, with a plausible number and nothing about the
+result looking wrong afterwards. What gets measured is the framed message on the
+wire, via `IHubProtocol.WriteMessage`, which is exactly what the connection
+sends minus transport framing that is identical for both.
+
+**The numbers.** Framed hub message, bytes:
+
+| document | payload | JSON frame | MessagePack frame | saved |
+|---|---|---|---|---|
+| one keystroke | 30 | 209 | 161 | 23.0% |
+| keystroke batch (16) | 61 | 253 | 192 | 24.1% |
+| paste at the run cap (256) | 542 | 893 | 674 | 24.5% |
+| 256 separate inserts, no run | 1,500 | 2,169 | 1,632 | 24.8% |
+| a batch near the cap | 121,772 | 162,533 | 121,907 | 25.0% |
+
+Base64 adds a third to the payload, so the saving relative to the JSON frame is
+a quarter — 0.33/1.33 — approached from below as the fixed frame overhead
+(method name, document id, replica id) is amortised.
+
+Under §7's 64 KB message cap, **JSON admits 49,023 payload bytes and MessagePack
+65,403**. Phase 3's "about 47 KB" was an estimate; 49,023 is the measurement.
+
+Client bundle, gzipped bytes:
+
+| bundle | minified | gzipped | delta |
+|---|---|---|---|
+| CRDT core alone | 8,399 | 3,135 | — |
+| core + SignalR | 64,167 | 17,317 | +14,182 |
+| core + SignalR + MessagePack | 94,192 | 25,390 | +22,255 |
+
+**The MessagePack protocol costs 8,073 gzipped bytes, 46.6% on top of the
+SignalR client.** That is not trivial and it is the honest case against this
+decision.
+
+**The call, against both figures: MessagePack.** Three reasons, in order of
+weight.
+
+The bundle cost is paid once per page load and is cacheable; the wire saving
+accrues per message and is not. At 253 versus 192 bytes for a keystroke batch,
+8 KB of bundle is repaid after roughly 130 batches — a few minutes of typing —
+and every batch after that is profit.
+
+Second, and this is what actually decides it: on the slow connection the bundle
+argument is about, **the document dominates the bundle by three orders of
+magnitude.** §8's case is 5.3 MiB of binary snapshot (§13.9). Against that,
+8 KB is noise, and optimising it while shipping 5.3 MiB would be a strange place
+to economise.
+
+Third, the cap becomes honest. A "64 KB message limit" that admits 49 KB of
+operations is a number that will mislead whoever next reasons about batch sizing;
+under MessagePack the cap means what it says.
+
+**JSON is withdrawn from the hub's supported protocols, not merely deprioritised.**
+Supporting both would let a client negotiate JSON and silently take the worse
+wire and the smaller effective cap — a downgrade nobody would observe. A client
+that cannot speak MessagePack now fails to connect, and §13.13 is the reason a
+loud failure is the better one. A test asserts the refusal rather than assuming
+it.
+
+### 13.14 Test a bound where it is the only guarantee
+
+§7 bounds role-cache staleness at five seconds and gets there two ways: eager
+pub/sub invalidation makes the usual case immediate, and a five-second TTL is
+the fallback. Two tests were written — one revoking through the writer, one
+deleting the membership row behind the writer's back so no invalidation is ever
+published.
+
+Only the second found the bug, and the bug was worth finding: a local cache
+entry refreshed from a Redis hit took a fresh five seconds regardless of how
+little was left on the shared entry it read, so an expiry landing near the
+boundary restarted the clock. Worst case was very nearly ten seconds — double
+§7's bound. The eager-invalidation test stayed green throughout, because eager
+invalidation was working perfectly.
+
+**The rule: where a guarantee has a fast path and a fallback, the bound must be
+tested with the fast path disabled.** Testing it with both running measures the
+fast path and says nothing about the bound, and the fast path is precisely the
+thing that is unavailable in the situations the bound exists for — a lost
+message, an instance partitioned from Redis, a row changed by an operator with
+`psql`. A test that only ever exercises the happy path is measuring the
+optimisation and reporting it as the guarantee.
+
+This generalises past caches. Anywhere this system has a fast path and a
+correctness floor — causal delivery's buffer against its resend, a reconnecting
+client's delta against a full snapshot — the floor gets its own test with the
+fast path switched off.
+
+### 13.15 A mechanism whose absence still converges must be asserted directly
+
+**Wherever removing a mechanism leaves the system still producing the right
+answer, that mechanism has to be observable and asserted on its own terms. Never
+inferred from the outcome.**
+
+This is the third form of one discovery, and writing it once generally is
+overdue.
+
+- **§13.7, the mutation gate.** Stryker reported 0.00% across 227 mutants and
+  exited zero while the same suite killed those mutations by hand. The suite's
+  *outcome* — green — was identical whether or not the gate was measuring
+  anything.
+- **§13.11, the canonical-form bug.** Two implementations agreed byte for byte
+  on every trace in the corpus. The agreement was real and the shared reading of
+  §6 was wrong; only deliberately breaking one side showed that the comparison
+  could not have noticed.
+- **§5's duplicate counter.** Delete the dedupe entirely and every convergence
+  test still passes, because the CRDT is idempotent and re-applying a duplicate
+  is a no-op. The mechanism's whole purpose is to make a resend loop *visible*,
+  and a resend loop is invisible in the outcome by construction.
+
+The common shape: the observable result is the same on both sides of the change,
+so no assertion phrased in terms of the result can distinguish them. Convergence
+is the weakest of these — it holds under a large family of wrong
+implementations, including several that do no work at all — which is exactly why
+it is the assertion that feels most reassuring to write.
+
+The rule in practice: when adding a mechanism, ask what test fails if it is
+deleted. If the honest answer is "none, the system still gets the right answer",
+then either the mechanism is unnecessary, or it exists for an operational reason
+— speed, load, a signal for a human — and that reason is what has to be measured
+and asserted. Counting the drops, timing the path, or asserting the call did not
+happen. Not "and the document still matches".
+
+This is what §12's vacuity rule is for at the level of a single mechanism, and
+what the sabotage practice catches when the rule was not applied.
+
+**Its next instance was this same counter** (§13.21). `DuplicatesDropped` was
+asserted directly, in three suites — and not in the one the mutation gate
+drives, so the gate saw a counter nothing asserted and said so the first time it
+ran. Assert the mechanism directly, *in the suite that measures it*.
+
+### 13.16 The server has no pending set, and a query that matched nothing
+
+Two findings from 3b.4, related only in that the second was found while
+implementing the first.
+
+**The server rejects a non-ready operation rather than buffering one.** §5
+describes a bounded pending set and justifies the bound by noting that origins
+are client-supplied — an unbounded set is a denial-of-service vector. That
+reasoning is sound for a *peer* receiving a broadcast. It does not transfer to
+the ingest path, and following it literally would have added the vector it
+warns about.
+
+A client can only reference an element it knows about, and under this
+architecture it knows about exactly two kinds. Its own earlier operations: §7's
+density rule already guarantees the server holds them, because it refused
+anything else. And other replicas' operations: it learned of those from a
+broadcast, and §8 sends a broadcast only after the write commits. There is no
+third kind and no race between them — an operation referencing something the
+server does not have is a bug or an attack, never a legitimate ordering
+accident.
+
+So buffering one means holding an id that may never arrive, indexed by a key an
+attacker chooses. Rejecting removes the vector instead of bounding it, and
+leaves the server with no pending set to bound at all. §7's pending-set cap
+therefore has no server-side subject; the bound lives on the client, where §5
+puts it, and where the operations being buffered came from a source the client
+does not control.
+
+The bound is on the *connection*, not on the replica. A replica replaying a
+stored trace or importing a snapshot legitimately buffers as much as the input
+demands, and a core that refused would fail the property suite for a reason
+having nothing to do with the property. `MaxPending` is unbounded by default and
+set by whoever attaches a replica to a network. Exceeding it throws rather than
+dropping the oldest: dropping would leave the replica permanently missing an
+operation with nothing to indicate it, which is divergence arrived at quietly,
+and quiet divergence is the one outcome this project exists to prevent.
+
+**And the query that matched nothing.** Implementing the origin check meant
+writing a second query against `document_ops`, which is when the first one was
+read closely. §7's document-size cap has, since Phase 3, filtered on
+`op_type = 'ins'` against a writer that stores `'insert'`. It matched no rows.
+Ever.
+
+Nothing went red. Every test filled a document through a single instance, where
+the in-memory counter incremented by `Accepted` did the work, and the Postgres
+seed of zero was never the number under test. §8 requires exactly the opposite
+property — the cache must be reconstructible and must not be required for
+correctness after a failover — and what was actually shipped was a cap that
+reset to zero on every restart, so a document already over its limit would have
+accepted writes on any cold instance.
+
+This is §13.15 again, from the other direction. The mechanism's absence still
+produced the right *outcome* in every test, because a second mechanism covered
+for it. The test that catches it drops the cache and asserts the reconstructed
+number, which is the only arrangement where the query is the thing being tested.
+The `op_type` literals are now interpolated from the writer's own constants, so
+the two cannot drift again.
+
+### 13.17 The verification apparatus is not exempt
+
+The 3b.6 sabotage run reported that the snapshot-floor test failed under two
+sabotages that could not reach it — one removed a role check, the other a
+negative-sequence guard, and neither is on the floor's path. Run alone, the
+floor test passed five times out of five. The failure was not in the code and
+not in the test. It was in the harness.
+
+Each sabotage backed the file up with `cp`, patched it, built, ran, and restored
+with `mv`. `mv` preserves the *backup's* modification time, so the restored
+source came back older than the artefacts built from the sabotaged version.
+MSBuild compared timestamps, concluded nothing had changed, and skipped the
+recompile. Every run after the first sabotage executed the previous sabotage's
+binary. The "clean" baseline in between was not clean.
+
+The direction that showed up is the harmless one: a sabotage credited to the
+wrong test, noticed because the attribution made no sense. The direction that
+matters is the opposite one, and it is silent. Sabotage a check, build nothing,
+watch the *previous* clean build pass, and record "sabotage caught by nothing —
+the corpus does not reach this shape." That is a finding about the corpus, it
+reads as a real result, and it is the exact conclusion §12 says to take
+seriously. It would have certified a test that catches nothing, using the
+practice whose whole purpose is to prevent that.
+
+So the rule is general, and wider than one build system:
+
+> **Every claim about a check's behaviour under sabotage is a claim about a
+> specific binary. Establish that the binary is the one you think it is —
+> restore in a way the build system can observe, and rebuild — or the result is
+> about a state you are no longer in.**
+
+Three earlier entries (§13.13, §13.15, §13.16) are all instances of a mechanism
+that could not be observed failing. This is the same shape one level up: the
+apparatus that observes the mechanisms was itself unobserved. Nothing checks the
+checker, so the only defence is that its results have to *make sense* — an
+attribution that cannot be explained by the code is a finding about the harness,
+not a flake to re-run until it goes away. The tell here was that a sabotage and
+the test it broke had no path between them; the temptation was to call the floor
+test flaky, and running it in isolation appeared to confirm that.
+
+### 13.18 A wait that is already satisfied is not a wait
+
+3b.7's subscription test asserted that an instance keeps carrying a document
+after one of its two connections leaves, and drops it after the second. Both
+assertions were on a counter, each preceded by a poll:
+
+```csharp
+await one.DisposeAsync();
+await WaitFor(() => Backplane(factory).Carrying == 1);
+Assert.Equal(1, Backplane(factory).Carrying);
+```
+
+The sabotage that unsubscribes on the *first* departure — stranding every
+remaining client on that instance — went straight through.
+
+`Carrying` is already 1 when the client is disposed. Disconnect handling runs
+server-side with nothing to await, so the poll's condition was true on entry, it
+returned immediately, and the assertion ran before the mechanism had a chance to
+do anything at all. The test asserted a state that had not yet changed and could
+not yet be wrong. It would have passed against an instance that unsubscribes on
+every departure, and it did.
+
+Two rules come out of it.
+
+**Wait on a transition, not on a state.** A poll for a condition that already
+holds is a no-op with the shape of synchronisation. The second half of the same
+test — waiting for `Carrying == 0` after the last client leaves — is sound for
+exactly this reason: it starts false and has to become true. Where the value
+under test does not change, find one that does; 3b.7 waits on the connection
+count going from two to one, which is a transition the disconnect must complete
+before the assertion means anything.
+
+**Prefer the functional assertion to the counter.** The counter was there to
+make the mechanism observable, which is right (§13.15), but "still subscribed"
+is a proxy. What the rule protects is that the remaining client keeps receiving,
+so the test now has a second instance publish and the remaining client receive
+it. That fails under the sabotage without depending on any timing at all, and it
+states the property in the terms someone would actually complain about.
+
+This is the second time sabotage has caught a *test* rather than the code, and
+both times the test was aimed at the right subject and asserted something that
+was true regardless. That remains the most common way a test passes for no
+reason, and reading it is not how it gets found.
+
+### 13.19 The sentinel matched the syntax, not the property
+
+§7 forbids turning a token check off anywhere, and `TokenValidationTests` has
+enforced that since Phase 3 by scanning every `.cs` and `.json` file in the
+repository for one of the named switches assigned `false`. It has been treated
+as covering the rule.
+
+It covers one spelling of it. Sabotaging the interop suite meant weakening
+signature validation, and the way to do that is not to write `false` anywhere:
+
+```csharp
+SignatureValidator = (token, _) => new JsonWebToken(token),
+```
+
+`ValidateIssuerSigningKey` stays `true`, `RequireSignedTokens` stays `true`, the
+options test still passes, and the scanner sees nothing — because the check has
+been *replaced* rather than switched off. The same shape exists for
+`IssuerValidator`, `AudienceValidator`, `LifetimeValidator` and the rest: each
+is a framework extension point that runs instead of the check it is named for.
+
+The scanner now flags an assignment to any of them. None is assigned anywhere
+today, so it is a ratchet rather than a cleanup, and if one is ever genuinely
+needed the argument belongs in §7 before the code.
+
+The general point is the one worth keeping. **A guard written as a pattern match
+covers the instances of the pattern, not the property.** It is easy to read such
+a guard as enforcing the rule, because the rule is what its name says; what it
+actually enforces is "nobody wrote it that way". This one had gone unexamined
+for a phase and a half because it had never been the target: the sabotages that
+found things were aimed at the code the check protects, not at the check itself.
+
+**Every textual guard in this repository has the same weakness.** The
+architecture test looks for project references; a reflection-loaded assembly is
+not one. The secret scan looks for secret-shaped strings; a credential assembled
+from parts at runtime is not one. The redaction sentinel looks for a sentinel
+value; a field that reaches the log by a path the sentinel never travels is not
+one. Each checks an instance and is read as checking the property.
+
+**Scheduled into Phase 6b: a guard audit pass**, asking of each check in turn — the
+architecture test, the secret scan, the redaction sentinel, the mutation
+ratchet, the workflow check, this one — *what is the `SignatureValidator`
+equivalent here? What defeats this without matching its pattern?* It is a
+distinct piece of work rather than a note, because the answer for each guard is
+specific and reading the guard is not how the answer is found.
+
+Which is the strongest justification the sabotage practice has yet had.
+**Sabotage is the only technique in this project that tests a property rather
+than a pattern.** Every other check — the scanners above, the type system, the
+tests themselves — asserts something written down in advance, and therefore
+asserts the form it was written in. Sabotage asks the different question: given
+an implementation that is actually wrong, does anything go red? It is the only
+one that can discover the gap between "the guard matches" and "the guard holds",
+because it approaches from outside the guard's own vocabulary.
+
+**One pattern, three places.** This entry is about a guard in the code; the two
+below are the same defect in the process and in the build, and they are worth
+reading as one thing rather than three:
+
+| Where | The instruction that was checked | The property that was not |
+|---|---|---|
+| **Code** (this entry) | `ValidateX = false` appears nowhere | no validation check is *disabled*, by any means — `SignatureValidator = …` does it without writing `false` |
+| **Process** (below) | the preflight's gates all pass | *the gates that exist cover where mistakes are made* — it ran five suites and never the client's |
+| **Build** (§13.26) | `npm run build` was invoked | *the bundle is the one that ships* — vitest's `NODE_ENV=test` made it a development build |
+| **Deployment** (§13.28) | `/health/live` answered 200 | *the stack is usable* — it came up against an empty database and the probe never touched it |
+| **The edit itself** (below) | the patch was issued | *the file changed* — an assertion inside it failed, nothing was written, and the file was not re-read |
+
+The sentence that generalises all four: **a build command is an intention; the
+bundle is the fact** — and so for the rest. Every one of these guards was
+checking that the right instruction had been given, and reading as if it had
+checked that the right thing was true. §13.21 (a ratchet keyed on position
+rather than on the property it tracks) and §13.22 (a done-when satisfiable while
+the deliverable is absent) are the same defect again, in a tool and in the
+contract. Six places now; the count is kept in §13.24.
+
+**An action assumed to have happened rather than confirmed — the third
+instance.** In 5b a patch to `docker-compose.yml` failed its own guard
+assertion, wrote nothing, and was not noticed, because the file was never
+re-read afterwards. The migrator therefore kept the previous command line for
+two more CI cycles, and the failure it produced was misdiagnosed as something
+else entirely — a wrong cause published in a commit message, which the follow-up
+had to correct in the permanent record.
+
+Read it beside the two above and the shape is one thing: **CI that was never
+running, a preflight that could not see the client's gates, and an edit that did
+not apply.** In each case an action was believed to have taken effect on the
+strength of having been initiated. The remedy is the same each time and it is
+cheap: confirm the effect, not the instruction. Read the file back. Check the
+run exists. Ask what the guard actually covers.
+
+**The same shape, in the process rather than the code.** Twice in Phase 4 a
+commit went out with a client gate red, because the verification was chained
+onto the same command line as the commit and its output read afterwards. The
+habit was the defect, and the structural fix was to put the client's gates in
+the preflight — but the diagnosis is the part worth keeping. The preflight ran
+the .NET suite, conformance, interop, the mutation gate and the workflow check,
+and never ran the client's lint, typecheck, unit tests or build. **The one area
+of the repository where these mistakes were being made was the one area the
+preflight could not see.**
+
+That is this entry's shape exactly, one level up: the guard covered a set of
+instances and was read as covering the property "the gates are green". Ask of a
+process guard what this entry asks of a textual one — not "does it check
+something" but "what passes it without being correct" — and the answer here was
+available before the fact: everything the guard does not look at.
+
+### 13.20 Seven tasks reported against a workflow that never ran
+
+Editing `ci.yml` during 3b.1 inserted a step above a trailing
+`working-directory:` line that belonged to the step before it, leaving two
+`working-directory` keys on one step. GitHub Actions rejects a duplicate mapping
+key and fails the run before scheduling anything.
+
+Every push from 3b.1 through 3b.8 was a startup failure. Eight jobs — the .NET
+suite, cross-implementation conformance, the mutation gate, the secret scan —
+did not run at all for seven consecutive tasks, each of which was reported as
+complete.
+
+Nothing about that is visible without going and looking. A startup failure has
+no failing step, no log, and no annotation; the run list shows a red mark like
+any other. Its one tell is cosmetic: with the file unparseable the run cannot
+read the workflow's `name:`, so it is listed by path instead — `.github/workflows/ci.yml`
+where every green run above it says `CI`. And locally nothing goes red, because
+no local tool reads this file. Even a YAML parser is no help: PyYAML, and every
+other library in common use, accepts duplicate keys silently with the last value
+winning. "It parses" was true and meant nothing.
+
+Two things follow, and only the second is new.
+
+**§12's preflight already covers this and was not run.** It requires a status
+file naming the pushed commit and refuses one that lists no jobs — which is
+exactly what these runs produced. The rule existed, was written after the same
+class of failure in Phase 2.5 (§12), and was skipped for seven tasks because
+each one ended in a local green suite that felt like enough. A gate that is only
+consulted when someone remembers is not a gate; the preflight is now run at
+every task boundary rather than at the phase report.
+
+**And the failure should never have needed a remote check to find.** A workflow
+file that the CI provider will reject is a local defect in a local file, and
+`scripts/check-workflows.sh` now fails on it before the push — duplicate keys
+specifically, plus a missing `name`, since an unnamed workflow is listed by path
+and therefore looks exactly like a startup failure in the one place the
+difference shows. It runs first among the preflight's local gates, because a
+green job table is meaningless if the run that produced it executed nothing.
+
+The wider point is the one §13.17 made about the sabotage harness, arriving from
+the other direction: **the machinery that reports on the work is not covered by
+the work's own tests.** A test suite says nothing about whether CI ran it. Both
+findings are the same shape — an apparatus trusted because its output looked
+normal — and in both cases the output was normal precisely because nothing had
+happened.
+
+### 13.21 A ratchet keyed on line numbers is not a ratchet
+
+With the workflow fixed (§13.20), the mutation gate ran for the first time since
+3b.1 and reported 34 newly-undetected mutants — apparent coverage collapse
+across `Replica.cs`.
+
+Thirty of them were the same mutants as before, moved. The floor keyed each
+entry as `file:line:column:mutator`, and 3b.4 added 54 lines near the top of
+`Replica.cs`, so every known entry below the insertion arrived at a new address
+and read as new.
+
+That direction is only noise, and its danger is what the noise invites: the
+obvious response is to paste the new list into the floor, which is how a
+ratchet becomes a rubber stamp. The direction that actually matters is the
+silent one. After a shift, a genuinely new undetected mutant that lands on a
+line number a moved entry used to occupy is absorbed as already-known. The gate
+stays green while coverage falls, which is the exact failure the floor exists to
+prevent, caused by the floor's own key.
+
+The key is now the mutated source line's **text**, with the mutator and its
+replacement: `file:mutator:replacement:line text`. It changes when the code
+changes and not before, which is when re-review is wanted. Entries are counted
+rather than set-membership, because two mutants of the same shape on identical
+lines are two gaps and collapsing them would let one become covered while the
+other quietly took its place.
+
+**And under the noise there was a real finding**, which is the argument against
+re-baselining without reading. Four mutants were genuinely new, and two of them
+were `DuplicatesDropped++` — deleted, and turned into a decrement. §13.15 was
+written about that very counter: a mechanism whose absence still converges has
+to be asserted directly. It *was* asserted — in `Editor.Api.Tests` and in the
+TypeScript suite, but not in `Crdt.Core.Tests`, which is the only suite the
+mutation gate drives. The watermark-path increment had no assertion where it is
+measured, and the gate said so the first time it was allowed to run.
+
+Worth reading with §13.15 rather than beside it: that entry named a class of
+defect, and this is that class producing its next instance, in the very
+mechanism the entry was written about. "Assert the mechanism directly" turns out
+to carry an unstated second half — *in the suite that measures it*. A counter
+asserted in three suites and unasserted in the one the gate drives is, to the
+gate, a counter nothing asserts.
+
+The general rule: **a ratchet's key has to be as stable as the property it
+tracks.** A key that moves for reasons unrelated to the property produces false
+alarms, which train the reader to clear them in bulk, and false silence, which
+is unobservable. Position is the most tempting such key and the least stable
+one.
+
+### 13.22 A done-when the phase can satisfy while its deliverable does not exist
+
+Phase 4's done-when was met in full and Phase 4's deliverable did not exist.
+Offline edit, reconnection, convergence on §9 normalised state, resumption
+across a reload, a store version rejected rather than guessed — all verified
+against a real server over a real socket. And `App.tsx` still rendered *"No
+editor yet — see PROJECT_SPEC.md §11, Phase 4"*. Every part of a React editor
+was written and tested; nothing composed them into something a person could
+open.
+
+Neither half was wrong on its own. The criterion tested the properties that are
+hard to get right, which is what a criterion should do. The deliverable column
+said "React client". What was missing is that satisfying the first does not
+produce the second, and nothing in the table says it must.
+
+**This is the project's recurring shape, applied to the contract instead of to a
+test.** §13.15: a mechanism whose absence still converges. §13.19: a sentinel
+matching the syntax rather than the property. §13.21: a ratchet keyed on
+position rather than on the property. Each time, the check was adjacent to the
+thing that mattered and was read as covering it. A done-when is a test of a
+phase, and it fails the same way.
+
+**The audit this triggered**, over the phases not yet built:
+
+- **Phase 5** — no gap. "1,000 generated traces match across both
+  implementations; runner fuzzes in CI" is the deliverable, stated as a
+  behaviour.
+- **Phase 6** — the same gap. "Every requirement in §7 has a passing test" is
+  satisfiable entirely against a test host, while the application as actually
+  started ships without the header, the cap or the TLS requirement the test
+  proved. The criterion now names the configuration under test.
+- **Phase 7** — the same gap, in its plainest form. "Dashboards exist" is
+  satisfied by a JSON file nobody has ever read. Existence is not observability;
+  the criterion now requires a named failure to be diagnosable from them.
+
+The general rule: **a done-when must be unsatisfiable while the deliverable is
+absent.** Write it so that the only way to make it true is to build the thing —
+and when a criterion tests a property *of* the deliverable rather than its
+existence, say so and add the clause that requires the deliverable itself. The
+question to ask of every criterion in the table is the §13.19 question in
+another costume: what makes this true without making the deliverable real?
+
+### 13.23 A harness that cannot explain its own failure
+
+The interop job failed once, on 4.7, with the whole of its evidence being:
+
+```
+API did not start:
+warn: Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager[35]
+      No XML encryptor configured.
+```
+
+No elapsed time, no exit status, no address, no indication whether the process
+had crashed, was still starting, or was listening and refusing. It did not
+reproduce on the next two heads, and nothing between 4.5 and 4.7 touched the
+server — so the honest conclusion is that nothing was learned.
+
+The harness had also chosen its port by `5000 + random(3000)` and hoped. A lost
+guess and a genuine startup bug produce the identical sentence, which means the
+one occurrence that matters is indistinguishable from the many that do not.
+
+Both are now fixed at the source rather than at the symptom: the port is bound
+as 0 and read back from Kestrel's own announcement, so there is no guess to
+lose; and the failure carries how long it waited, what the process is doing or
+exited with, the address it polled, and — stated explicitly when it happens —
+that the process logged nothing at all, which is itself a finding.
+
+The rule: **a harness that cannot explain its own failure costs more than the
+failure it reports.** An unexplained failure is filed as flakiness, and once a
+job has been filed as flaky, its next real failure is filed the same way. The
+diagnosability of a check is part of the check, not a convenience for whoever
+reads it — and a retry, a longer timeout or a wider deadline treats the symptom
+while leaving the next occurrence exactly as illegible as this one.
+
+### 13.24 The running count: tests that pass for the wrong reason
+
+The dominant defect class in this project is not a wrong implementation. It is a
+**check that cannot fail** — a test whose assertion is true whether or not the
+code is correct, a guard that matches a pattern instead of a property, a
+criterion satisfiable without the thing it names. This entry keeps the count,
+because the frequency is the argument. Anyone asking why this project spends so
+much of its time on tests that test tests should be shown this list rather than
+an opinion.
+
+| # | Phase | What passed for the wrong reason | How it was found |
+|---|---|---|---|
+| 1 | 3 | A shutdown-race test written against the wrong path; passed whether or not the code was correct | Sabotage |
+| 2 | 2.5 | The cross-implementation comparison did not fire when a run-encoding guard was dropped — the corpus never reached the shape (§13.11) | Sabotage |
+| 3 | 3b | `DuplicatesDropped++` asserted in three suites and not in the one the mutation gate drives — to the gate, a counter nothing asserts (§13.15, §13.21) | Mutation gate, once §13.20 let it run |
+| 4 | 4 | 4.8's end-to-end test stayed green with the reconnect catch-up removed: the author had nothing to catch up on (§12) | Sabotage |
+| 5 | 4 | "Retries once after a catch-up" was in fact "never retries" — the recovery called `drain()` from inside `drain()` and hit the re-entrancy guard. The assertion passed, about a recovery that never happened | Writing the paired test |
+| 6 | 4 | The editor was uncontrolled-equivalent and passed 98 tests, because the remote-edit test fed `session.text` back into the component | Sabotage (`value` → `defaultValue`) |
+
+Six occurrences across four phases, and the two most recent are the same shape
+as each other: an assertion that was *about* a mechanism, satisfied by a path
+that did not involve the mechanism. Note what found them. Four of six were found
+by deliberately breaking something; one by the mutation gate, which is sabotage
+mechanised; one by writing the pair a rule already required. **Reading found
+none of them.** That is not a comment on care — each of these was read, by
+someone who had just written it and knew what it was for.
+
+The related family, where the same shape appears somewhere other than a test:
+§13.19 (a guard matching syntax rather than property), §13.21 (a ratchet keyed
+on position rather than property), §13.22 (a done-when satisfiable while the
+deliverable is absent), and §13.19's process instance below. They are the same
+defect wearing different clothes, and they are why the practices in §12 are
+practices rather than preferences.
+
+**Append to this table whenever another is found.** A count that stops being
+maintained becomes an anecdote, which is the genre this project is trying to
+leave.
+
+### 13.25 Report what was compared, not what was intended
+
+Every valid record in the client's IndexedDB store failed to load, reporting:
+
+> unsupported store version 1; this build understands 1
+
+The message is not merely unhelpful; it is evidence *against* the actual cause,
+because it names the one thing that was fine. The real failure was two lines
+away: `instanceof Uint8Array` returns false for a `Uint8Array` that crossed the
+structured-clone boundary into another realm, so the payload check failed and
+the error path chosen was the version one.
+
+This is the one defect in Phase 4 that reading would never have found. The code
+is correct-looking in the strongest sense — `instanceof` is the idiomatic check,
+and it works everywhere except across the boundary this code exists to cross.
+
+The generalisation is about the message rather than the bug: **an error must
+report what was actually compared, not what the author intended to compare.**
+"Unsupported version 1; this build understands 1" is a sentence that cannot be
+true, and a message that cannot be true is worse than no message, because it
+sends the reader to the wrong file with confidence. Where a check has several
+failure modes, say which one fired and with what values — and if the values
+make the sentence absurd, that absurdity is the finding.
+
+Same family as §13.23: a failure that cannot explain itself costs more than the
+failure. There it was a harness, here a product error path, and the cost is
+identical — time spent in the wrong place, and a real cause filed as something
+else.
+
+### 13.26 The end-to-end suite was testing a build no user receives
+
+The browser suite for 4.10 failed with the page showing *"No matching state
+found in storage"* — `oidc-client-ts` refusing to complete a redirect whose
+single-use state it had already consumed. The obvious reading is a bug in the
+sign-in code, and there was one. It was not why the test failed.
+
+The application under test was **React's development build**. Vitest sets
+`NODE_ENV=test` in its own process; the harness spawned `npm run build` from a
+test and inherited it; Vite resolved React through its `development` export
+condition. The artefact served was 575 KB instead of 377 KB, and — the part that
+mattered — it ran Strict Mode's deliberate double-invocation of effects, so the
+sign-in effect ran twice and the second call found the state spent.
+
+Two distinct failures, and it is worth separating them:
+
+1. **The harness built something other than what ships.** §13.17 in another
+   costume: there, a sabotage run reported on a stale build; here, an end-to-end
+   run reported on a build produced under the wrong environment. Both are the
+   same mistake — *believing a result is about the artefact you meant*. Note
+   that this one could not be seen from the source at all: the code was correct
+   and the bundle was wrong.
+2. **Completing an OIDC redirect inside a React effect.** It consumes a
+   single-use authorization code and a single-use PKCE verifier, and React runs
+   effects more than once — on purpose in development, and for real on any
+   remount. The development build made it fail every time; a production build
+   would have hidden it until the first remount, in front of a user. The
+   bootstrap now runs once, outside React.
+
+The second was found only because of the first, which is the uncomfortable part:
+the wrong build is what made a latent fault deterministic. A correct harness
+would have shipped this bug.
+
+**The fix is in two halves and only one of them is the point.** Setting
+`NODE_ENV=production` for the spawned build addresses today's cause. Asserting
+the artefact — the built bundle must not contain React's development build —
+addresses whatever tomorrow's is: a changed default, a new wrapper script, a
+plugin that reads the environment itself. The general rule: **when a harness
+builds the thing it tests, it must check what it built, not just how it asked
+for it.** A build command is an intention; the bundle is the fact.
+
+What defeats the check (§13.19, asked of this guard in the same commit): a
+future React whose development build drops the console string it keys on, or a
+bundler that strips console text. It is a marker standing in for a property that
+has no marker of its own, and it is recorded here as such rather than trusted as
+a proof.
+
+**What it did not cost, checked rather than assumed.** The first instinct was
+that §13.13a's client-bundle numbers — the ones the MessagePack decision turned
+on — had been measured the same way. They had not: that harness builds with
+esbuild from its own entry points, imports no React at all, and sets `minify`
+explicitly, so those figures stand. What *was* affected is the application
+bundle size `vite build` prints in CI, which has been reporting a development
+build all along.
+
+The distinction is worth the paragraph because the reflex after finding a
+measurement bug is to distrust every measurement, and the useful response is to
+go and look at each one. Neither harness recorded *which* build it measured,
+which is the actual gap: a number without its build mode is a number that cannot
+be checked later.
+
+### 13.27 A hole between criteria, and the walk that finds it
+
+Nothing in this product creates a document.
+
+Eleven phases of criteria were satisfied without anyone noticing, because every
+one of them tested a system that already had a document in it. Phase 2's schema
+has a `documents` table and a `document_members` table and integration tests
+that write to both. Phase 3's authorization tests seed a membership and check it
+is enforced. Phase 4's client opens `/d/{id}`. Both harnesses seed through
+`psql` because there is no path to do it otherwise, and each recorded that as a
+harness detail rather than as a missing feature.
+
+Every criterion was individually complete. **The gap is between them, and it is
+invisible from inside any one of them** — each assumed the thing it needed was
+somebody else's, and no criterion's field of view includes the question "where
+did this come from?" §13.22 was a criterion adjacent to its deliverable; this is
+the other shape: a set of criteria that jointly leave a hole, where no single
+one is wrong.
+
+**The general form.** A conjunction of complete criteria is not a complete
+criterion. Coverage of the parts says nothing about coverage of the seams,
+because a seam belongs to no part.
+
+**The self-concealment mechanism, stated as something to watch for rather than
+as what happened once.** The person who writes a harness around a missing
+feature is the same person who would otherwise have noticed it was missing — and
+the workaround makes every later test pass, so the evidence of the gap is
+consumed in the act of creating it. Both harnesses in this repository seed
+documents through `psql`, and both filed that as a harness detail.
+
+So it has a check of its own, to be asked whenever a harness reaches past the
+product:
+
+> **Every time a test harness does something the application cannot do, that is
+> a finding until proved otherwise.** Write down which product capability is
+> missing, then decide whether it is deferred — with an owner — or simply
+> absent. "The harness seeds it" is a description of a workaround, never a
+> justification for one.
+
+The tell is a harness step that has no counterpart in the product: a direct
+database write, a hand-built row, a value conjured that nothing issues. Each is
+a sentence beginning "in real life this would come from…", and the end of that
+sentence is either a feature or a gap. This will recur, because harnesses are
+written under pressure to get to the interesting assertion.
+
+**The audit that catches it is not per-phase.** No amount of re-reading a
+phase's done-when finds a hole outside it. What finds it is walking what a user
+does from a cold start with nothing seeded — no database rows, no environment,
+no fixtures — and following the path until it breaks:
+
+> Deploy the artefact this project publishes. Reach it. Sign in. Create a
+> document. Find it again tomorrow. Let someone else in. Type. Leave.
+
+Do the walk with nothing in hand. The first step that cannot be taken is the
+finding, and then keep walking past it on paper, because the interesting gaps
+cluster after the first one — nobody has been down there either.
+
+**The walk's value is entirely in where it stops, so the stopping point is the
+output.** A green walk with no recorded stopping point is either a finished
+product or a walk trimmed to what passes, and nothing in the result distinguishes
+them — which makes an unannotated green walk worth less than no walk, because it
+reads as evidence. Record the step reached and the step that could not be taken,
+every time, including when the answer is "further than last time and still not
+the end".
+
+**Run it at least once per phase from Phase 5b on, and record the step where it
+stopped.** A walk that gets further than the last one is progress that no test
+suite reports; a walk that stops in the same place twice is a row in the
+deferred register that is not moving.
+
+**The walk must reach an invisible subsystem too, and Phase 7 is the first that
+has one.** GC is not a feature: nobody asks for it, no screen shows it, and the
+walk as written cannot tell whether it ran. That is precisely the argument for
+adding a step rather than skipping one — without it, an entire phase is verified
+only against test hosts, which is the state Phase 5b existed to correct. The
+step observes GC's *effect* on the deployed stack: a snapshot that is smaller
+after a collection cycle than before it, or a collected count read from a real
+endpoint. It is a weaker step than "a person does X and sees Y", and a weak step
+against the artefact is worth more than a strong one against a test host.
+
+The first walk, run at the end of Phase 4, produced register rows 15 through 21
+— five of them about the deployment artefact rather than the code, and one of
+those (nothing applies migrations) sitting underneath a green Compose smoke test
+that passes because `/health/live` does not touch the database. That is this
+entry and §13.19 in the same object: a check that confirms the process started,
+read as confirming the system works.
+
+### 13.28 The smoke test was green over an empty database
+
+Of the five findings the first cold-start walk produced (§13.27), four were
+about the **artefact** and one about the code. That ratio is the diagnostic
+result, and it has a plain explanation: every done-when in this project has
+tested *behaviour*, the behaviour has been correct throughout, and the
+deployment was never anyone's criterion. So it rotted quietly under eleven
+phases of green — not because anyone skipped a check, but because no check was
+ever pointed at it.
+
+The sharpest of the four deserves its own entry.
+
+**The Compose smoke test has passed since Phase 0. A stack it passes over cannot
+serve a single request that touches Postgres.** Nothing applies migrations in a
+deployment: the API deliberately does not migrate at startup — a good decision,
+made for good reasons — and no other part of the deployment does it either. Both
+test harnesses run `dotnet ef database update` themselves and neither noticed
+that this made them the only things that ever had. A fresh `docker compose up`
+therefore comes up against an empty schema.
+
+The job that was supposed to catch this asserts that `/health/live` returns 200.
+It does return 200. It returns 200 because liveness means *the process is
+running*, which is exactly what it says and exactly what it should mean — and
+`/health/ready`, the endpoint that would probe Postgres and Redis, does not
+exist yet (register row 7), for the honest reason that an endpoint returning
+healthy without checking anything is worse than none.
+
+So every part of this is individually defensible and the composition is a check
+that cannot fail for the reason anyone reads it as covering:
+
+> The guard tested what it looked at. Everyone read it as testing what it was
+> there for.
+
+That is §13.19's pattern — the sentinel matching syntax rather than property —
+in its purest form yet, because here there is not even a mistake to point at.
+The liveness probe is correct. The name is honest. The failure is entirely in
+the inference drawn from a green tick, and no amount of reading the smoke test
+would find it: the defect is not in the check, it is in the gap between what the
+check covers and what its greenness is taken to mean.
+
+**The general rule this yields, beyond the two it inherits:** *a smoke test must
+exercise the narrowest thing that would break if the deployment were wrong.* A
+process that starts is the widest possible signal and the cheapest to satisfy.
+One request that reads a row is worth more than any number of liveness probes,
+and it is what Phase 5b's done-when now asks for.
+
+**And it is why 5b runs before 5.** Until the artefact starts against its own
+schema, every green report in this repository is a report about a test host.
+Phase 6's subject is authorization surfaces in a deployment and 6b's is controls
+in the shipped configuration; neither is trustworthy while the published image
+contains no application at all (register row 18).
+
+### 13.29 Three certificates, three one-line ways to make it all go away
+
+Phase 5b needed a self-signed certificate trusted by three different things: the
+API reaching the identity provider, Chromium reaching both the provider and the
+proxy, and Node reaching the proxy. Each arrived as a failure that stopped the
+walk dead, and each had an obvious one-line fix sitting next to the correct one:
+
+| The check | The one line | What was done instead |
+|---|---|---|
+| .NET verifying the issuer's TLS | `ServerCertificateValidationCallback = (…) => true` | `SSL_CERT_FILE` naming a bundle of the system roots **plus** this run's certificate |
+| Chromium verifying anything | `ignoreHTTPSErrors: true`, or `--ignore-certificate-errors` | `--ignore-certificate-errors-spki-list=<this key>` — one public key, pinned |
+| Node's `fetch` verifying the proxy | `NODE_TLS_REJECT_UNAUTHORIZED=0` | `NODE_EXTRA_CA_CERTS` naming that one file |
+
+Each shortcut would have made the walk green immediately. Each would also have
+disabled the check for **everything else that process later does** — and Phase
+6b's entire subject is whether the shipped configuration actually enforces §7's
+transport rules. A test suite that has quietly switched off certificate
+validation cannot report on that, and, worse, would report success.
+
+**The rule, and it is about timing rather than about TLS:** *the pressure to
+disable a check is highest exactly when the check is doing something.* A check
+that has never fired is easy to leave alone. One that is standing between you
+and a green run, at the end of a long phase, after five failed CI cycles, is the
+one that gets switched off — and it is refusing for a reason, because a check
+that refuses nothing does not create that pressure in the first place.
+
+So the counter-rule is mechanical rather than a matter of judgement, since
+judgement is exactly what is degraded at that moment: **name the specific thing
+you are trusting; never widen the class.** A file, a key, a fingerprint. Every
+one of the three correct fixes above is longer to write and narrower in effect
+than its shortcut, and that pairing — more effort, less trust granted — is what
+a correct fix to this kind of problem looks like.
+
+There is a related tell worth noticing. All three shortcuts are *documented
+features* with names that sound procedural: "ignore HTTPS errors", "reject
+unauthorized". Nothing about them announces that a security property is being
+removed, which is precisely why they get reached for while tired.
+
+### 13.30 The generator's parameter space is the outer bound, and nothing inside the suite can see it
+
+Three times now, a property suite has been green over a defect that no number of
+cases could have reached, because the shape carrying the defect was outside what
+the generator could emit at all:
+
+| When | What could not be generated | How it showed |
+|---|---|---|
+| Phase 2 (§13.10) | Documents larger than a few dozen elements — the magnitudes were literals | A stack overflow at a length users reach in an afternoon, survived by 10,000 cases per invariant and an 87% mutation score |
+| Phase 3b (§13.6) | More than one round of concurrency | Backward contiguity holding in 6581 of 6581 cases — 100.00% |
+| Phase 5 | A run of length 1, so no *single-character* concurrent insert | Two named corpus dimensions reporting identical counts, 1638 and 1638 |
+
+The general form: **the generator's parameter space is the outer bound of what
+any property test can find, and nothing inside the suite can see that bound.**
+Every case the suite runs is drawn from inside it. Adding cases, adding
+invariants, raising the mutation score, and running for longer all sample the
+same region more densely. A gap in the parameter space is therefore invisible in
+exactly the way §13.27 describes — not a failing check, but no check at all —
+and, worse, each of the three read as *reassurance*: a fast green suite, a
+100.00% hold rate, two plausible counts.
+
+**All three were found by measuring outputs.** Not by reviewing the generator,
+which was available to read the whole time and looked reasonable each time; not
+by adding cases; not by a sabotage. By the stack overflow that only appeared once
+scale was reported, by a hold rate printed as a percentage, and by two numbers
+printed next to each other that turned out to be equal. Measuring the produced
+distribution rather than the generator's knobs is the only technique that has
+ever caught this class, and it works because the parameter space is
+implicit — spread across a dozen literals, branch weights and interacting
+draws — while the distribution is a fact about what actually came out.
+
+The Phase 5 instance shows why reading the knobs does not substitute. The
+generator drew run lengths from `rng.Next(scale.MinRunLength, scale.MaxRunLength)`
+with `MinRunLength = 2`, which is legible, defensible, and states the whole
+defect: no run of length 1, therefore never a concurrent insert of a single
+character, therefore **§5's tie-break was never exercised in isolation in the
+entire project**. Nobody reading that line had noticed, over four phases, because
+it does not look like an exclusion. Two equal counts did.
+
+**Standing practice for any generator from here:**
+
+1. **Report the distribution of what was produced**, over dimensions named in the
+   specification's terms rather than the generator's — the difference §9 already
+   requires of the corpus, for this reason.
+2. **A dimension at zero fails the build.** Zero is the case that looks like
+   nothing rather than like a failure.
+3. **Read the reported numbers for relationships, not just for zeroes.** Two
+   dimensions that should vary independently and do not — equal counts, one a
+   constant multiple of the other, one always the sum of two others — mean the
+   measurement is of one thing wearing two names, or of the generator rather than
+   the algorithm. Equality between things with no reason to be equal is the
+   cheapest available signal and the easiest to scroll past.
+4. **When a distribution is measured for the first time, expect it to be wrong.**
+   All three of these were found the first time anyone looked.
+
+### 13.31 Two mechanisms, one requirement, and a test that reaches neither
+
+§7 requires revocation to take effect within five seconds. Two independent
+mechanisms produce that: eager invalidation over Redis pub/sub, and the cache's
+own five-second TTL. Both are deliberate — §7's own text says the pub/sub path
+is "an optimisation over the TTL, not a substitute for it", because treating a
+delivered message as *the* mechanism would make revocation depend on a channel
+with no delivery guarantee.
+
+That deliberate redundancy has a consequence nobody had written down. **A test
+that asserts the requirement — "the role changed within five seconds" — passes
+when either mechanism works, and therefore tests neither.** Wire a membership
+endpoint to the undecorated `DocumentRoleReader` instead of to
+`InvalidatingDocumentRoleWriter`, and every functional test still passes: the
+row is correct in Postgres, the stale entry expires on schedule, and the timing
+assertion is satisfied by the TTL alone. The eager path is simply gone, and the
+suite's report is unchanged.
+
+This is not §13.19. There, a guard checked an instance of a pattern and was read
+as checking the property. Here every check is aimed squarely at the property and
+the property genuinely holds — by the wrong route. **The general form: when a
+requirement can be met by either of two mechanisms, a test asserting the
+requirement tests neither.** It reports that *something* satisfied it.
+
+It is §13.15 arriving in authorization. There, convergence held under a large
+family of wrong implementations, which is why asserting convergence felt so
+reassuring and proved so little. The relationship is exact: a weaker mechanism
+silently substituting for a stronger one, with an observable that cannot tell
+them apart. What is new is that here **both** mechanisms are wanted — the TTL is
+not a bug to be removed, it is the floor under a lossy channel — so the answer
+cannot be "delete one".
+
+The answer is to assert each mechanism where only it can be responsible:
+
+- **The eager path** is asserted by a bound the TTL cannot meet. A grant or a
+  revocation observed materially faster than the TTL can only have come from the
+  invalidation, and the assertion says so in its name rather than reusing the
+  five-second number the other mechanism also satisfies.
+- **The TTL** is asserted with the eager path unavailable — no pub/sub delivery
+  — which is also the real failure it exists for.
+
+And the sabotage that keeps this honest is not "break revocation". It is
+**substitute the weaker mechanism**: replace the decorated writer with the plain
+one and require the fast test to go red. A sabotage that removes the requirement
+entirely would be caught by anything; the one worth running is the one that
+leaves the requirement satisfied.
+
+**Where else this shape is present in this system**, written down now so it is
+not rediscovered one instance at a time:
+
+| Requirement | Strong mechanism | Weaker one that also satisfies it |
+|---|---|---|
+| A revoked user stops editing within 5s | Pub/sub invalidation | The cache TTL |
+| An operation is not applied twice | The dedupe by `ElementId` | The CRDT's own idempotence (§13.15) |
+| A replica id is held by one connection | The Redis `SET … NX` claim | The claim's TTL expiring between attempts |
+| A client resumes rather than re-authors | `negotiate` reissuing the id | A fresh id plus an outbox that happened to be empty |
+
+Each row is a place where the phrasing "assert the requirement" is not enough,
+and the assertion has to name which mechanism it is holding responsible.
+
+### 13.32 An authorization check attached to an action only covers principals who take that action
+
+§7's role check runs on every submission. It had been read — for six phases of
+authorization work, by me — as *the* authorization check, and it is not. It is
+the authorization check **for writing**.
+
+A client that only reads submits nothing. Nothing re-checks it, nothing expires,
+and it keeps receiving every broadcast on the document for as long as its socket
+stays open. A user revoked at 10:00 was still reading the text at 17:00, and
+every test in the suite said revocation worked — because every revocation test
+revoked a *writer*, then asserted the write was refused.
+
+**That last clause is the whole finding.** A writer is what you reach for when
+testing a write-authorization check: the test is written from the check
+outwards, so the principal it invents is one the check already covers. The
+coverage looks total from inside because the only principals in the tests are
+the ones the mechanism handles.
+
+**The general form: an authorization check attached to an action only covers
+principals who take that action. Passive access has no natural checkpoint, so it
+needs a mechanism the principal does not trigger.** Anything a principal
+*receives* rather than *requests* — a broadcast, a subscription, a stream, a
+long-poll, a pushed notification, a session that stays open — is outside every
+check hung off a request, and the gap is invisible in exactly the way §13.27
+describes, because no test fails.
+
+The mechanism here is a sweep over the connections each instance holds
+(`MembershipSweep`), and two things about it are worth keeping:
+
+- **Its bound is composed and enforced rather than asserted.** Worst case from
+  revocation to close is the role cache's staleness plus the sweep's interval,
+  so the constructor refuses to start on a configuration where those two numbers
+  exceed §7's five seconds. Two numbers in different files cannot drift into
+  violating the requirement, and nobody has to remember the arithmetic.
+- **The two-direction test is what makes it trustworthy.** A revoked member's
+  connection must close; a member *demoted to viewer* must keep theirs, stay
+  connected, and be refused on the next write. Without the second assertion,
+  "closes revoked connections" silently becomes "closes on any membership
+  change" — a security hole traded for an unmeasured usability one, with the
+  suite equally green either way.
+
+**The question to ask of any authorization rule from here:** who is subject to
+this, and what do they have to *do* to be subject to it? If the answer is "make
+a request", then everyone who makes no request is uncovered, and that set is
+usually the readers.
+
+**This is now a checklist item rather than a pattern to recognise** — §12's
+"who takes this action, and who doesn't?" — because the fourth occurrence was
+*predicted* from it before any code existed and found exactly where predicted.
+A pattern that predicts has earned being asked every time.
+
+### 13.33 A timing budget tests whichever mechanism meets it
+
+§13.31 says a requirement satisfiable by either of two mechanisms is tested by
+neither. Phase 6 wrote tests specifically to catch that — a grant asserted
+inside a budget the cache TTL could not meet, so only the eager invalidation
+could produce a pass — and then one of those tests passed via a third mechanism
+nobody had counted.
+
+The sabotage tells it: substituting the undecorated writer failed two of six
+revocation tests and left "revoking removes the document from what the member
+can reach" green. That test probed the *listing* before revoking, and §9 makes
+the listing deliberately uncached. So the role cache was never populated for
+that pair, the read after revocation went straight to Postgres, and the
+assertion was met by the source of truth while the mechanism it named sat
+unused. **A test written to catch mechanism-substitution was passing via a
+substitute mechanism.**
+
+The rule, and it is narrower and more useful than §13.31's:
+
+> **A test asserting a timing budget tests whichever mechanism meets it, and the
+> assertion cannot say which one ran.** A budget is a statement about the clock,
+> not about the code path: every implementation fast enough passes it, including
+> the one that does no caching at all.
+
+So, mechanically: **any test of a cache-invalidation path must first prove the
+cache was populated.** A read that the invalidation is supposed to affect has to
+happen *before* the write, and the test has to assert that read got the stale
+answer. Without it the test exercises the uncached path with extra steps, and
+looks exactly like the test that matters.
+
+The same shape applies wherever a fast path sits in front of a slow correct one:
+a memo table, a CDN, a prepared-statement cache, a connection pool. The
+assertion "it was fast enough" is evidence about the wall clock. Naming the
+mechanism means arranging for the slow path to be *wrong* first, and then
+watching it be corrected.
+
+### 13.34 A mechanical guard has mechanical failure modes
+
+Phase 6 replaced `psql` seeding with the product's own endpoints and added a
+gate to keep it that way, on the argument that a criterion checkable by grep
+beats one requiring judgement — judgement at the end of a long phase is what
+produced register rows 15 and 16 in the first place.
+
+The gate was written. Then, checking that the grep returned nothing, it returned
+one line: the comment in the harness stating the rule, which contains the string
+the rule forbids. **The guard was defeated by its own documentation**, and would
+have been red on a clean repository from the moment it was written.
+
+It is a small failure and the point it makes is not. "Checkable by grep" is a
+claim about *how* a check runs, not about *whether it is correct*. A mechanical
+guard trades one class of failure for another: it cannot be forgotten, cannot be
+skipped when tired, cannot be argued with — and it also cannot tell code from
+prose, an example from an instance, or a test fixture from a violation. §13.19
+is the same lesson from the other side: there a textual guard covered the
+instances of its pattern and was read as covering the property; here a textual
+guard covered an instance that was not a violation at all.
+
+Both directions are now on the record, and the practice is the same one:
+
+1. **Run the guard and read what it matched**, on the commit that adds it.
+   Not "does it pass" — *what did it look at*. This one passed nothing and
+   matched its own comment; the fix was to move the rule's text into
+   PROJECT_SPEC.md §12 and leave the harness pointing at it.
+2. **Sabotage the guard itself**, which caught nothing here only because step 1
+   already had. Adding a violating line failed the gate, named the file and the
+   line, and exited 1.
+
+And the honest note: **this criterion was the user's, and I argued for
+implementing it as written.** It was the right criterion and the literal
+implementation of it was wrong, which is the ordinary way a good rule meets a
+real repository.
+
+### 13.35 The checks that never fail for an interesting reason are the ones dropped from the fast loop
+
+Formatting was red in CI on two consecutive pushes in Phase 6, and I found it at
+the phase preflight rather than while working. The cause is not mysterious and
+is worth naming as a category rather than an incident.
+
+Through the phase I ran the gates that could tell me something: the test suites,
+the client gates, conformance, interop, end-to-end. I did not run
+`dotnet format`. Nothing decided that — it fell out of the loop, because it is
+the gate whose failures are never interesting. An import in the wrong order
+teaches nothing, changes nothing about the design, and is fixed without thought.
+
+**That is exactly why it gets dropped, and exactly why it then fails.** The
+selection pressure on a per-task loop is toward checks that pay for their
+runtime in information. A check that has never once told me something worth
+knowing loses that competition every time, permanently, until it is the only
+thing standing between a push and a red build.
+
+Two consequences, both about where such a check belongs:
+
+- **Boring is not unimportant.** A formatting gate is cheap to satisfy and
+  cheap to violate, and its whole value is that nobody has to think about it —
+  which requires it to run without anybody choosing to run it.
+- **So it belongs in the loop that cannot skip it**, not in the one exercising
+  judgement. `phase-preflight.sh` already runs it and did its job; the failure
+  was that the phase's *working* rhythm had no place for it. The remedy is the
+  same shape as §12's rule about guards running on a schedule something else
+  keeps: a check nobody has a reason to run needs a runner with no discretion.
+
+The generalisation for any suite: **rank checks by how often they have taught
+you something, and the ones at the bottom of that list are the ones to automate
+hardest.** They are not candidates for removal — they are the ones a human loop
+will silently stop performing.
+
+### 13.36 The guard audit: what ten guards actually look at
+
+§13.19 scheduled this and §13.34 said how to run it — **run the guard and read
+what it matched, not whether it passed.** Ten guards, each asked the same two
+questions: what does this scan, and what defeats it without matching its
+pattern?
+
+| Guard | What it looks at | Finding |
+|---|---|---|
+| Architecture test | Reflection over loaded assemblies, plus `ProjectReference` elements in the four projects named in its own allow-list | **Bypass.** It iterated the allow-list, so a *fifth* project under `src/` was not forbidden — it was unexamined. Fixed: `src/` is enumerated and a project missing from the list fails the test |
+| `TokenValidationTests` — switches | Every `.cs` and `.json` under `src/` and `tests/`, excluding itself **by file name** | **Bypass.** Any file named `TokenValidationTests.cs`, anywhere, was exempt: a blind spot creatable by choosing a file name. Fixed: excluded by full path |
+| `TokenValidationTests` — validators | The same files, for a delegate assigned in place of a check | **Bypass, of a different kind.** The configuration-reachable way to weaken §7's lifetime check is `Oidc__ClockSkew` — a *number*, which no pattern over switches and delegates can match, and whose range permitted the framework's five-minute default that `OidcOptions`' own comment condemns. Fixed by tightening the bound to 30 s rather than by adding a pattern, and the deployment suite now derives its expiry margin from that constant |
+| 4.9's storage sweep | `localStorage`, `sessionStorage`, cookies and the URL | **Bypass, and the sharpest.** §7 names five stores; this checked four. The one it skipped is **the only store this client writes to** — IndexedDB holds the replica and the outbox — so a token filed beside them was in the one place the sweep could not look. Fixed, with an assertion that the sweep found *something*, since an empty IndexedDB would make the check a fact about an empty browser |
+| Redaction sentinel | A sentinel value driven through a hub connection and the logging pipeline | **Gap.** It traverses the hub. Phase 6 added six REST endpoints, and the sentinel never travels them, so a token logged by the document API is invisible to it. Recorded as register row 24 rather than fixed here — it is a test to write, not a guard to repair |
+| Seeded-documents grep | `client/src`, for a raw insert into `documents`, `document_members` or `users` | **Gap.** The rule is enforced on the TypeScript side only; the C# harness still writes document rows directly in eleven call sites. Register row 25 — the rule is right and the scope is half of it |
+| Mutation ratchet | Undetected mutants in `Crdt.Core`, keyed on source-line text | **Scope limit, already known and now written down.** Stryker cannot drive the two MTP test projects, so `Editor.Api` and `Editor.Infrastructure` have no mutation coverage at all. Not a bypass; a boundary that had never been stated as one |
+| Workflow check | Every workflow parses, and every job is reachable | **Weakness, unfixed.** It proves the file parses and the jobs exist; a step guarded by an `if:` that is never true satisfies it. Recorded rather than fixed: no bypass exists today, and a check for "this step actually ran" is the CI status the preflight already reads |
+| §13.26 production-build marker | The built bundle, for React's development banner | **Narrow but honest.** It detects React's dev build specifically. Another library's development artefact would pass. Left as is: the marker names the thing it detects and does not claim more |
+| gitleaks | Secret-shaped strings across the repository | **No new finding.** Its patterns are its own and §13.19 already states the weakness — a credential assembled from parts at runtime is not secret-shaped |
+
+**Four bypasses, three of them fixed in this task, each demonstrated in both
+directions**: the violation was introduced, the pre-fix guard was shown green
+over it, the fix was applied, and the same violation was shown red. A fix
+asserted without watching the guard fail is a fix nobody has evidence for.
+
+Two things worth keeping beyond the individual findings.
+
+**Every bypass was found by asking what the guard reads, and none by reading
+what it matches.** The regexes were all correct. The architecture test's
+pattern was right and its *iteration* was wrong; the storage sweep's JWT regex
+was right and its *list of stores* was short; the token scanner's patterns were
+right and the weakening was a number. A guard is a pattern applied to a corpus,
+and the corpus is where the holes are — but the pattern is the part that gets
+reviewed, because it is the part that looks like the rule.
+
+**The two "no finding" rows are the ones to distrust.** Ten guards, four
+bypasses, and a clean bill for gitleaks and the production-build marker is a
+result I would not present as strong: those two are third-party or narrow by
+construction, so "nothing found" partly reports that I had less to look at. If
+this audit runs again it should start with them.
+
+### 13.37 A limit's number is set by the largest legitimate use, not by the abuse it is named for
+
+6b.4 implemented §7's submission rate limits and gave them a default of a
+thousand code points per ten seconds. The reasoning written beside the number
+was about typing: a fast typist sustains around ten code points a second, so a
+hundred a second leaves an order of magnitude of headroom. Every word of that is
+true and the number was still wrong, because **typing is not the largest thing a
+person does to a text editor.** Pasting is. Three pages of prose is three
+thousand code points arriving as twelve batches back to back, and the limit
+refused it.
+
+The general form: **a control's default is set by the upper end of legitimate
+use, and the upper end is rarely the activity the control is named after.** A
+rate limit on submission gets reasoned about in terms of typing because "rate"
+and "typing" belong to the same mental picture; the number that matters belongs
+to pasting, which is the same requirement's other end and does not come to mind
+while writing the limiter. The same shape is waiting in the other limits this
+system has: a connection cap reasoned about in terms of tabs and met by a
+reconnect storm, a payload cap reasoned about in terms of keystrokes and met by
+an undo of a paste.
+
+**What found it was two unrelated tests going red**, not review and not
+judgement. `IngestValidationTests` fills a document to its byte cap by
+submitting ten thousand code points as fast as the loop goes, and it came back
+`rate_limited` instead of `document_full`. That is the mechanism rather than a
+lucky accident: a suite that exercises the application at the top of its
+legitimate range will tell you a new limit is set too low, and a suite that only
+exercises the middle will not. The rate limit's own tests all passed throughout
+— they were written against small configured budgets and could not have noticed.
+**No test written for a limit ever notices that the limit is in the wrong
+place.**
+
+**And the fix has a second half.** Those two tests now configure the budget out
+of the way explicitly, with a comment saying why: they push past any sane abuse
+budget deliberately, because the cap under test is the document's and not the
+clock's. Raising a limit so a red test goes green is how a control is quietly
+disabled; doing it in the two tests that are about a different cap, in writing,
+with the limit's own tests untouched, is scoping. The difference is whether the
+change is stated and whether anything still exercises the limit.
+
+#### The general form, and it is a class of its own
+
+**No test written for a limit ever notices that the limit is in the wrong
+place.** A limit's tests prove that it *enforces* — that the value is refused
+above the number and accepted below it — and every one of them passes when the
+number is wrong, because they are written in terms of the number. The rate
+limit's suite was green throughout; it was correct; it was testing a limit set
+where a paste breaks.
+
+This is not the same failure as §13.19's guard that cannot fail, or §13.31's two
+mechanisms, or §13.22's existence-instead-of-behaviour. Those are tests that
+reach nothing. This is a test that reaches exactly what it was written to
+reach, is entirely sound, and is silent about the only question that matters
+once the mechanism works. **The mechanism being right and the number being right
+are two claims, and every test in this repository up to 6b.6 tested only the
+first.**
+
+Every tuned value here has that shape:
+
+| Value | Default | Proven to enforce by | Largest legitimate use it must admit |
+|---|---|---|---|
+| `MaxDocumentBytes` | 5 MB | `IngestValidationTests` | a long document, appended to over months |
+| `MaxOperationsPerBatch` | 256 | `IngestValidationTests` | one keystroke batch under load, one paste chunk |
+| `MaxRunCodePoints` | 256 | `IngestValidationTests` | a pasted paragraph before the client splits it |
+| `MaxMessageBytes` | 64 KB | `IngestValidationTests` | the largest batch the client can build |
+| `MaxReplicasPerDocument` | 50 | `NegotiateTests` | a class, a team, a workshop |
+| `CodePointsPerConnection` | 10,000 / 10 s | `RateLimitTests` | pasting three pages |
+| `CodePointsPerUser` | 30,000 / 10 s | `RateLimitTests` | pasting in three tabs at once |
+| `WritesPerUser` | 120 / min | `DocumentApiRateLimitTests` | sharing a new document with a team of thirty |
+| `MaxPerUser` (connections) | 32 | `ConnectionLimitTests` | a dozen documents open, and a wake-from-sleep reconnect on top |
+| `ConnectTicketOptions.Lifetime` | 60 s | `ConnectTicketTests` | a slow first load on a cold stack |
+| `ReplicaClaimOptions.Lifetime` | 2 min | `ReplicaResumptionTests` | a reload across a slow network |
+| `DocumentRoleCacheOptions.Ttl` | 4 s | `DocumentRoleCacheTests` | — bounded by §7's five seconds, not by use |
+| `MembershipSweepOptions.Interval` | 1 s | `MembershipRevocationTests` | — as above |
+| pending-set bound | per connection | `CausalDeliveryTests` | a burst arriving out of order across a partition |
+| offline window | §9 | `offlineWindow.test.ts` | a laptop closed over a weekend |
+
+The right-hand column is the one nothing tests.
+
+**Two of its cells are wrong, and row 27 found out by measuring.**
+`MaxMessageBytes` and `MaxDocumentBytes` are resource guards rather than
+capacity limits: their numbers come from what the process may be made to
+allocate, not from what a person does, and no use test can set them. §13.45
+carries the distinction and the measured headroom for all thirteen.
+
+#### The standing technique
+
+**For each configured limit, one test that performs the largest thing a real
+user legitimately does and asserts it succeeds.** Not a test of the boundary —
+the boundary is where the limit's own tests already live — but a test written in
+terms of the *use*, whose numbers come from what a person does rather than from
+the configuration. It fails when the limit moves under it, which is exactly the
+event nothing else reports.
+
+Two properties make it work, and both are what made the accidental version work:
+
+1. **It must not read the configured value.** A test that computes its input
+   from `MaxDocumentBytes` is testing the number against itself and passes at
+   any setting. `IngestValidationTests` found the rate limit precisely because
+   it was written about a *different* cap and its volume came from the document
+   size it was filling.
+2. **It must be phrased as the action, not the quantity.** "A three-page paste
+   is accepted" survives a change to how pastes are chunked; "12 batches of 256
+   are accepted" does not, and quietly stops testing pasting.
+
+Two of these already exist by accident. The rest are register row 27, because a
+technique that depends on being remembered is the thing §12 exists to replace —
+and because writing them found, in the one case where it happened by luck, a
+number that broke the application.
+
+### 13.38 A duration means nothing until you name which boundary it measures
+
+While reading run 79 I wrote: *"The walk job passed — but in 84 seconds, when
+the walk alone previously took ~70s for one bring-up. Two bring-ups in 84s is
+implausible. Checking whether the suite ran at all."*
+
+The suspicion was right to raise and the check was right to run. The arithmetic
+was comparing two different things:
+
+| Number | What it actually measures | Run 79 |
+|---|---|---|
+| 2m 6s | the **job**, including checkout, `npm ci` and a 32-second Chromium install | 11:28:51 → 11:30:57 |
+| 84s | the **step** that runs `./scripts/walk.sh` | 11:29:31 → 11:30:55 |
+| 81.94s | the **vitest run**, both files | reported by vitest |
+| 69.5s | **one file**, `walk.e2e.test.ts` | reported by vitest |
+
+Four boundaries, spanning 2:06 down to 1:09 — a 45% spread over the same piece
+of work. The 84 was read correctly off the step timings and the ~70 was a
+remembered vitest *file* duration, so "84 against 70" compared a step to a file
+and concluded that a second bring-up had happened in fourteen seconds. It had
+actually happened in 11.3, which the log says plainly, and which is genuinely
+fast because the images were already built.
+
+**The general form: a duration is a property of a boundary, and CI reports at
+least four boundaries that all get called "how long it took".** The remembered
+figure is the dangerous half — it arrives with no boundary attached at all, and
+whichever boundary makes it surprising is the one the mind supplies. A
+comparison between a number you just read and a number you remember is not a
+measurement.
+
+The rule: **quote the boundary with the number, every time** — "the Walk step
+took 84s", never "the walk took 84s" — and when a duration is surprising, read
+the finer-grained number underneath it before reasoning from the gap. Here the
+finer-grained number was in the same log and settled the question in one line.
+
+Worth keeping for a second reason: this is the shape §13.28 warns about
+arriving as *good* news rather than bad. A number that looks too fast reads as
+"something did not run"; a number that looks reasonable reads as nothing at all
+and gets no check. The suspicion fired here because the figure was implausible.
+Had the walk step taken 110 seconds, nothing would have prompted a look, and
+the log line proving the suite ran would never have been read.
+
+**And the reader's own chain was wrong in the other direction.** The suspicion
+about 84 seconds was taken as evidence and reasoned forward to a hole in the
+preflight — which was really there, and was there for entirely different
+reasons than the ones inferred. The preflight did require `success` per job;
+what it failed to do was ask whether it had been shown every job, and read the
+run's `status` where it meant `conclusion`. Right conclusion, wrong chain.
+
+Worth recording because **a correct conclusion reached by a wrong chain is the
+hardest kind of error to catch: nothing downstream disagrees.** Every later step
+succeeds — the hole is found, the fix is real, the sabotages go red — and the
+chain that produced it is never revisited, because being right is normally the
+signal that the reasoning was sound. The only thing that separates the two here
+was going back to the primary source after the conclusion had already been
+accepted. That is the habit worth keeping: when a conclusion is confirmed,
+check the chain anyway, because confirmation is exactly when nobody does.
+
+### 13.39 Three prediction rounds wrong in the same direction
+
+6b.1, 6b.3 and 6b.4 each recorded predictions before the first run, each
+predicted at least one failure, and each came back clean. Three rounds, all
+wrong, all in the same direction.
+
+**That is data about the predictions, not about the code.** Two readings, and
+they call for opposite responses:
+
+1. **The artefact is in better shape than the model of it.** Six phases of
+   sabotage practice and vacuity analysis have made the code more likely to be
+   right on the first run than intuition — trained on the earlier phases —
+   expects. If so, the pessimism is a stale prior and should be updated.
+2. **The predictions are being produced as discipline rather than as genuine
+   estimate.** "I expect at least one failure" is the sentence the practice
+   rewards, and a prediction written because the practice expects one is a
+   ritual wearing the practice's clothes. If so, they have stopped being
+   evidence of anything and the streak is an artefact of the format.
+
+Nothing so far distinguishes the two, and guessing between them here would be a
+third prediction of the same kind. What distinguishes them is **the fourth
+round**: a prediction that names a specific mechanism and a specific observable,
+made without reference to how many failures are expected in total, and then
+graded. If that one is wrong too, reading 1 is doing real work. If it is right,
+or if it turns out to be unwriteable without inventing a candidate, reading 2
+is.
+
+Recorded now rather than after the fourth round, deliberately — writing down
+what would distinguish two explanations *before* seeing the evidence is the
+same discipline as the predictions themselves, applied one level up.
+
+### 13.40 Writing a rule does not install it; a mechanical rule does
+
+§13.38 was written to record that a duration means nothing until you name the
+boundary it measures. **One message later I reported that a CI job had been
+running for thirty-five minutes and was possibly hung. It had been running for
+eight.** I had compared a timestamp against my own sense of how much had
+happened since, which is the same error, in the same session, with the entry
+still on screen.
+
+Nothing followed from it — the next action was to look rather than to act — and
+that is not the point. The point is what it says about what writing a rule
+achieves. **A rule stated as a caution is a thing you agree with; it changes
+what you would say if asked, and not what you do while busy.** "Be careful about
+durations" and "a duration is a property of a boundary" are both true and both
+inert at the moment they are needed, because the moment they are needed is the
+moment you are not thinking about durations at all.
+
+The version that would have caught it is not more emphatic, it is mechanical:
+
+> **Read the clock. Never estimate elapsed time.**
+
+That rule has no judgement in it. It does not ask whether this is a case where
+care is warranted; it replaces the fallible step with an infallible one, and it
+is checkable afterwards — either a clock was read or it was not. The
+distinction is the same one that separates §13.19's guards from good intentions,
+and §12's preflight from a checklist item, arriving one level up: **a rule that
+requires you to notice you are in its situation is a rule that fires only when
+you were already paying attention.**
+
+So the test for a §13 entry is now: *can this be followed without recognising
+that it applies?* Where the answer is no, either it becomes a mechanical
+substitute — read the clock, run the guard and read what it matched, take the
+status file's job list from the workflow files — or it is a note about
+understanding rather than an instruction, and should say so. Several existing
+entries are the second kind honestly; §13.37's standing technique and §12's
+"sabotage from a committed tree" are the first kind deliberately.
+
+### 13.41 A test that invokes the mechanism directly proves the mechanism works, not that anything invokes it
+
+7.1's retirement tests all called `RetireAsync` themselves. Every one passed,
+the sweep was correct, and **all of them would have passed with the hosted
+service unregistered** — the mechanism right and unreachable, which is §13.19's
+shape appearing inside the tests written to avoid it. It was found by writing
+the sabotages rather than by writing the tests, which is the second time this
+family has recurred inside a defence against itself (§13.33 was the first: a
+test written to catch §13.31 passing by way of a substitute mechanism).
+
+Two occurrences make it general. The rule:
+
+> **For anything driven by a timer, a hosted service, or a background sweep, at
+> least one test must exercise it with nobody calling it.** Arrange the state,
+> move the clock, and require the mechanism's own counter to move on its own.
+
+**The hole appears exactly where the mechanism is conveniently callable**, and
+that is the part worth internalising. `ReplicaRetirement`'s effect is a database
+column, so calling the sweep directly was the short path and the tests took it.
+`MembershipSweep`'s effect is a socket closing, which cannot be observed without
+waiting for the real thing — so 6.4's tests never had the option and never
+acquired the hole. **The convenient entry point is the risk factor**, not the
+subsystem's importance.
+
+That asymmetry was checked rather than assumed. Unregistering `MembershipSweep`'s
+hosted service turns `A_revoked_reader_loses_the_connection_it_is_already_holding`
+red — *"The connection was still open after 2507 ms"* — so 6.4 was clean, and
+the reason it was clean is that its author had no shortcut available. Not
+virtue: geometry.
+
+The general form is one level up from §13.19. That entry is about a guard whose
+*assertion* cannot fail. This is about a guard whose assertion is perfectly
+sound and whose *trigger* is missing — and the two are indistinguishable from a
+green run, because both produce a passing test over a mechanism that never runs
+in production.
+
+### 13.42 A differential test is vacuous when one side is derived from the other
+
+7.3's headline property is that a collected replica and one that never collected
+agree. The first version of the test produced the continuation *on the collected
+replica* and applied the resulting operation to the control. It passed. It also
+passed with §5's rule 4 deleted from `Replica.Collect` — the rule whose entire
+purpose is to keep that comparison honest — and it was the count assertion beside
+it, not the comparison, that went red.
+
+The general form, stated carefully because this is the most important test in
+the project and it was asserting nothing:
+
+> **A test comparing two parties proves nothing if one party's answer was
+> derived from the other's.**
+
+The collected replica computed a right origin from its own view; the control was
+handed that answer and had nothing left to decide. Transparency was true by
+construction, so the test could not have failed, and it had exactly the shape
+§13.19 describes: a sound-looking assertion over an input that cannot disagree
+with it.
+
+**Convergence tests are structurally prone to this**, and that is the part worth
+carrying forward rather than the GC specifics. Handing state across is the
+*natural* way to set one up — compose on A, deliver to B, compare — and it is
+also how the property gets faked. The distinction is not "did A send B
+anything", because in a CRDT that is the whole mechanism; operations are the
+input and each replica must still place them itself. The distinction is
+narrower:
+
+> **Ask what property is under test, and then ask whether the checking party
+> could have obtained that property from the party being checked.** Delivering
+> an operation is fine. Delivering the *answer to the question being asked* is
+> not.
+
+In 7.3 the question was "do these two replicas compute the same right origin",
+and the operation handed across carried that right origin inside it. The repair
+is to make both sides compute independently and then exchange — which is also
+what makes the test resemble the situation it is supposed to model, since in
+production nobody hands anybody a pre-decided placement.
+
+The fix is to ask what the thing under test is *for*. A right origin exists to
+order an insert against a competing one, so the continuation has to be
+concurrent: each replica composes an insert at the same position from its own
+view, and then they exchange. Made concurrent, the sabotage is caught
+immediately, and caught in the strongest available form — the operation naming
+the over-collected tombstone cannot be applied at all, so the texts differ
+outright rather than subtly.
+
+The question to ask, next to §13.41's:
+
+> **In this comparison, does each side decide for itself?** If one side's answer
+> is copied, adopted, or delivered from the other, the test is asserting that
+> assignment works.
+
+It is worth noting where this was caught: not by writing the test, and not by
+running it, but by running the sabotage. Both of the last two entries were found
+that way. A test written to check a property and a test that can fail to check it
+look identical in a green run, and the sabotage is the only routine step that
+distinguishes them.
+
+### 13.43 A rule installs a habit only when it is mechanical; one phrased as care does not
+
+Three rules in this document have now been broken by the person who had just
+finished writing them.
+
+| Rule | Written in | Broken in | How it is phrased |
+|---|---|---|---|
+| Duration boundaries: read the clock, never estimate elapsed time (§13.38) | 6b | again in 7.7 — Stryker called "~15 minutes" when the clock said 6 | mechanical, but not *used* mechanically |
+| Sabotage from a committed tree (§12) | 6b.4 | 7.4, the very next task — `git checkout` took the uncommitted implementation with the sabotage | "commit first, or copy the file aside" |
+| §13.40's own subject — writing a rule does not install it | 7.1 | this entry | — |
+
+The pattern across all three is not carelessness, and treating it as carelessness
+is what guarantees the fourth. **A rule that names a thing to be careful about
+depends on the author remembering to be careful at the exact moment they are
+absorbed in something else** — which is precisely when they will not. A rule that
+names a *mechanical act*, tied to a moment that is already unavoidable, survives
+the same distraction.
+
+Compare the two that have held:
+
+- **"Derive the expected job set from `.github/workflows/`, never from the
+  report."** There is no moment at which the preflight can be run and this can be
+  skipped; the script does it. Held across every phase since.
+- **"Read the clock."** Held wherever it was written as `date -u` in a command,
+  and failed twice where it was left as a thing to remember.
+
+So the test for whether a §12 rule will hold is not how important it is. It is:
+**is there a moment at which someone would have to actively choose to comply?**
+If yes, it will eventually be skipped under pressure, and the fix is not to
+restate it more firmly but to move the compliance into something that runs
+anyway — a script, a gate, a step whose absence is visible.
+
+Two repairs from this entry, both concrete:
+
+1. **Commit before the first sabotage, not before the first revert.** The old
+   phrasing put the obligation at revert time, which is after the interesting
+   part; the new one attaches it to an act that already has a natural moment
+   (the tests going green).
+2. **The tell, when it fails anyway: two different sabotages producing identical
+   failure lists means doubt the tree.** A mechanical signature beats a
+   reminder to be careful, because it fires from the output rather than from
+   memory.
+
+This entry predicts which of §12's rules will survive: the sabotage practice
+itself and the preflight will, because both are scripts; the vacuity-risk
+statement and the three questions will need to be carried into the breakdown
+template, or they will be the next things skipped when a phase is busy.
+
+### 13.44 A counter next to a write measures that control reached the line after it
+
+Row 8 broke one instance by deleting the stability frontier's write and left the
+`editor.acknowledgements` increment beside it standing. The counter read
+**identically** on the broken instance and the healthy one — 48 submissions, 6
+catch-ups, 6 timer reports on each — while one of them wrote nothing at all. An
+operator would have read a healthy frontier off a frozen one.
+
+The instrument was placed deliberately, *after* the write, and the reasoning was
+written down at the time: a count that moves for an acknowledgement that failed
+to store reports a frontier advancing on evidence the database does not have.
+That reasoning covers a write that **throws**. It says nothing about a write that
+**is not there**.
+
+**Relocating the increment buys one fix and keeps the class.** It is correct
+against today's code and wrong again the first time a branch, an early return or
+a retry is inserted between the two statements. **A reading derived from state
+cannot decouple from what it reports, because it is what it reports** — "how many
+recently-active replicas have never said what they hold" is answered by the rows,
+and there is no statement to delete.
+
+Three consequences, all of them found by *running* the dashboards rather than by
+reviewing them:
+
+1. **State-derived readings detect; per-instance counters localise.** Every
+   instance reads one database, so a derived gauge is identical everywhere by
+   construction. It says a thing is wrong and cannot say where. §10 needs both
+   kinds and row 8 asks for both halves.
+2. **A derived reading needs a window.** Without one, "silent replicas"
+   accumulates every abandoned session until `T_retire` and is permanently red —
+   which is §13.22's problem arriving inside the fix for this one, and a signal
+   that is always red has no diagnostic value whatever it measures.
+3. **A scheduled reading needs its age reported beside it.** The first run on a
+   clean database read zero live replicas while twelve existed, because the only
+   reading so far had been taken at startup. A gauge that reports the past as the
+   present is this same entry wearing different clothes.
+
+Not everything can be derived, and the honest counter-example is in §10 already:
+a connection dropped for backpressure is closed and gone, no row records it, and
+the count is the only evidence — which §13.15 names outright. It has exactly this
+decoupling property and no remedy. `docs/section-10-audit.md` carries the audit
+of every §10 instrument against this entry.
+
+### 13.45 A resource guard's number does not come from use, and a use test against one proves only that it is out of the way
+
+§13.37 asserts that every tuned value's number is set by the largest legitimate
+use, and gives a table with a "largest legitimate use" column filled in for all
+fifteen. Row 27 wrote the test for each of those cells and then measured how far
+each number could actually fall before a real use broke. **Two of the cells were
+written by reflex, and the measurement is what showed it.**
+
+| Limit | Default | Breaks at | Factor |
+|---|---|---|---|
+| `MaxOperationsPerBatch` | 256 | 128 | 2 |
+| `MaxReplicasPerDocument` | 50 | 25 | 2 |
+| `CodePointsPerConnection` | 10,000 | 2,500 | 4 |
+| `MaxMessageBytes` | 64 KB | ~1–2 KB | ~48 |
+| `MaxDocumentBytes` | 5 MB | ~25 KB | ~210 |
+
+The first three behave as §13.37 predicts. The last two do not, and the reason
+is not that their tests are too weak.
+
+**`MaxMessageBytes` is checked before the decode, because the decode is what
+allocates.** It is a guard against a hostile frame, not a promise to a client —
+and it cannot bind a legitimate client at all, because `MaxOperationsPerBatch`
+caps a batch at 256 operations and 256 operations encode to one or two
+kilobytes. Above about 2 KB the operation cap refuses first, every time, at
+every setting. Its stated "largest legitimate use" — the largest batch the
+client can build — names a quantity that is three percent of it.
+`MaxDocumentBytes` is the same shape at 210×: five megabytes of live text is
+roughly eight hundred thousand words in one collaboratively edited document, and
+there is no user to write a test for at that size.
+
+**The distinction, and it is the whole entry: a capacity limit and a resource
+guard are different objects wearing the same syntax.** A capacity limit answers
+*how much may somebody legitimately do*, and the largest legitimate use sets it
+exactly — §13.37's rate-limit story is this case, and a test written from the use
+catches it moving. A resource guard answers *how much may this process be made
+to allocate before it refuses*, and the number comes from the resource; the
+largest legitimate use is only ever a floor it must clear. Asking a guard's
+number to come from use produces either an invented user or a test that passes
+at every setting, and §13.37's table did the first.
+
+So the technique keeps its form and gains a step. For each limit: write the use
+test, then **measure the factor** rather than halving once.
+
+- **Factor 2** — a capacity limit sitting on its use. Any reduction breaks
+  somebody, and the test says so. This is the state §13.37 is arguing for.
+- **Factor 3 to 4** — a capacity limit with a deliberate margin. Sound, but the
+  margin has to be *recorded*, because "survived halving" otherwise reads as a
+  failing check and invites tightening a number that was chosen on purpose.
+- **Factor in the tens** — either the use test is wrong, or this is a resource
+  guard and the use column should say so. Deciding which is the work; leaving it
+  as a red mark against the test is what produces the invented user.
+
+**Halving once cannot distinguish the second case from the third**, which is why
+it is the wrong form of the check for anything but a limit already known to sit
+on its use. `docs/limit-headroom.md` carries the factor for all thirteen, and
+`scripts/limit-headroom.sh` is what measures them — through configuration, which
+is the path a deployment sets them by, rather than by editing a compiled-in
+default that the deployment never reads.
+
+A limit whose measurement comes back **refused** is a fourth outcome and a
+better one than any of the above. `ReplicaClaims.Lifetime` cannot be lowered to
+half its default at all: options validation floors it at 90 seconds, above the
+45-second reload that is its largest legitimate use. No configuration can put
+that number where a real use breaks, which is a stronger guarantee than a test —
+and the pattern is worth reaching for wherever a limit has a defensible floor.
+
+### 13.46 Removing an element from a run-length encoding can cost more than it saves
+
+Row 29 asked whether a retained placeholder tombstone could drop its payload,
+and carried an unexamined assumption: that the placeholder's *position* — its
+id, its parent linkage, its flags — was the expensive part, and the character
+was the cheap remainder worth arguing about. The measurement said the reverse,
+and said it by measuring something nobody had asked for.
+
+The control was a snapshot of the same document with the placeholders simply
+absent. It is not a legal encoding — §5 keeps their positions because right
+origins can name tombstones — and it was included only as a denominator, to say
+what share of the placeholder problem dropping the payload addressed. On two of
+five edit shapes **it came out negative**: removing the placeholders made the
+snapshot larger.
+
+§6 encodes contiguous elements as a run: one tag, one length, one flag byte, one
+element id, sometimes an explicit parent, then a deleted-bitmap and a single
+concatenated UTF-8 string. **An element inside a run is already inside a header
+somebody else is paying for**, so it costs its character and nothing more. Take
+it out and the run splits, and the new run's header costs five or six bytes
+against the one byte saved. Three interior deletions in a sentence turn one run
+into four and trade 17 bytes of payload for about 24 bytes of headers.
+
+The general form: **in any length-prefixed or run-length encoding, the marginal
+cost of an element in the middle of a run is not the cost of that element.** It
+is the character alone; the structure around it is amortised over the run and
+only reappears if the run is broken. So the intuition "this element is mostly
+overhead, remove it" inverts: the overhead belongs to the run, and removing a
+member manufactures overhead rather than reclaiming it.
+
+Two consequences worth carrying:
+
+- **Measure the removal, not the element.** "How big is this thing" answers a
+  different question from "how much smaller would this be without it", and for
+  anything inside a run the two have different signs. The illegal control was
+  what exposed it, which is a general technique: encode the state you are not
+  allowed to have, purely to find out what the state you do have is costing.
+- **A placeholder is the cheapest thing in the format.** That reframes §5's rule
+  2 from a storage problem into a correctness one. The cost of an uncollectable
+  interior tombstone is about one byte, and the reason to care is that the
+  *count* grows without bound as a document is edited (register row 38) — not
+  that any one of them is heavy.
+
+### 13.47 A convergence assertion is invariant under any consistent ordering rule
+
+Row 34 was opened to audit twenty files of convergence assertions for §13.42's
+shape — one party's answer derived from the other's — by reading each in turn.
+The reading was replaced by a probe, and the probe found something a reading
+could not have established.
+
+**Invert the sibling tie-break** — `compareElementId`, the comparator §5 makes
+load-bearing, one change that reorders every user's text whenever two people
+type at the same position — and run every suite in the repository:
+
+| suite | tests | red |
+|---|---|---|
+| `Crdt.Core.Tests` | 77 | 3 |
+| `Conformance` (C#) | 14 | 2 |
+| `Editor.Api.Tests` | 393 | 1 |
+| `client` (`npm test`) | 213 | **0** |
+
+Twenty-five two-party convergence comparisons, and **not one of them noticed.**
+Every detection came from a comparison against a value committed to the
+repository: the comparator's own tests, expected sibling orders from the
+paper's figures, committed trace expectations, a committed manifest, and one
+hardcoded string in `ScaleOutTests`.
+
+The reason is not that the assertions are weak:
+
+> **Both replicas run the same comparator, so they agree on whatever it says.
+> Convergence is preserved by *any* deterministic ordering rule, including a
+> wrong one — so a convergence assertion cannot detect a placement bug.**
+
+§13.42 asks whether the checking party could have obtained the property from the
+party being checked. For placement, in a two-party comparison, the answer is
+always yes and not by accident of setup: both parties compute it with the same
+code, and no rearrangement of the test changes that. Convergence and correct
+placement are different properties, and only the second needs an oracle neither
+party computed.
+
+So what those twenty-five assertions establish is **delivery** — that the
+operations arrived, in an order each side had to cope with, and that readiness
+buffering released them correctly. That is worth testing and they test it. What
+they do not establish, and cannot, is where the characters went.
+
+#### The two consequences
+
+**An external oracle is not optional, and its coverage is invisible.** The
+repository's entire defence against a comparator bug was six assertions, and
+nothing said so — every convergence test *reads* as though it is checking
+placement, and its comment usually says "tombstones and tree shape included",
+which is true of the comparison and irrelevant to the property. The audit's
+output is therefore a statement, per file, of which property each comparison
+guards (`docs/convergence-audit.md`), because the gap was never a missing
+assertion; it was a missing sentence.
+
+**The gap lands where nobody looks.** The default client suite — the command
+`AGENTS.md` tells a contributor to run — passed 213 of 213 with the comparator
+inverted, because TypeScript had no direct comparator test and its only
+placement oracle, the conformance corpus, is excluded from the default run for
+needing the C# runner first. The side with no `Guid` to fall back on, which is
+exactly why §5 makes the comparator hand-written, was the side with no check.
+
+#### The technique
+
+**Sabotage one rule that every replica shares, then count which suites notice.**
+It answers "what actually guards this property" in a way no reading of the tests
+can, because the tests all *look* like they guard it. Worth reaching for
+wherever a property is computed identically by every party to a comparison —
+ordering, hashing, normalisation, serialisation — since in every such case the
+comparison is invariant under changing it. `scripts/placement-probe.sh` is the
+standing form for this one.
+
+### 13.48 Removing data satisfies one invariant at a time; enumerate the rest
+
+7b.8 built log truncation and took Phase 7's standard of care over the obvious
+hazard. §5 resolves a client's reference by asking whether the element id is in
+`document_ops`, so removing a prefix would make a live element indistinguishable
+from a collected one — predicted before the code existed, demonstrated by test,
+and designed around: the truncator removes only the rows of elements the
+snapshot no longer holds, so **every reference stays resolvable.**
+
+That property was established, and a second one was assumed to follow from it.
+It does not. §5 also makes a replica's sequence **dense**, and readiness refuses
+any operation whose sequence number skips one:
+
+```
+var expected = _versionVector[replica] ?? 0;
+if (operation.Id.Seq != expected) return false;
+```
+
+A removed row is a hole in that sequence **whatever the row was**. Care about
+*which* rows go buys reference resolvability and buys nothing at all here: the
+tenth operation's absence stops the eleventh regardless of why it went.
+
+What it looked like: a client opening a truncated document for the first time
+is served a delta of surviving rows, applies operations up to the hole, and
+buffers every operation after it — including the deletes — in the pending set,
+forever, while reporting itself current. It renders deleted characters that
+every other client has stopped showing. The condition never clears, because the
+dependency it waits for was deleted on purpose.
+
+**None of 7b.8's tests could see it.** Every one either loads through
+`DocumentStore.LoadAsync`, which reads the snapshot plus the rows *after* it and
+so never replays the truncated region, or catches up a client that was already
+nearly current. The first-open client is the only one that asks for everything,
+and it was the one nobody modelled.
+
+#### The general form
+
+> **An operation that removes data participates in every invariant the data
+> participated in. Satisfying the one that motivated the removal says nothing
+> about the others, and the others are the ones nobody lists.**
+
+The discipline is to enumerate them before removing anything, as a list, from
+the spec rather than from memory. For a row in an operation log, §5 alone gives
+at least four: *referential* (ids the row's element is named by), *sequential*
+(density of its author's numbering), *reconstructive* (can the document be
+rebuilt without it), and *evidential* (what its absence is taken to mean — here,
+`resync_required`, which 7b.8 did consider). The design satisfied the first and
+the fourth and broke the second.
+
+This is not §13.19's guard that cannot fail or §13.42's comparison that cannot
+disagree. Those are tests that prove less than they appear to. This is a *design*
+that is correct about the property it was argued from and silently wrong about a
+property nobody wrote down — which no amount of testing the first property will
+surface, and which sabotage will not find either, because the code does exactly
+what it was built to do.
+
+#### What found it
+
+Asking what a **walk step** would observe. Register row 33 wanted GC's effect
+visible on the deployed stack, and the walk's client is the one that arrives
+cold and asks for everything — the client no unit test models, because every
+test builds its clients from the state it just created. The finding is an
+argument for the walk as a design tool rather than a regression suite: its
+value is the viewpoint, not the coverage.
+
+### 13.49 A phase report certifies a commit; it must be the commit containing the report
+
+7b.11 ran the preflight, got a pass on the pushed head, wrote the report with
+that job table in it, and committed. The commit moved the head. **The preflight
+that passed had never seen the report** — nor the register edits that shipped
+alongside it, which in that commit were two rows being closed.
+
+Stated generally, because the shape is not about reports:
+
+> **When a document makes a claim about a tree, and the document is part of that
+> tree, verifying the tree before adding the document verifies a different tree —
+> and nothing in the document says so.**
+
+The claim and the evidence end up about two commits that differ by exactly the
+change nobody checked. A reader has no way to tell: the report names a sha, the
+CI run names a sha, they agree, and the sha is not the one the reader is looking
+at.
+
+**This hole was in every prior phase report.** Phase 7's is the clearest: its
+report was added in `2a1adc3`, and that commit's own message says *"the preflight
+that passed on 600845e"* — a different tree — while the report's header names no
+commit at all, so the claim was not tied to a tree in the first place. Six phases
+reported that way, each one green, each one certifying something other than
+itself.
+
+**The repair is to run the preflight again on the commit that contains the
+report**, and to say in the report which commit that is. It costs one CI cycle
+and it is the only arrangement where the sentence "this passed" has a referent
+the reader can check. 7b.11 did this and recorded that the second run is the one
+that counts.
+
+The residue is unavoidable and worth naming rather than hiding: the *final*
+commit — the one that records "the preflight was re-run" — is itself unverified
+by that run. The recursion has to stop somewhere. It stops at a commit that
+changes only prose about the preflight, and the report says which one, so the
+unverified delta is stated instead of silent. **A known one-line gap beats an
+unknown one, and the difference is entirely whether it is written down.**
+
+### 13.50 The mechanism that tracks what was forgotten will itself be forgotten
+
+The findings register exists because things were being lost between phases. It
+is the project's memory, and in Phase 7b it silently stopped reflecting what it
+tracks.
+
+Rows 6 and 7 — §10's observability surface and `/health/ready` — were delivered
+by 7b.1 and 7b.2 and **read as open for nine tasks afterwards.** Worse than
+untidy: 7b.10 spent real effort on row 33 on the basis that it was *"blocked on
+row 6"*, when row 6 had landed eight tasks earlier. The register did not merely
+fail to record progress; it actively misdirected the work that read it.
+
+Nothing about this is a lapse in care. Closing a row is a manual act performed
+at the end of a task, with the next one already in mind — **the moment of
+maximum distraction**, which §13.43 says is exactly when a rule phrased as care
+does not hold. It did not hold twice, in the same phase, for the same reason.
+
+> **A mechanism whose purpose is to survive forgetting cannot be maintained by
+> remembering.**
+
+So it is a gate. `scripts/check-register.sh` runs in the preflight and in CI,
+and fails in both directions:
+
+- **Every row a completed phase's breakdown claims to deliver must be settled** —
+  closed, or saying in its own words why it is still open. This is the direction
+  that caught nothing for nine tasks. "Still open" has to be a sentence somebody
+  wrote, never a default, which is why a bare phase number counts as unsettled.
+- **Every row that names the task which settled it must name a task that
+  exists**, where that task's phase has a breakdown in the repository. A register
+  pointing at nothing is the same failure arriving from the other side.
+
+A phase counts as complete when its report exists, so the gate needs no list of
+finished phases kept in step by hand — which would be the very thing it exists
+to prevent.
+
+Two notes from building it. Its first version parsed register rows by *shape*
+and picked up §11's phase table, reporting three disagreements that did not
+exist; the fix is a structural anchor — the register's own heading — because
+guessing a table from its rows is how that went wrong. And it must be checked
+against the state it was built for: reinstating rows 6 and 7 exactly as they
+read for those nine tasks makes it fail, naming both. A gate nobody has watched
+fail is §13.19.
+
+### 13.51 "I cannot run it here" is a fact about the sandbox, not about the project
+
+7b.8 needed a browser walk against a Compose stack. The development sandbox has
+no Docker daemon, so the task was written up as **blocked**, the register row
+said so, and the Phase 7b report said so. 7b.10 reached the same conclusion for
+a second row. Both stood until the next review.
+
+**Both were wrong, and nothing about the evidence was.** The sandbox genuinely
+has no daemon; every command establishing that returned honestly. The error was
+one inference further on: *I* could not execute it, therefore *the project* could
+not have it. CI has Docker. The walk job and the §7 deployment-conformance job
+bring up `docker compose` on every push and were green in the preflight run in
+the same session that called the work blocked. **The whole of Phase 5b was built
+by pushing files that could not be executed locally and reading what CI did with
+them** — the precedent was not merely available, it was how the deployment
+existed at all.
+
+> **An agent's own capabilities are the most invisible assumption it makes,
+> because they never have to be stated to be used.** Every other constraint in
+> this project got written down and argued about. This one was applied silently,
+> to two register rows and a phase report, and survived three tasks.
+
+The shape generalises past sandboxes. Any executor — a person on a laptop
+without the production database, a CI runner without a GPU, a reviewer without
+credentials — will reach for "this cannot be verified" when the honest statement
+is "this cannot be verified *by me, here, now*". The two differ by which
+resources the whole system has, and the second is a question about the system
+that has to be asked rather than assumed.
+
+**The check is mechanical enough to be worth stating.** Before recording
+anything as blocked: name the resource that is missing, then ask which
+executors in this project already have it. The answer lives in
+`.github/workflows/`, which is a file, not a memory. If some executor has it,
+the work is not blocked — it is *remote*, which costs a slower feedback loop and
+needs its cost budgeted (9.6 budgets ten CI iterations at roughly nine minutes
+each), but is not the same category at all.
+
+It is also the reason the 5b arrangement exists: predictions written down before
+the first push, because a remote loop punishes guessing much harder than a local
+one does. Calling remote work blocked is how a project loses the ability to do
+anything its author cannot personally run.
+
+### 13.52 A file is the unit of exclusion; it is not the unit of justification
+
+Row 39 said the client's default suite had no placement oracle, and 9.1 was
+planned as building one: a fixture produced by the C# runner, committed with its
+provenance, regenerable only deliberately. That plan was sound and it was not
+needed. **The oracle already existed, had existed since Phase 2, and was already
+committed, already asserted, and already read out of the specification rather
+than out of either implementation.** The nine traces in
+`tests/Conformance/traces/` script an execution in *user* terms — "insert 'a' at
+index 0" — and carry an `expected` block whose `rationale` cites §5 or the paper.
+Nothing in them names a parent, a side or an origin. They are exactly the
+artefact 9.1 set out to create.
+
+They were not running, and the reason they were not running was correct:
+`conformance.test.ts` also replays the **generated** corpus, whose loader throws
+when the C# runner has not materialised it, so the file is excluded from
+`npm test`. Every word of that justification is true, and it is true about half
+the file's contents.
+
+> **An exclusion is written against a file and argued from a reason, and nothing
+> checks that the reason covers the file.** The two halves had different
+> dependencies and one line in a config could only express one of them. The
+> stronger dependency won, silently, for nine phases.
+
+The tell was available the whole time and was read as something else. 7b.9's
+probe reported the entire default client suite green with the sibling tie-break
+inverted, and that was recorded as *the corpus is excluded, which is sound* —
+a restatement of the justification rather than a question about it. The
+justification is a reason to exclude the generated traces; it was accepted as a
+reason to exclude everything in the file with them.
+
+**The fix was a two-file split and no new artefact.** The committed traces moved
+to `client/src/crdt/committedTraces.test.ts`, which the default suite runs;
+`conformance.test.ts` keeps the generated corpus and stays excluded, and still
+loads the committed traces because §9's normalised diff must cover the whole
+corpus. Inverting the tie-break now turns the default suite red.
+
+**Generally: when a suite is excluded, the thing to state is not why the file is
+excluded but which of its dependencies each test actually has.** Where they
+differ, the file is the wrong boundary, and the cost of finding that out later
+is measured in how long the strongest dependency got to speak for the weakest.
+It was nine phases here, and the artefact that would have revealed it — a probe
+reporting zero suites — had already been run and written down.
+
+### 13.53 An audit that counts failures counts the failures it did not cause
+
+`scripts/placement-probe.sh` inverts the sibling tie-break and reports which
+suites notice. 9.1 re-ran it and it reported a new detection:
+`PeriodicSnapshotTests.A_swept_snapshot_loads_the_same_document_as_a_replay_that_ignores_it`,
+in `Editor.Api.Tests`, which had not detected the inversion in 7b.9.
+
+**It does not detect it.** Run alone under the same sabotage, that test is green
+— four times, and green unsabotaged four times too. It was red in the probe for
+register row 37's reason: `SnapshotSweeper` ranks laggards globally, the test
+database is shared with every other test's documents, and under full-suite load
+this document is not always in the batch. The probe ran the suite under load, the
+test failed for its own reason, and **the probe counted it as an oracle.**
+
+> **A sabotage census that counts red tests is counting two different things
+> with one number: tests that failed *because of* the sabotage, and tests that
+> would have failed anyway.** The second kind inflates the census precisely
+> where a suite is least reliable, which is the last place a coverage claim
+> should be generous.
+
+This is §13.42's shape one level up. The probe exists because a convergence
+assertion cannot detect a placement bug and something had to establish what
+does; it then made the same mistake in its own measurement — an answer that
+came from somewhere other than where it appeared to.
+
+**The fix is a baseline pass.** Each suite runs twice, unsabotaged and
+sabotaged, and a detection is a test red in the second and green in the first.
+That doubles the runtime, which is the price of the number meaning what it says
+for a tool run once per audit.
+
+**The baseline failures are reported, not subtracted silently.** A suite red on
+its own is a fact this script is in a position to notice, and a quiet
+subtraction would turn the discovery above into a blank space. It is how row 37
+became visible again after two phases of being a known-but-unfixed row: the
+probe surfaced it by accident, and a silent subtraction would have taken that
+back.
+
+**Generally: any tool that measures a system by breaking it needs to know what
+the system did unbroken.** Before/after is the whole method, and a tool that
+only runs the *after* has an unstated premise — that everything was green — which
+is exactly the kind of assumption §13.51 records this project making about its
+own capabilities. State it, or measure it. This one now measures it.
+
+### 13.54 A test that supplies the configuration proves the mechanism, not the product
+
+§5 requires the pending set to be bounded per connection. Both cores implement
+the bound, both default it to unbounded with a written reason — a replica is not
+a connection — and both say in their documentation that whoever attaches a
+replica to a network connection sets it. Nobody ever did. For nine phases the
+shipped browser client ran with `maxPending` at `Number.MAX_SAFE_INTEGER`.
+
+**What makes this worth writing down is that the bound was fully tested the
+whole time.** `causalReadiness.test.ts` and `CausalReadinessTests` each overflow
+the pending set and assert the refusal. Both begin by setting `maxPending`
+themselves. They are correct tests of a correct mechanism, and they are the
+reason nobody looked: coverage of the feature was complete, and the feature was
+switched off.
+
+> **A test that supplies the configuration is testing the mechanism. Whether
+> anything in the product supplies it is a different question, and no amount of
+> the first kind of test asks it.**
+
+This is §13.41's question — *does anything invoke this, or only the test?* —
+asked about a value rather than a call. The existing form catches a service
+nobody starts. It does not catch a setting nobody sets, because the setting
+*is* used, on every apply, against a number that makes it inert.
+
+**The general check.** For any option whose default is deliberately permissive:
+grep for assignments and discard the ones in test files. What remains is the
+product's opinion. If nothing remains, the documented sentence naming who sets
+it is describing a layer that does not exist, and the default is the behaviour
+— which for a safety bound means there is none.
+
+**It is also how the second half was found.** §5 bounds the set *in operations
+and in seconds*. Asking "who sets this?" about the size produced the answer
+"nobody", and asking it about the age produced something worse: the age bound
+had never been implemented in either core, and nine phases of review had read
+that sentence as though it said one thing. A requirement with two halves
+sustains attention on the half that exists.
+
+### 13.55 An intermittent test is a diagnosis nobody has made yet
+
+9.4's adaptive flushing took a minute off the API suite, and the suite then
+failed once, in `EditorMetricsTests`, on a gauge assertion. Run alone the test
+was green, four times. Run as a full suite it was green twice more. Every
+available signal said *flake*, and the first explanation to hand was a race:
+the assertion compares a process-wide gauge before and after opening a
+connection, other tests open and close connections, so a concurrent close
+between the two readings would sink it.
+
+**That explanation was wrong, and it was wrong in the direction that makes a
+test look unfixable.** `MetricCollector.Observe` calls
+`RecordObservableInstruments`, which pulls *every* published instrument
+carrying the meter's name. Each live `EditorApiFactory` has its own meter under
+that name, so one `Observe` records one sample per host, and `Latest` returns
+whichever host was enumerated last. The test was not racing on a value. It was
+reading a different host's gauge, and it agreed with itself whenever it happened
+to be the only host alive — which is exactly the condition that "run it on its
+own to check" creates.
+
+> **"Intermittent" is a description of a symptom and is routinely mistaken for
+> an explanation.** It says the outcome depends on something the test does not
+> control. It does not say what, and the plausible first guess is not evidence.
+
+Two things follow, and the second is the one worth keeping.
+
+**Adaptive flushing did not cause this and did not fix it.** It changed the
+suite's timing enough to make a latent defect show, which is the ordinary way
+such defects surface: they arrive attached to an unrelated change and get
+attributed to it.
+
+**A diagnosis belongs in the suite, not in a commit message.** The repair —
+scoping the collector to one host's `IMeterFactory` — makes the test pass, and a
+passing test is equally consistent with the wrong explanation. So there is a
+second test that demonstrates the mechanism directly: two hosts, a connection on
+exactly one, and the two scoped gauges disagree. If the reading were ever global
+again, that test fails and says why, where a re-run of the original would just
+be intermittent once more.
+
+**The check, when a test is intermittent.** Do not reach for the first race that
+would explain it. Name the thing the test does not control, then establish that
+it is that thing rather than assuming — and if the mechanism can be exhibited
+deterministically, exhibit it. Where it cannot be, §13.53's rule applies
+instead: measure the baseline, because a failure that was already there is not
+evidence about the change that revealed it.
+
+### 13.56 A remedy proposed from a diagnosis inherits the diagnosis
+
+7b.4 measured target 2 and found that 54% of a typist's keystrokes never reached
+the server. It localised the shortfall correctly — three parties, writer 1000,
+server 457, reader 456, so the text was in the writer's outbox — and then
+explained it: `SyncController.drain` submits one batch at a time and awaits each,
+so a client's send rate is capped at one batch per round trip, and with §8's
+50 ms batching window inside every round trip that cap falls below eight
+characters a second. It proposed coalescing queued batches, and recorded the
+remedy as not taken because §8 requires a decision rather than a reflex.
+
+**Everything in that paragraph is true except the last inference, and the remedy
+came from the part that was wrong.** 9.4 removed the 50 ms window, which by that
+reasoning should have raised the cap fivefold. Target 2 got *worse*: 275 of 1,000
+instead of 457, while the latency of the keystrokes that did arrive improved from
+a p50 of 94 ms to 24 ms.
+
+A discriminator settled it — hold the writer, the typing rate and the serial
+`drain` fixed, remove only the background load, and **1,000 of 1,000 arrive with
+a p99 of 30 ms**. The send loop was never a cap. The constraint is that the
+writer's browser applies every peer's operations at a cost that grows with the
+document, on the same thread that would run the send loop's continuations.
+
+> **A remedy is not evidence about the problem, and it is much easier to check
+> than the diagnosis it came from.** "Coalesce the batches" is concrete, cheap
+> and reviewable, and it would have been implemented, measured, found not to
+> help, and then explained — probably by looking for a second bottleneck rather
+> than by doubting the first.
+
+**What would have caught it earlier is what caught it now: varying one thing.**
+7b.4 reported a single load shape. Target 1 already had the habit — its "one
+document each" run exists precisely to separate two explanations of one number —
+and target 2 had no counterpart. A measurement that runs at one point on the
+curve cannot distinguish "this component is the limit" from "this box, running
+this arrangement, is".
+
+**The corollary for a register.** Row entries carry explanations, and those
+explanations get read later as established fact by whoever picks the row up —
+here, by the same author two phases on, who wrote a Phase 9 task to implement
+the proposed remedy. Record what was measured and what was inferred from it as
+two different things, so the second can be re-examined without re-deriving the
+first.
+
+### 13.57 A gate written from one failure checks that failure, not its class
+
+`scripts/check-workflows.sh` exists because 3b.1 left two `working-directory:`
+keys on one step and every push from 3b.1 through 3b.8 was a startup failure —
+eight jobs' worth of checks not running for seven consecutive tasks, with
+nothing local going red. Its own header says so. It checks for duplicate
+mapping keys.
+
+**7b.12 broke the same workflow a different way and the gate said `ok`.**
+Splicing a new job in took the `run:` line of the step above it, leaving
+
+```yaml
+      - name: Breakdown fields
+  register:
+```
+
+a step with a name and no command. PyYAML parses that without complaint. GitHub
+does not: **every push from 7b.12 through 9.6 produced a run with zero jobs**,
+and the only visible tell is that the run list shows the workflow's *path*
+instead of its `name:`. Five tasks and two phase-level gates ran nowhere. The
+mutation workflow, which was untouched, kept running throughout — so the account
+was fine, the daemon was fine, and the failure was silent in the one place that
+matters.
+
+> **The gate was named for the class and written for the instance.** "Rejects a
+> workflow file GitHub's parser would reject" is its first line. What it
+> implemented was "rejects duplicate mapping keys", which is one member of that
+> class, and the member that had already happened.
+
+This is §13.19's shape — what defeats this guard without matching its pattern —
+asked about a guard rather than about production code, and not asked. The repair
+is two-part and only the second part generalises.
+
+**First, the missing checks:** every job has `runs-on` and a non-empty `steps`,
+and every step is exactly one of `run` or `uses`. That covers what has broken
+this repository twice and the adjacent shapes.
+
+**Second, and the part worth keeping: the gate now self-tests against both
+failures, kept as fixtures.** It refuses to run at all if either is accepted.
+A gate that silently stops rejecting is worse than no gate, because the green it
+prints is read as evidence — and this one printed `ok ci.yml: 15 jobs`, a number
+that sounds like it was counted from something checked.
+
+**The general rule for a gate written after an incident.** The incident gives
+the class, not the check. Before the gate is finished, ask what else GitHub — or
+whatever the authority is — would reject that this would accept, and write the
+fixture for it. And give the gate a self-test, because the failure mode of a
+check is not "it is wrong" but "it is silent", and nothing else in the build
+distinguishes a check that passes from one that no longer looks.
+
+**The cost here was verification, not correctness.** Nothing shipped broken; the
+work of five tasks was simply never confirmed by CI, and two phase reports would
+have certified a commit no job had examined. That is the failure §13.49 was
+written about, arriving through a different door.
+
+### 13.58 A test that makes a correct mechanism look broken
+
+9.7's suite waits for §5's collection to reach a document and then asserts that
+catch-up answers a first-open client with a snapshot rather than a delta. Its
+second CI run waited two hundred seconds across eight probes and saw nothing
+collected. The obvious readings were both about the product: the stability
+frontier was not advancing, or the collector was not being scheduled.
+
+**Both were wrong, and the failure was in the test's idea of a document.** The
+stack's own logs — added to the assertion for exactly this reason — showed the
+truncation sweeper's candidate query selecting on `last_reclaimable_at IS NOT
+NULL`, and nothing ever becoming reclaimable. The collector was running, on this
+document, every three seconds, and correctly taking nothing.
+
+A document typed straight through is a chain: every element is the child of the
+one before it. The test tombstoned the **first** ten characters, so every one of
+those tombstones still had a child, and §5's second collection condition forbids
+collecting an element with children. There was nothing collection was permitted
+to take. Deleting the **last** ten gives a leaf, and another as each is taken.
+
+> **A test can arrange a state in which the mechanism it is testing is required
+> to do nothing, and the resulting silence is indistinguishable from the
+> mechanism being broken.** Neither the test nor the product is wrong in a way
+> any assertion could show; the test's premise is.
+
+Three things make this worth recording beyond the one-line fix.
+
+**It is register row 38 arriving from the other side.** That row measures how
+many tombstones rule 2 can never collect in a normally edited document — 114 of
+1,220 — and here the test had constructed a document where the figure was all of
+them. The property row 38 describes was the reason the test failed, and the
+register already held it.
+
+**The diagnosis came from the product's own logs, not from a new assertion.**
+The previous iteration had failed with "it did not happen", which cost a cycle
+and taught nothing. Attaching the stack's logs to the failure turned the next
+run into an answer. On a remote loop that is the difference between iterating
+and guessing (§13.23).
+
+**And the first two hypotheses were both about the product.** When a test of a
+mechanism sees the mechanism do nothing, the state the test built is the thing
+to check first — it is cheaper to establish than either alternative, and it is
+the only one of the three that no amount of reading the implementation can rule
+out.
+
+### 13.59 A guard that cannot pass is not a strict test, it is a broken one
+
+9.6's suite named three vacuity risks before it was written, and the second was
+real: an empty outbox is discarded silently and correctly, so a run that queued
+nothing while offline would prove nothing about §9's discard. The guard read the
+unsent-work line to establish that there had been work to lose.
+
+**It could never pass.** `backlogMessage` shows that line only while the session
+is `live` — deliberately, because an offline session already says so on its own
+line and two messages about one condition is one too many. The guard read it
+while offline. It was asserting on something the product hides in exactly the
+state the guard runs in, and both rules were written in the same phase, a few
+hours apart, by the same author.
+
+The run that exposed it is the useful part: the test had **already passed** the
+assertion it exists for — §9's sentence on screen with a non-zero count — and
+then failed on the guard. So the row's claim was verified and the failure was
+entirely in the checking apparatus.
+
+> **A guard is a test of the test, and nothing tests the guard.** It fails
+> loudly when the thing it guards is absent, which looks exactly like it
+> working; there is no green it has to produce for anyone to trust it. A guard
+> that can only fail is indistinguishable from a strict one until the day the
+> subject passes.
+
+**The repair moved the evidence to where the user sees it.** §9's own message
+carries the count of what was discarded, so the guard now asserts that number
+accounts for a page of typing. That is strictly better than the backlog line:
+it is the thing the user is told, a client that under-reported would fail it,
+and it cannot be hidden by a rule about some other state.
+
+**The general check.** When writing a guard that asserts a precondition was met,
+ask what makes it pass, and satisfy yourself that something can. If the guard
+reads a different surface from the assertion it protects, that surface has its
+own rules — and those rules were written for a reader, not for a test.
+
+### 13.60 Check the push, not the workflow file
+
+CI has silently stopped verifying this repository four times: 3b.1's duplicate
+`working-directory:` key (seven tasks), run 79 cancelled by the concurrency
+group (six pushes), and 7b.12's step with a name and no command (five tasks,
+during which 9.0's own report stated the workflows gate was green). Each was
+found at phase end, by a preflight, long after the work it should have checked.
+
+§13.57 fixed the last instance and hardened the file check. **It cannot fix the
+class.** A workflow can fail to start for reasons that are not in the file — it
+can be disabled, the quota can be spent, a run can be cancelled, a `paths:`
+filter can exclude the change, a ref can have no workflow on it at all. A file
+checker cannot see any of those, and three of the four outages were things a
+file checker either did see or could not have.
+
+> **What every one of them has in common is observable in one place at one
+> moment: after a push, is there a run with jobs for this exact commit?** That
+> question needs no knowledge of why, costs one API call, and is answerable
+> immediately rather than at phase end.
+
+So `scripts/push.sh` pushes and then asks it, and refuses to finish if the
+answer is no — §13.43's rule that a habit needs a script that refuses, not a
+sentence that asks for care. It is the same arrangement as `scripts/sabotage.sh`
+for the same reason.
+
+**The gate nearly shipped with the flaw it was built for.** The first version
+counted jobs across all runs for the commit and required the total to be
+non-zero. Checked against the outage rather than reasoned about: every commit
+from 7b.12 to 9.6 reports **two runs and one job**, because this repository has
+two workflows and the mutation one was untouched. The total was never zero. The
+check has to be that *no run* is empty, and the difference is invisible until
+you run it against the failure.
+
+**Which is the rule worth carrying.** §13.57 says an incident gives a gate its
+class rather than its check. This is the operational half: **run the new gate
+against the historical failure before trusting it.** The data is there —
+52b8769 gives `2 1 1`, 82c92de gives `2 16 0` — and it takes one command. A gate
+validated only against a healthy present is a gate whose first real test is the
+next outage.
+
+### 13.61 Choosing the statistic after seeing which one passes
+
+Phase 9 measured §8's targets 1 and 4 and made two recommendations about how to
+read them. Target 1's p99 was unstable, its p95 was stable, and the
+recommendation was to state that target at **p95** — where it passes. Target 4's
+distribution was a single mode with a right tail, and the recommendation was to
+read it at **p95** — where it fails, turning an earlier qualified pass into a
+miss by 12%.
+
+Each was argued on its own and each argument was sound. Together they are a
+different thing.
+
+> **Statistics chosen after the results are in are not measurements of the
+> system, they are descriptions of the sample.** It does not matter that the
+> reasons differ, or that one recommendation is *stricter* than what it
+> replaced. What makes it goalpost-moving is the order: results first, statistic
+> second.
+
+The self-serving direction is easy to spot and was not what happened here — the
+target 4 recommendation cost a pass. That is the part worth recording, because
+it is what made the pair look principled: a project that only checks for
+convenient revisions will accept a set of individually reasonable choices that
+collectively amount to fitting the criteria to the data.
+
+**The finding underneath was real, and survived.** A p99 over twelve
+observations above it is not a measurement — 9.4 recorded 36.6 ms and 71.4 ms
+for the same code minutes apart, a spread wider than the distance to the
+threshold. That is a defect in the measurement, and the repair is to measure
+properly: ten thousand samples per run, five runs, and a tolerance for their
+agreement written into the source *before* the runs. The p99s came back 25.5,
+26.0, 28.0, 28.7 and 29.9 ms — a 16% spread against a 20% tolerance — and target
+1 is missed at 28.0 ms, in every one of the five runs.
+
+**The rule.** Fix the instrument, not the threshold. When a number will not
+repeat, that is a fact about the harness; reading a different percentile of the
+same unstable sample changes which fact is hidden, not whether one is. And when
+a statistic does have to change, record that the change came after the results,
+so the next reader can weigh it.
+
+### 13.62 A delta on a global aggregate is not a measurement of your own change
+
+Register row 37 was about `PeriodicSnapshotTests` depending on what other tests
+left in the shared database. 9.3 closed it. The same shape then appeared three
+more times in the same phase, in three unrelated files:
+
+- **`LogTruncationTests`** waited for this document's row count to drop and then
+  asserted its own sweeper had run — but every test in the process has a sweeper
+  against the same database, so the count can drop because somebody else's timer
+  got there first, leaving this instance's counter at zero.
+- **`EditorMetricsTests`** compared a process-wide gauge before and after, and
+  `Observe` pulls one sample per live host, so `Latest` returned a different
+  host's value (§13.55).
+- **`StateReadingTests`** read §10's silent-replica gauge before and after and
+  asserted an exact delta. §10 filters on `last_seen_at > cutoff`, so a replica
+  leaves that count **by ageing out of the window** — nothing has to happen for
+  the number to move. Hundreds of replicas created at once by a load run put
+  enough of them near the boundary that the count drifted mid-test.
+
+> **The pattern: `before`, do a thing, assert `after == before + 1`.** It reads
+> like a controlled experiment and is not one, because the quantity is global
+> and the experiment is not the only thing touching it. Every instance passed
+> for months. Each was found by an unrelated change altering the timing or the
+> volume — which means the ones still present are the ones nothing has disturbed
+> yet.
+
+**The repair is the same every time: scope the claim.** Assert on the rows this
+test caused, identified by the document or the host it created, and keep a
+separate, drift-proof assertion that exercises the global mechanism —
+`gauge >= 1` rather than `gauge == before + 1`. The first is what the test is
+about; the second stops the gauge being a constant zero. Neither depends on what
+anything else is doing.
+
+**And the tell is available without a failure.** A test that reads a number it
+did not produce, twice, is making an assumption about exclusive access to a
+shared resource. Grep for the shape — a `before`, a mutation, an equality on
+`before` — and check each one against the question *what else writes this?*
+Four of the four found here would have been visible that way.
+
+**Run at the close-out, and it found no others.** Every remaining `before` in
+the suites is scoped to something the test owns — one document's rows, one
+user's connections, one factory's own counter — which is what the repair above
+produces and what the shape should look like.
+
+### 13.63 A guard that refuses a legitimate state
+
+Almost every entry in this log is a check that passed when it should not have.
+This one is the opposite, and it is worth recording precisely because the
+failure mode is the reverse.
+
+The phase preflight refuses a workflow reported twice for one commit. That is
+right for a **re-run** — a second answer to the same question, where someone
+doubted the first and the newest one is the answer — and it is how a green run
+that a later red run superseded gets caught.
+
+**Opening the final pull request produced two runs of CI on one commit**, from
+two different events: the `push` run and the `pull_request` run. Both complete,
+both green, neither superseding the other. The preflight refused the commit with
+"CI is reported twice; one run per workflow", and the commit was fine.
+
+> **The guard had collapsed "the same workflow ran twice" into "someone re-ran
+> it".** Those are different facts, and GitHub distinguishes them in a field the
+> status file did not carry.
+
+The repair keys supersession on the pair (workflow, event) rather than on the
+workflow: a re-run of the push event still has to be the newest one, and a
+`pull_request` run alongside a `push` run is two answers to two questions rather
+than two answers to one. **Every pair GitHub reports must also appear in the
+file**, so the new dimension cannot be used to omit a failing run — which is the
+way a fix like this usually goes wrong.
+
+**Why it matters beyond the fix.** A guard that refuses something legitimate
+teaches the person hitting it to work around it, and the workaround is
+indistinguishable from the tampering the guard exists to prevent — here,
+trimming the run list until the check is satisfied. A false refusal is not a
+safe failure: it is pressure applied to exactly the mechanism that must not
+bend.
+
+### 13.64 A test that tolerates a fault the product does not
+
+Row 40 was opened because a suite had gone green, red, green and nobody could
+say why. The instrumentation it demanded produced one block of text, and that
+block answered a question nobody had asked.
+
+The question asked was *which request failed*. The answer:
+`GET /me — net::ERR_NETWORK_CHANGED`, with the page shell already rendered from
+the same origin and the API's retirement sweep in the same log. Environmental,
+and the repair belongs in the suite.
+
+The question nobody asked was *what the page did about it*. It said
+`Failed to fetch` and stayed there for the full sixty seconds. `bootstrap`
+wraps the whole sequence in one `try` and returns a failure state; nothing
+retries, and the app offers no way back but a manual reload.
+
+> **The flaky test and the product gap have the same root, and only one of them
+> was being looked at.** A browser suite that hangs where a person would be
+> stuck is reporting both, and the pressure is entirely towards reading only the
+> first — because the first is what is red.
+
+**The general form.** Every environmental tolerance added to a test is a claim
+that the fault does not matter. Check whether the product is making the same
+claim, because a suite hardened against something a user meets unprotected has
+quietly moved the problem out of view rather than out of the system. Row 41
+carries that half.
+
+### 13.65 Scoped to the evidence, not to a boundary
+
+The repair that followed §13.64 retried the **sign-in prologue** — `goto`, the
+account chooser, the wait for a Create button — and nothing else. The reasoning
+written down at the time was that this was the narrowest thing that could work,
+and §13.29 was cited for it: name the specific thing you are trusting, never
+widen the class.
+
+The next CI run failed on `POST /documents`, four requests later, with the same
+`errorText`. `GET /me` and `GET /documents` had both answered 200 first.
+
+> **The error was named. The span was not.** "The sign-in prologue" was not a
+> boundary in the test's design; it was the place the one failure on record had
+> happened. Scoping a repair to where the last failure landed produces something
+> that looks principled, passes review, and covers exactly one sample.
+
+The correction is a span that means something: **everything before
+`setOffline`** — sign in, create the document, reach `live`, type and watch it
+drain — is arrangement, and a failure in any of it means the property was never
+exercised at all. Everything after is the property, and nothing there retries
+for any reason. That line can be defended without reference to which request
+failed last, which is the test of whether a scope is a boundary or a memory.
+
+**The same run corrected the explanation too.** `bdbf784` had been read as a
+runner bringing up Docker's bridge network while the suite's stack starts, and
+that reading was comfortable because it made the fault belong to startup.
+`7be8c7a` had the stack serving for a second beforehand. What actually survives
+both is narrower and less satisfying: the failure lands within the first two
+seconds of the browser's first navigation, and the API answers on either side of
+it. Why the runner's network changes there is not visible from here, and the
+honest record says so rather than keeping the tidier sentence.
+
+**Why this is in the log rather than fixed quietly.** §13.29 was cited correctly
+and the result was still wrong, which means the rule has a second half that was
+not written down. Naming the specific *error* is necessary. Naming a *span* that
+exists for a reason is the other half, and a span chosen from the last stack
+trace will be rechosen after the next one.
+
+
+### 13.66 A green run proves the fault absent, not the repair working
+
+Row 40's rebuild was written, pushed, and went green. Four CI runs on
+`01db35b`, thirty-two jobs, nothing red.
+
+**The rebuild had not executed.** The job took its usual eighty seconds and the
+log carried no `arrangement attempt` warning, because `net::ERR_NETWORK_CHANGED`
+simply did not happen that time — which is what green means on an intermittent
+fault most of the time. Two runs of evidence that the fault was absent had been
+about to be written up as evidence that the repair worked.
+
+> **Those are different claims, and for a flaky-test fix they are the two that
+> most need telling apart.** The closing condition this row carried — "closes
+> when the rescoped suite has survived CI" — could not distinguish them. It was
+> satisfied, textually, by a run that proved nothing.
+
+This project has the precedent on file. 7.5 found `SyncController` emptying the
+outbox and reporting nothing, because the branch that reported correctly had
+been unreachable since Phase 4 while every suite around it passed. **An unfired
+retry is that shape in another costume**, and it was about to be accepted for
+the same reason: the surrounding suite was green.
+
+The repair is to make the decision reachable from a suite that can create the
+conditions on demand. `networkChange.ts` holds it; the default run drives it
+through nine cases, including the two that matter — a *different* error is not
+absorbed, and the attempt cap is real — because "it recovered" alone is
+satisfied by `while (true)`. Three sabotages confirmed each guard fails
+independently.
+
+**And it took the directory exclusion with it.** `src/offline/**` was excluded
+from the default run because the suite there brings up a stack; the new tests
+need nothing. Excluding them alongside it would have been §13.52 again, exactly —
+the committed traces lost for nine phases because they shared a directory with
+the generated ones. The pattern now names the e2e file.
+
+**The general form.** When a fix targets something intermittent, ask what the
+next green run will have proved. If the answer is "that it did not happen this
+time", the fix is not yet testable, and no number of green runs will change
+that.

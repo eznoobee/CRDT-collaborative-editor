@@ -1,0 +1,67 @@
+name: Mutation
+
+# Split out of ci.yml so a following push cannot cancel it (PROJECT_SPEC.md
+# §13.7, §12).
+#
+# CI cancels in-progress runs, which is right for a workflow whose value is fast
+# feedback on the head: an older commit's test result is genuinely uninteresting
+# once a newer commit exists. The mutation ratchet is not that. It is the
+# longest job in the repository at seven to eight minutes, it is the only gate
+# that compares this commit against a stored floor, and being cancelled leaves
+# no result at all rather than a stale one. Twice it was cancelled by the next
+# push — runs 79 and 80 — which means the ratchet was being enforced by how
+# slowly anyone happened to be pushing.
+#
+# So this workflow does NOT cancel in progress. The group is keyed on the commit
+# rather than the ref, so pushes never queue behind each other and every commit
+# is graded on its own. The cost is concurrent runners during a burst of pushes,
+# which is the right thing to spend to keep a gate that otherwise reports
+# nothing.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: mutation-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  mutation:
+    name: Crdt.Core mutation score
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - run: dotnet tool restore
+
+      # PROJECT_SPEC.md §5 sets the bar at 85%, replacing line coverage, and
+      # §13.7 makes it a ratchet: the floor in mutation-floor.json is what
+      # actually fails the build, in either direction. The reduced case count
+      # keeps a per-mutant suite run to seconds; the full 10,000-case gate runs
+      # in CI's dotnet job.
+      - name: Stryker
+        env:
+          CRDT_PROPERTY_CASES: "150"
+        run: ./scripts/mutation.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: StrykerOutput/**/reports/*.html
+          if-no-files-found: ignore

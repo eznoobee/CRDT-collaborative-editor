@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# Refuses to let a phase be reported complete while CI is red.
+#
+# PROJECT_SPEC.md §12. Phase 2.5's mutation gate was red for six consecutive
+# pushes while six of seven jobs were green, and it went unnoticed because the
+# report format had a slot for what was built and no slot for whether the build
+# agreed. This is that slot, and it is a script rather than a checklist item
+# because an intention gets skipped exactly when things are busy.
+#
+#   ./scripts/phase-preflight.sh ci-status.json [branch]
+#
+# The CI status is an INPUT, not something this script fetches. In the agent
+# environment this repository is developed in, api.github.com answers 403 and
+# GitHub is reachable only through tooling a shell script cannot call, so a
+# self-fetching preflight is not possible here. Requiring the status as a file
+# gets the same structural property: the check cannot be passed without having
+# actually gone and looked, and the script refuses stale or partial data by
+# verifying it against the commit that is really pushed.
+#
+# WHAT THIS GOT WRONG, and why the shape below is bigger than it was.
+#
+# The first version checked that every job it was GIVEN concluded "success".
+# That part was right and is unchanged. What it never checked was whether it had
+# been given all of them. Run 79 concluded `cancelled` — eight jobs green and
+# the mutation job cancelled at 7m32s by the concurrency group — and a status
+# file listing those eight jobs passes a check that only looks at the jobs in
+# the file. The run's own conclusion was never read at all, because the script
+# read `status`, and a cancelled run's status is "completed".
+#
+# So the expected set is now derived from the workflow files rather than taken
+# from the report: a job that did not run is a job missing from the list, and
+# absence is exactly what a status file assembled by hand cannot be trusted to
+# show. Same class as the CI that was not running for seven tasks — checking the
+# values present instead of the values required.
+#
+# It also refuses a run that has been superseded. A green run on a commit that
+# is no longer head was already refused by the sha check; a green run that a
+# NEWER run on the same commit has replaced was not, and a re-run exists
+# precisely because someone doubted the first answer.
+#
+# Expected shape. Two queries per workflow — the run list for the commit, and
+# the jobs of the run being reported:
+#
+#   {
+#     "sha": "0c60bb58850be1c5e6e026fd217c699dfd6674ec",
+#     "runs_for_sha": [
+#       { "id": 34398694675, "workflow": "CI", "event": "push",
+#         "status": "completed", "conclusion": "success" }
+#     ],
+#     "runs": [
+#       { "id": 34398694675, "workflow": "CI", "event": "push",
+#         "jobs": [ { "name": "...", "conclusion": "success" }, ... ] }
+#     ]
+#   }
+#
+# `runs_for_sha` must list EVERY run GitHub reports for the commit, across every
+# workflow; that is what makes supersession visible. Trimming it to the runs
+# being reported defeats the check, which is why the failure messages say so.
+#
+# `event` is required because a commit legitimately has two runs of one workflow
+# when a pull request is opened on it — the push run and the pull_request run —
+# and that is not the same thing as a re-run. Supersession is judged within an
+# event; across events, both must be present and both green.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+status_file="${1:-}"
+branch="${2:-$(git rev-parse --abbrev-ref HEAD)}"
+remote="${PREFLIGHT_REMOTE:-origin}"
+
+fail() {
+  echo
+  echo "PREFLIGHT FAILED: $1"
+  echo "Do not report the phase complete (§12)."
+  exit 1
+}
+
+# §13.23: a harness that cannot explain its own failure. The first version of
+# this said only "FAILED (rerun it directly to see why)", and three gates failed
+# their first 7b.11 run because EDITOR_TEST_POSTGRES was not exported — which is
+# indistinguishable, in that sentence, from a genuinely broken test. A missing
+# variable and a real regression produced the identical output, so every failure
+# cost a full rerun to classify.
+#
+# Two fixes, both at the source rather than the symptom. The variables the gates
+# need are checked ONCE, up front, by name — an unconfigured run stops before it
+# spends twenty minutes discovering that. And a gate that fails keeps its last
+# lines, so the output says what broke rather than that something did.
+require_environment() {
+  local missing=()
+  for variable in EDITOR_TEST_POSTGRES EDITOR_TEST_REDIS; do
+    [[ -n "${!variable:-}" ]] || missing+=("$variable")
+  done
+
+  if (( ${#missing[@]} )); then
+    fail "unset: ${missing[*]}.
+The tests, interop and e2e gates need a Postgres and a Redis to run against. A
+preflight that reported them FAILED for want of a variable would be saying
+'broken' when it means 'not told where Postgres is' (§13.23), so it stops here
+instead — before spending twenty minutes to reach the same place. Export them
+and rerun."
+  fi
+}
+
+
+if [[ -z "$status_file" ]]; then
+  fail "no CI status file given. Query the jobs of the newest completed run on
+this branch head, save them as JSON, and pass the path. Reporting a phase
+without having looked is the failure this exists to prevent."
+fi
+
+[[ -f "$status_file" ]] || fail "$status_file does not exist"
+
+echo "==> Preflight for $branch"
+
+git fetch --quiet "$remote" "$branch" 2>/dev/null \
+  || fail "cannot fetch $remote/$branch — is it pushed?"
+
+local_head=$(git rev-parse HEAD)
+remote_head=$(git rev-parse "$remote/$branch")
+
+[[ "$local_head" == "$remote_head" ]] \
+  || fail "local HEAD $local_head is not $remote/$branch $remote_head; CI has not seen this code"
+
+[[ -z "$(git status --porcelain)" ]] \
+  || fail "the working tree is dirty, so what CI ran is not what is here"
+
+echo "    head $local_head is pushed and the tree is clean"
+
+python3 - "$status_file" "$local_head" <<'CHECK_CI'
+import glob, json, sys
+
+path, head = sys.argv[1], sys.argv[2]
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, ValueError) as error:
+    print(f"\nPREFLIGHT FAILED: {path} is not readable JSON ({error}).")
+    sys.exit(1)
+
+def die(message):
+    print(f"\nPREFLIGHT FAILED: {message}")
+    print("Do not report the phase complete (§6, §12).")
+    sys.exit(1)
+
+sha = str(report.get("sha", ""))
+if not sha:
+    die("the status file names no commit, so it cannot be tied to this code")
+
+# Short or full, but it must be THIS commit. A status file from the previous
+# push is exactly the mistake that produced six silent red runs.
+if not (head.startswith(sha) or sha.startswith(head)):
+    die(f"the status file is for {sha}, not the pushed head {head}")
+
+try:
+    import yaml
+except ImportError:
+    die("PyYAML is not installed, so the expected jobs cannot be derived")
+
+# The expected set comes from the workflow files, never from the report. A
+# status file cannot be asked whether it is complete; the workflows are what
+# say how many jobs there should be and what they are called.
+expected = {}
+for workflow_path in sorted(
+        glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml")):
+    document = yaml.safe_load(open(workflow_path, encoding="utf-8"))
+    workflow = document.get("name") or workflow_path
+    expected[workflow] = {
+        definition.get("name") or job_id
+        for job_id, definition in (document.get("jobs") or {}).items()
+    }
+
+if not expected:
+    die("no workflow files found, so there is nothing to check the report against")
+
+runs_for_sha = report.get("runs_for_sha")
+if not isinstance(runs_for_sha, list) or not runs_for_sha:
+    die("the status file has no runs_for_sha; without the full run list for this\n"
+        "commit a superseded run cannot be told from the current one")
+
+reported = report.get("runs")
+if not isinstance(reported, list) or not reported:
+    die("the status file lists no runs; a rollup alone is not enough")
+
+# KEYED ON (WORKFLOW, EVENT), NOT ON WORKFLOW ALONE.
+#
+# This used to refuse any workflow reported twice for one commit, which is right
+# for a RE-RUN — a second answer to the same question, where the newer one wins —
+# and wrong for two runs of the same workflow triggered by different events.
+# Opening a pull request produces exactly that: the push run and the
+# pull_request run, both complete, both green, neither superseding the other.
+# The check called it "reported twice" and refused a healthy commit.
+#
+# Keying on the pair keeps the supersession guard intact within each event — a
+# re-run of the push event still has to be the newest — and stops a normal
+# thing from looking like tampering. Every (workflow, event) GitHub reports must
+# also be accounted for, so a failing pull_request run cannot be left out of the
+# file.
+def key_of(run):
+    return (str(run.get("workflow", "")), str(run.get("event", "")))
+
+
+by_key = {}
+for run in reported:
+    workflow, event = key_of(run)
+    if not workflow:
+        die("a reported run names no workflow")
+    if not event:
+        die(f"{workflow}'s reported run names no event; without it a re-run cannot\n"
+            "be told from a run triggered by something else")
+    if (workflow, event) in by_key:
+        die(f"{workflow} is reported twice for the {event} event; one run per\n"
+            "workflow and event — the newest is the answer")
+    by_key[(workflow, event)] = run
+
+reported_workflows = {workflow for workflow, _ in by_key}
+missing_workflows = sorted(set(expected) - reported_workflows)
+if missing_workflows:
+    die(f"no run reported for: {', '.join(missing_workflows)}. Every workflow in\n"
+        ".github/workflows must have run on this commit — a workflow that did not\n"
+        "run is the failure this check exists for, and it looks like nothing.")
+
+unknown = sorted(reported_workflows - set(expected))
+if unknown:
+    die(f"reported runs name workflows that do not exist here: {', '.join(unknown)}")
+
+# Every pair GitHub has for this commit must be in the file. Without this a
+# failing pull_request run could simply be omitted and the push run reported.
+for run in runs_for_sha:
+    workflow, event = key_of(run)
+    if workflow in expected and (workflow, event) not in by_key:
+        die(f"runs_for_sha has a {workflow} run for the {event!r} event that the\n"
+            "file does not report. Every run for this commit is reported, or the\n"
+            "omission is the answer.")
+
+for (workflow, event), run in sorted(by_key.items()):
+    run_id = run.get("id")
+    if not isinstance(run_id, int):
+        die(f"{workflow}'s reported run has no numeric id")
+
+    siblings = [r for r in runs_for_sha if key_of(r) == (workflow, event)]
+    if not siblings:
+        die(f"runs_for_sha lists no {event} run of {workflow} for this commit, but\n"
+            "one is reported — the run list is trimmed, and a trimmed list hides\n"
+            "exactly the newer run this check looks for")
+
+    unfinished = [r for r in siblings if r.get("status") != "completed"]
+    if unfinished:
+        die(f"{workflow} has a {event} run still in progress on this commit "
+            f"({unfinished[0].get('id')}); a run in flight is not a pass")
+
+    newest = max(siblings, key=lambda r: r.get("id", 0))
+    if newest.get("id") != run_id:
+        die(f"{workflow} run {run_id} was superseded by {newest.get('id')} for the\n"
+            f"same {event} event on the same commit. A re-run exists because someone\n"
+            "doubted the first answer; the newest one is the answer.")
+
+    if newest.get("conclusion") != "success":
+        die(f"{workflow} run {run_id} ({event}) concluded {newest.get('conclusion')!r},\n"
+            "not 'success'. Cancelled is not green — a cancelled run has completed\n"
+            "status and no result.")
+
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        die(f"{workflow} run {run_id} lists no jobs")
+
+    print(f"    {workflow} run {run_id} ({event}): {len(jobs)} jobs for {sha[:12]}")
+    for job in sorted(jobs, key=lambda j: str(j.get("name", ""))):
+        print(f"      {str(job.get('conclusion', '?')):>10}  {job.get('name', '?')}")
+
+    seen = {str(job.get("name", "")) for job in jobs}
+    absent = sorted(expected[workflow] - seen)
+    if absent:
+        die(f"{workflow} run {run_id} has no result for: {', '.join(absent)}.\n"
+            "A job missing from the report is not a job that passed.")
+
+    surplus = sorted(seen - expected[workflow])
+    if surplus:
+        die(f"{workflow} run {run_id} reports jobs that are not in the workflow:\n"
+            f"{', '.join(surplus)}. The report and the workflow have drifted.")
+
+    # Unchanged, and the part that was always right: success, and nothing else.
+    # Not "anything but failure" — cancelled, skipped and neutral are all ways
+    # for a job to produce no result while looking like it finished.
+    bad = [j for j in jobs if j.get("conclusion") != "success"]
+    if bad:
+        names = ", ".join(f"{j.get('name','?')} ({j.get('conclusion')})" for j in bad)
+        die(f"{len(bad)} job(s) in {workflow} are not green: {names}")
+CHECK_CI
+
+echo "    CI is green for this exact commit"
+echo
+require_environment
+
+echo "==> Local gates"
+
+failures=()
+
+run_gate() {
+  local name=$1
+  shift
+  local log
+  log=$(mktemp)
+  echo "--- $name"
+  if "$@" >"$log" 2>&1; then
+    echo "    ok"
+  else
+    echo "    FAILED — last lines:"
+    tail -n 12 "$log" | sed 's/^/        /'
+    failures+=("$name")
+  fi
+  rm -f -- "$log"
+}
+
+# First, because a workflow GitHub cannot parse means the job table above came
+# from a run that executed nothing — and an empty run reports failure with no
+# failing step to look at.
+run_gate "workflows" ./scripts/check-workflows.sh
+run_gate "format" dotnet format --verify-no-changes
+run_gate "breakdown" ./scripts/check-breakdown.sh
+run_gate "register" ./scripts/check-register.sh
+run_gate "sabotage" ./scripts/sabotage.sh --self-test
+run_gate "seeding" ./scripts/check-seeding.sh
+run_gate "tests" ./scripts/run-tests.sh
+run_gate "client" ./scripts/client-gates.sh
+run_gate "conformance" ./scripts/conformance.sh
+run_gate "interop" ./scripts/interop.sh
+run_gate "e2e" ./scripts/e2e.sh
+run_gate "mutation" ./scripts/mutation.sh
+
+if [[ ${#failures[@]} -gt 0 ]]; then
+  fail "local gates failed: ${failures[*]}"
+fi
+
+echo
+echo "PREFLIGHT PASSED for $local_head. The job table above goes in the report."

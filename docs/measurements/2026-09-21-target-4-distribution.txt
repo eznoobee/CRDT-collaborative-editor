@@ -1,0 +1,9 @@
+§8 target 4 — server-side document load < 500 ms
+  build      Release · f2c79cd+dirty · .NET 10.0.11 · Ubuntu 24.04.4 LTS · Intel(R) Xeon(R) Processor @ 2.10GHz × 4 · 10 GiB
+  document   600,000 elements, 100,000 live, 500,000 tombstones, 480 operations of tail
+  load ms    n=200 min=176.43 p50=308.84 p95=557.86 p99=745.21 max=763.08
+  deciles ms p0=176 p10=209 p20=240 p30=267 p40=286 p50=310 p60=326 p70=350 p80=384 p90=490 p100=763
+  gc pause   n=200 min=0.00 p50=101.36 p95=261.55 p99=432.99 max=518.21
+  generator  28 % of 4 cores (88.3s CPU over 79.1s)
+  note       cold = fresh data source per load; Postgres' own page cache stays warm, so this is an optimistic reading of cold
+  aside      building the replica in memory took 364 ms, which is not part of the target and is where §13.9's browser figure goes

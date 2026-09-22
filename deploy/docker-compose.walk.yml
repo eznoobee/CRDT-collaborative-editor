@@ -1,0 +1,18 @@
+# What the walk adds to the real stack, and nothing more (PROJECT_SPEC.md §12).
+#
+# The base docker-compose.yml is used unmodified. This overlay supplies only the
+# thing a real deployment also supplies from outside — trust for the identity
+# provider's certificate — because the walk's issuer is generated per run and no
+# machine has ever seen it before.
+#
+# Anything else added here would make the walk a test of a different stack. If a
+# step needs more than this to pass, that is a finding about the deployment
+# rather than a line to add below (§13.27).
+services:
+  api:
+    environment:
+      # The system roots plus this run's issuer certificate — the harness
+      # concatenates both, so this adds trust rather than replacing it.
+      SSL_CERT_FILE: /run/walk/issuer-ca.pem
+    volumes:
+      - ${WALK_CA_FILE:?the walk harness writes this}:/run/walk/issuer-ca.pem:ro

@@ -1,0 +1,34 @@
+# §9's offline window, observable within a test's lifetime (register row 31).
+#
+# The walk's overlay says that anything added to it makes the walk a test of a
+# different stack, and that is why this is a separate file rather than a line
+# there. This suite genuinely needs a different stack: §9's window is bounded by
+# §5's T_retire, which is seven days in the product, and a browser cannot be
+# left open for seven days. A stack that retires after a minute would also
+# retire the walk's own tabs between its steps, which is the reason register
+# row 31 said this needs its own.
+#
+# WHAT IS CHANGED, AND WHAT DELIBERATELY IS NOT. Only the three durations that
+# make the mechanism observable. The code path is the product's: the sweep that
+# retires a replica, the negotiate that declines to resume a retired one, and
+# the client's discard are all unmodified, and nothing here disables a check or
+# supplies an answer. Shortening a timer is the one change that turns a
+# seven-day behaviour into a testable one without changing what the behaviour
+# is.
+#
+# The heartbeat must stay below T_retire — the API validates that at startup —
+# so it is shortened in proportion rather than left at five minutes, which
+# would refuse to start.
+services:
+  api:
+    environment:
+      # Fifteen seconds. Long enough that a tab which merely reconnects is not
+      # retired, short enough that a test can outlast it. The relationship that
+      # matters is heartbeat < retire, and it is kept.
+      ReplicaRetirement__Retire: "00:00:15"
+      ReplicaRetirement__Heartbeat: "00:00:05"
+
+      # The sweep has to run inside the window for the window to close. An hour
+      # here would mean the replica is eligible for retirement and never swept,
+      # which looks exactly like retirement not working.
+      ReplicaRetirement__Interval: "00:00:03"

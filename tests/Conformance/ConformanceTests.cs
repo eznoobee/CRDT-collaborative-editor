@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Crdt.Simulation;
 
 namespace Conformance;
 
@@ -56,6 +57,13 @@ public sealed class ConformanceTests
                     $"{file.Name}: replica {replica} has \"{text}\" but replica 0 has \"{result.Text}\".");
             }
 
+            // §6: the encoding is a second implementation and must not lose
+            // anything the algorithm depends on.
+            Assert.True(
+                string.Equals(result.WireRoundTripText, result.Text, StringComparison.Ordinal),
+                $"{file.Name}: replaying through the wire encoding gave "
+                + $"\"{result.WireRoundTripText}\" but direct replay gave \"{result.Text}\".");
+
             if (expected.TryGetProperty("text", out var exact))
             {
                 Assert.True(
@@ -82,10 +90,61 @@ public sealed class ConformanceTests
         }
     }
 
+    /// <summary>
+    /// Materialises §9's generated corpus and replays it.
+    /// </summary>
+    /// <remarks>
+    /// Generated traces carry no <c>expected</c> block — there is no paper
+    /// behind them, and an expectation derived from whatever this core produced
+    /// would assert that the implementation agrees with itself. What they are
+    /// for is the cross-implementation diff. What can still be asserted here,
+    /// per trace, is what does not depend on an expectation: every replica
+    /// converged, and the wire encoding round-tripped.
+    /// </remarks>
+    private static TraceResult[] ReplayGenerated()
+    {
+        var manifest = GeneratedCorpus.ReadManifest();
+        var traces = GeneratedCorpus.Materialise(manifest);
+
+        var results = new List<TraceResult>(traces.Length);
+        foreach (var trace in traces)
+        {
+            using var doc = JsonDocument.Parse(CorpusExport.ToTraceJson(trace));
+            var result = TraceReplay.Replay(doc.RootElement);
+
+            foreach (var (replica, text) in result.ReplicaTexts)
+            {
+                Assert.True(
+                    string.Equals(text, result.Text, StringComparison.Ordinal),
+                    $"{trace.Name} (seed {trace.Scenario.Seed}): replica {replica} has "
+                    + $"\"{text}\" but replica 0 has \"{result.Text}\". "
+                    + "Reproduce with ScenarioGenerator.Generate(seed).");
+            }
+
+            Assert.True(
+                string.Equals(result.WireRoundTripText, result.Text, StringComparison.Ordinal),
+                $"{trace.Name} (seed {trace.Scenario.Seed}): the wire round trip gave "
+                + $"\"{result.WireRoundTripText}\" but direct replay gave \"{result.Text}\".");
+
+            results.Add(result);
+        }
+
+        return [.. results];
+    }
+
+    [Fact]
+    public void Every_generated_trace_converges_and_survives_the_wire()
+    {
+        var results = ReplayGenerated();
+        Assert.Equal(GeneratedCorpus.ReadManifest().Count, results.Length);
+    }
+
     [Fact]
     public void Writes_the_normalised_result_file()
     {
-        var results = Traces().Select(t => TraceReplay.Replay(t.Root)).ToArray();
+        var results = Traces().Select(t => TraceReplay.Replay(t.Root))
+            .Concat(ReplayGenerated())
+            .ToArray();
         var rendered = NormalisedResult.Render("csharp", results);
 
         var output = new DirectoryInfo(

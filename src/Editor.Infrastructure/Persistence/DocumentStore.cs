@@ -1,0 +1,291 @@
+using Crdt.Core;
+using Editor.Infrastructure.Serialization;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace Editor.Infrastructure.Persistence;
+
+/// <summary>How often to snapshot (PROJECT_SPEC.md §6).</summary>
+/// <param name="OperationsPerSnapshot">
+/// Operations between snapshots. Zero disables snapshotting entirely.
+/// </param>
+/// <remarks>
+/// There is deliberately no default on the parameter. A defaulted primary
+/// constructor parameter on a record struct is bypassed by <c>new()</c> and by
+/// <c>default</c>, both of which zero-initialise — so a "default of 500" would
+/// silently become "never snapshot" at exactly the call sites that did not think
+/// about it. Use <see cref="Default"/>.
+/// </remarks>
+public readonly record struct SnapshotPolicy(int OperationsPerSnapshot)
+{
+    /// <summary>The §6 default: every 500 operations.</summary>
+    public static SnapshotPolicy Default => new(500);
+
+    /// <summary>
+    /// Whether a document is due a snapshot, given where its latest snapshot
+    /// sits and where its log has reached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <strong>A gap, not a crossing.</strong> This asked, until 7b.3, whether a
+    /// single batch had stepped over a multiple of N — the right question for an
+    /// inline caller that sees every batch, and the wrong one for the background
+    /// sweep §8 requires, which sees documents. The gap form is also the
+    /// self-healing one: a crossing missed to a restart or a lost notification
+    /// left a document unsnapshotted for another N operations, whereas a gap
+    /// only widens until something closes it.
+    /// </para><para>
+    /// <c>&gt;=</c> rather than <c>&gt;</c>: N operations since the last
+    /// snapshot is the interval §6 names, so the Nth is when it is due and not
+    /// the N+1th.
+    /// </para>
+    /// </remarks>
+    public bool IsDue(long snapshotServerSeq, long headServerSeq) =>
+        OperationsPerSnapshot > 0
+        && headServerSeq - snapshotServerSeq >= OperationsPerSnapshot;
+}
+
+/// <summary>Loads and snapshots documents (PROJECT_SPEC.md §6).</summary>
+public sealed class DocumentStore(NpgsqlDataSource dataSource)
+{
+    private const string LatestSnapshot = """
+        SELECT server_seq, state FROM document_snapshots
+        WHERE document_id = $1
+        ORDER BY server_seq DESC
+        LIMIT 1;
+        """;
+
+    private const string OperationsAfter = """
+        SELECT replica_id, seq, op_type, parent_replica, parent_seq, side,
+               right_origin_replica, right_origin_seq, right_origin_is_end,
+               value, target_replica, target_seq, server_seq
+        FROM document_ops
+        WHERE document_id = $1 AND server_seq > $2
+        ORDER BY server_seq;
+        """;
+
+    private const string InsertSnapshot = """
+        INSERT INTO document_snapshots (document_id, server_seq, state, version_vector, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (document_id, server_seq) DO NOTHING;
+        """;
+
+    /// <summary>
+    /// The collector's write. <c>DO NOTHING</c> is right for the periodic
+    /// snapshot — two servers crossing the threshold together agree, so the
+    /// loser has nothing to add — and wrong here: collection produces a
+    /// <em>different</em> snapshot at the same sequence, and skipping the write
+    /// would leave the collector reporting elements it did not remove. The
+    /// count and the bytes have to move together or the count is a lie.
+    /// </summary>
+    private const string ReplaceSnapshot = """
+        INSERT INTO document_snapshots (document_id, server_seq, state, version_vector, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (document_id, server_seq) DO UPDATE
+        SET state = EXCLUDED.state,
+            version_vector = EXCLUDED.version_vector,
+            created_at = EXCLUDED.created_at;
+        """;
+
+    /// <summary>
+    /// Rebuilds a document: the latest snapshot, then every operation after it.
+    /// </summary>
+    public async Task<Replica> LoadAsync(
+        Guid documentId, ReplicaId asReplica, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var (fromServerSeq, replica) = await ReadSnapshotAsync(
+            connection, documentId, asReplica, cancellationToken).ConfigureAwait(false);
+
+        await using var command = new NpgsqlCommand(OperationsAfter, connection);
+        command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter { Value = fromServerSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            replica.Apply(OperationMapper.FromRow(ReadRow(reader, documentId)));
+        }
+
+        return replica;
+    }
+
+    /// <summary>
+    /// Rebuilds a document and answers the sequence the replay reached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The sequence is the reason this exists alongside <see cref="LoadAsync"/>:
+    /// both of its callers write the rebuilt state back as a snapshot, and a
+    /// snapshot stamped at any sequence other than the one its state actually
+    /// contains silently drops every operation in between. Looking the head up
+    /// in a second query would be that bug with extra steps.
+    /// </para><para>
+    /// <strong>Collection runs against the full replay, never against a stored
+    /// snapshot in place.</strong> <see cref="LoadAsync"/> applies every
+    /// operation after the latest snapshot, so an element collected out of that
+    /// snapshot can still be named as a parent or right origin by an operation
+    /// already in the log behind it — and the replay that used to succeed
+    /// stops. §5's four rules say what a <em>future</em> operation may name;
+    /// they say nothing about the past, and the past is exactly what sits
+    /// between a snapshot and the head.
+    /// </para><para>
+    /// Collecting the replayed state and writing it back at the sequence the
+    /// replay reached moves that boundary to the head, where the rules do
+    /// apply.
+    /// </para><para>
+    /// §6's periodic snapshot has no such constraint — it stores the state as
+    /// it is — but wants the same two answers, so it uses this rather than a
+    /// second method that would drift from it.
+    /// </para><para>
+    /// Repeatable read for the same reason. The snapshot and the operations
+    /// after it are two queries, and a snapshot written between them by the
+    /// periodic policy would otherwise have its operations replayed twice.
+    /// </para>
+    /// </remarks>
+    public async Task<(Replica Replica, long ServerSeq)> LoadAtHeadAsync(
+        Guid documentId, ReplicaId asReplica, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = await connection
+            .BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken)
+            .ConfigureAwait(false);
+
+        var (serverSeq, replica) = await ReadSnapshotAsync(
+            connection, documentId, asReplica, cancellationToken).ConfigureAwait(false);
+
+        await using var command = new NpgsqlCommand(OperationsAfter, connection);
+        command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter { Value = serverSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
+
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var row = ReadRow(reader, documentId);
+                replica.Apply(OperationMapper.FromRow(row));
+                serverSeq = row.ServerSeq;
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return (replica, serverSeq);
+    }
+
+    /// <summary>Writes a snapshot at <paramref name="serverSeq"/>.</summary>
+    public Task SaveSnapshotAsync(
+        Guid documentId,
+        Replica replica,
+        long serverSeq,
+        CancellationToken cancellationToken = default) =>
+        WriteSnapshotAsync(InsertSnapshot, documentId, replica, serverSeq, cancellationToken);
+
+    /// <summary>
+    /// Writes a collected snapshot at <paramref name="serverSeq"/>, replacing
+    /// whatever is stored there.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="SaveSnapshotAsync"/> rather than a flag on it.
+    /// The two differ in whether they may overwrite state a client could
+    /// already be reading, which is the kind of difference a caller should have
+    /// to name.
+    /// </remarks>
+    public Task SaveCollectedSnapshotAsync(
+        Guid documentId,
+        Replica replica,
+        long serverSeq,
+        CancellationToken cancellationToken = default) =>
+        WriteSnapshotAsync(ReplaceSnapshot, documentId, replica, serverSeq, cancellationToken);
+
+    private async Task WriteSnapshotAsync(
+        string sql,
+        Guid documentId,
+        Replica replica,
+        long serverSeq,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(replica);
+
+        var versionVector = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (id, count) in replica.VersionVector)
+        {
+            versionVector[ReplicaIdConversion.ToGuid(id).ToString()] = NormalisedJson.Number(count);
+        }
+
+        var builder = new System.Text.StringBuilder();
+        builder.Append("{\n");
+        NormalisedJson.AppendMap(builder, 1, "versionVector", versionVector);
+        builder.Append('\n').Append("}\n");
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter { Value = serverSeq, NpgsqlDbType = NpgsqlDbType.Bigint });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            // §6: binary is the storage form. The normative JSON is what
+            // correctness is defined against, and the conformance corpus is what
+            // holds the two together.
+            Value = SnapshotBinary.Encode(replica),
+            NpgsqlDbType = NpgsqlDbType.Bytea,
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = builder.ToString(),
+            NpgsqlDbType = NpgsqlDbType.Text,
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = DateTimeOffset.UtcNow,
+            NpgsqlDbType = NpgsqlDbType.TimestampTz,
+        });
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<(long FromServerSeq, Replica Replica)> ReadSnapshotAsync(
+        NpgsqlConnection connection,
+        Guid documentId,
+        ReplicaId asReplica,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LatestSnapshot, connection);
+        command.Parameters.Add(new NpgsqlParameter { Value = documentId, NpgsqlDbType = NpgsqlDbType.Uuid });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return (0L, new Replica(asReplica));
+        }
+
+        var serverSeq = reader.GetInt64(0);
+        return (serverSeq, SnapshotBinary.Decode(asReplica, reader.GetFieldValue<byte[]>(1)));
+    }
+
+    /// <summary>
+    /// Reads one operation row. Internal rather than private because
+    /// <see cref="CatchUpReader"/> reads the same shape from a different query,
+    /// and two copies of this mapping would be two places for a column to move.
+    /// </summary>
+    internal static DocumentOperationRow ReadRow(NpgsqlDataReader reader, Guid documentId) => new()
+    {
+        DocumentId = documentId,
+        ReplicaId = reader.GetGuid(0),
+        Seq = reader.GetInt64(1),
+        OpType = reader.GetString(2),
+        ParentReplica = reader.IsDBNull(3) ? null : reader.GetGuid(3),
+        ParentSeq = reader.IsDBNull(4) ? null : reader.GetInt64(4),
+        Side = reader.IsDBNull(5) ? null : reader.GetString(5),
+        RightOriginReplica = reader.IsDBNull(6) ? null : reader.GetGuid(6),
+        RightOriginSeq = reader.IsDBNull(7) ? null : reader.GetInt64(7),
+        RightOriginIsEnd = reader.GetBoolean(8),
+        Value = reader.IsDBNull(9) ? null : reader.GetString(9),
+        TargetReplica = reader.IsDBNull(10) ? null : reader.GetGuid(10),
+        TargetSeq = reader.IsDBNull(11) ? null : reader.GetInt64(11),
+        ServerSeq = reader.GetInt64(12),
+    };
+}

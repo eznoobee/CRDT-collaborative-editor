@@ -17,7 +17,7 @@ dotnet run --project tests/Conformance/Conformance.csproj --no-build
 
 echo
 echo "==> TypeScript runner"
-(cd client && npm run --silent test -- src/crdt/conformance.test.ts)
+(cd client && npm run --silent test:conformance)
 
 echo
 echo "==> Comparing"

@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "seed": 20260904,
+  "count": 1000,
+  "generatorVersion": 2,
+  "dimensions": {
+    "backward-run": 732,
+    "causally-delayed-delivery": 463,
+    "concurrent-at-one-position": 816,
+    "delete-of-concurrent-insert": 183,
+    "interleaving-pressure": 740,
+    "single-character-concurrency": 189,
+    "three-or-more-replicas": 665
+  },
+  "digest": "2a41a798fb0f9ba2a0251c93409217212fc93e7359b040a4a7dfeaa07b0ca6eb"
+}

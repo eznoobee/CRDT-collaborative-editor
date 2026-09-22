@@ -1,0 +1,157 @@
+/**
+ * The codes the server can refuse with, and what a client does about each (§9).
+ *
+ * @remarks
+ * Kept as one table rather than scattered through the controller, because §9's
+ * rule is that *every* code has a defined recovery. A `switch` with a `default`
+ * that logs is how a code acquires the recovery "nothing happens", and a client
+ * that swallows a refusal appears to work and silently is not (§13.13).
+ */
+
+/** Refusals from §7's ingest validation and the hub. */
+export const REJECTION = {
+  notFound: 'not_found',
+  forbidden: 'forbidden',
+  unauthenticated: 'unauthenticated',
+  malformed: 'malformed',
+  messageTooLarge: 'message_too_large',
+  batchTooLarge: 'batch_too_large',
+  runTooLong: 'run_too_long',
+  replicaMismatch: 'replica_mismatch',
+  sequenceGap: 'sequence_gap',
+  unknownOrigin: 'unknown_origin',
+  documentFull: 'document_full',
+  tooManyReplicas: 'too_many_replicas',
+
+  /**
+   * §7's abuse limits: this user or this connection is over budget.
+   *
+   * The one refusal that says *when* to come back. Every other code is a
+   * property of the batch or the session; this one is a property of the clock,
+   * and the server is the only party that knows the window it just closed.
+   */
+  rateLimited: 'rate_limited',
+
+  /**
+   * §7's per-user connection cap: this person holds too many connections.
+   *
+   * Not `too_many_replicas`, though both refuse a connection and both recover
+   * by reconnecting later. That one means the document is full and closing your
+   * own tabs will not help; this one means the opposite. The recovery is the
+   * same and the sentence shown to the user is not, which is why they are two
+   * codes rather than one.
+   */
+  tooManyConnections: 'too_many_connections',
+
+  /**
+   * §5's GC watermark: the referenced id is at or below it and is gone.
+   *
+   * Specified before anything emits it. The server side arrives with GC in
+   * Phase 7; defining the client contract now means that implementation is
+   * written against a stated shape rather than inventing one late, when the
+   * pressure will be to make it whatever the client already tolerates.
+   */
+  resyncRequired: 'resync_required',
+
+  /**
+   * §7's PKCE flow cannot produce a valid token any more.
+   *
+   * The one code in this table no server emits — the client raises it about
+   * itself when a refresh fails or a session ends elsewhere. It behaves like a
+   * lost connection rather than a refusal: state goes offline, the outbox is
+   * kept in full, submission stops, and the message asks for a sign-in. §9
+   * requires that shape rather than an exception, because an unhandled
+   * rejection in the refresh path discards unsent work at exactly the moment
+   * the user is being asked to log in again.
+   */
+  signInRequired: 'sign_in_required',
+
+  /**
+   * §5's pending-set bound, exceeded by what arrived from the connection.
+   *
+   * The second entry no server emits — `sign_in_required` was the first. This
+   * one is raised by the client about its own buffer: more operations are
+   * waiting on a causal dependency than §5's bound allows, which means this
+   * replica is missing something the connection is not going to resend on its
+   * own.
+   *
+   * **It is not a drop and it is not a loss.** §5 allows exactly one exception
+   * to "do not drop" — `resync_required` — and this is not it. The recovery
+   * fetches the missing dependencies by version vector, the gaps close, the
+   * pending set drains, and the outbox is never touched. Nothing a user typed
+   * is at risk, which is why the recovery is `catch-up` and not `resync`.
+   */
+  pendingOverflow: 'pending_overflow',
+} as const;
+
+/** What the controller does with a refusal. */
+export type Recovery =
+  /** Reconcile with the server, then submit the same batch once more. */
+  | 'catch-up-and-retry'
+  /** Reconcile with the server. There is no batch to resubmit. */
+  | 'catch-up'
+  /** Wait out the window the server named, then submit the same batch again. */
+  | 'wait-and-retry'
+  /** Throw local state away, take a snapshot, and report the lost work. */
+  | 'resync'
+  /** Keep receiving, refuse to author, keep the outbox. */
+  | 'read-only'
+  /** Reconnect later; the condition is expected to clear on its own. */
+  | 'reconnect'
+  /** Stop. Retrying cannot help and the user has to be told. */
+  | 'stop';
+
+/**
+ * §9's table, as code.
+ *
+ * @remarks
+ * `rate_limited` is the one recovery with no budget on it, deliberately.
+ * `catch-up-and-retry` is capped at one attempt because a second occurrence
+ * means a bug here, but a throttle repeating means the window has not rolled
+ * over yet — which is the server working, not this client misbehaving. What
+ * bounds it instead is the delay: the controller floors and ceilings the
+ * server's number, so a zero cannot spin and an absurd one cannot park the
+ * outbox forever.
+ *
+ * `sequence_gap` and `replica_mismatch` are `stop` rather than `resync`
+ * deliberately: both mean this client's idea of its own identity or its own
+ * sequence disagrees with the server's, which is a bug here rather than a state
+ * to recover from. Resyncing would paper over it and lose the evidence, and the
+ * same batch would be rebuilt and refused again.
+ */
+export function recoveryFor(code: string): Recovery {
+  switch (code) {
+    case REJECTION.unknownOrigin:
+      return 'catch-up-and-retry';
+
+    case REJECTION.pendingOverflow:
+      // Not `catch-up-and-retry`. That recovery resubmits the batch the server
+      // refused; this one has no batch — the overflow happened on the way in,
+      // not on the way out, and what needs fetching is what this replica is
+      // missing.
+      return 'catch-up';
+
+    case REJECTION.rateLimited:
+      return 'wait-and-retry';
+
+    case REJECTION.resyncRequired:
+      return 'resync';
+
+    case REJECTION.forbidden:
+      return 'read-only';
+
+    case REJECTION.tooManyConnections:
+    case REJECTION.tooManyReplicas:
+    case REJECTION.unauthenticated:
+    case REJECTION.signInRequired:
+      return 'reconnect';
+
+    default:
+      // Everything else — not_found, malformed, the size caps, a sequence gap,
+      // a replica mismatch, and any code a future server adds — stops. An
+      // unknown code is the one case where guessing is worst: the safe
+      // assumption about a refusal you do not understand is that repeating it
+      // will not help.
+      return 'stop';
+  }
+}

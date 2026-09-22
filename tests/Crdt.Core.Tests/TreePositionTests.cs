@@ -1,5 +1,5 @@
 using System.Text;
-using Crdt.Core.Tests.Simulation;
+using Crdt.Simulation;
 
 namespace Crdt.Core.Tests;
 

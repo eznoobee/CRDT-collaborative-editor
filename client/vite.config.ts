@@ -7,6 +7,49 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+
+    // The interop and end-to-end suites need a running server, a running
+    // Postgres, a running Redis — and, for the browser tests, a built client
+    // and a Chromium — so neither is part of the default run — a suite that can
+    // only pass under conditions the developer has not set up is a suite that
+    // gets ignored. `npm run test:interop` runs it, and CI runs it as its own
+    // step where the infrastructure exists.
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'src/interop/**',
+      'src/e2e/**',
+      'src/walk/**',
+      // Register row 31's suite, which brings up a stack of its own.
+      //
+      // THE FILE, NOT THE DIRECTORY — §13.52's lesson, applied before it cost
+      // nine phases this time. `networkChange.ts` is row 40's bounded rebuild,
+      // and two CI runs went green without ever executing it. Excluding its
+      // tests along with the stack-bearing suite beside them would leave the
+      // default run with no opinion about whether the repair works, which is
+      // exactly how the committed traces were lost. Do not widen this back to
+      // `src/offline/**`.
+      'src/offline/offlineWindow.e2e.test.ts',
+      // Register row 33's, likewise.
+      'src/gc/**',
+
+      // §8's measurements, which start a server, a browser and a thousand
+      // sockets and take twenty minutes. `scripts/load.sh` runs them; nothing
+      // else should, and a measurement that ran beside the ordinary suite
+      // would be measuring the ordinary suite.
+      'src/load/**',
+      // §9's GENERATED corpus needs the C# runner to have materialised it
+      // first, so it is not self-contained and does not belong in the default
+      // run. `npm run test:conformance`, via scripts/conformance.sh.
+      //
+      // Only the generated half. §9's COMMITTED traces need nothing, and were
+      // excluded for nine phases only because they shared a file with the ones
+      // that do — which left the default suite with no opinion about where
+      // characters go (register row 39, §13.52). They live in
+      // `src/crdt/committedTraces.test.ts` now, which runs here. Do not widen
+      // this pattern to `conformance*`: that would quietly take them back out.
+      'src/crdt/conformance.test.ts',
+    ],
     // PROJECT_SPEC.md §11: an empty suite passing proves nothing, and vitest
     // exits non-zero with no test files unless told otherwise. That default is
     // deliberately left alone.
