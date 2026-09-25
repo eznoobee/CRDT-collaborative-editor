@@ -18,7 +18,16 @@ out="${1:-deploy/tls}"
 extra="${2:-}"
 mkdir -p "$out"
 
-sans='subjectAltName=DNS:localhost,IP:127.0.0.1'
+# DNS:editor-oidc is here because deploy/docker-compose.dev-oidc.yml serves the
+# local development issuer with this same certificate, under that name, and an
+# OIDC issuer URL has to resolve to the same service from the browser and from
+# inside the API's container. One certificate means one trust decision for the
+# developer instead of a new one on every `docker compose up`; leaving the name
+# out does not fail here, it fails later as a handshake the API cannot verify.
+#
+# Harmless when the issuer overlay is not used: a subjectAltName nothing
+# resolves is a name nothing asks for.
+sans='subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:editor-oidc'
 [[ -n "$extra" ]] && sans="$sans,$extra"
 
 openssl req -x509 -newkey rsa:2048 -sha256 -days 30 -nodes \

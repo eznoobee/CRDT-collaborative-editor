@@ -44,7 +44,9 @@ that falls back to a convenient value is one that authenticates against the
 wrong thing):
 
 - `POSTGRES_PASSWORD` — `openssl rand -base64 24`
-- `OIDC_ISSUER` and `OIDC_METADATA_ADDRESS` — your identity provider
+- `OIDC_ISSUER` and `OIDC_METADATA_ADDRESS` — your identity provider. No
+  provider to hand? See [Running it locally with no identity
+  provider](#running-it-locally-with-no-identity-provider) below.
 - `TLS_CERT_FILE` / `TLS_KEY_FILE` — `./scripts/dev-cert.sh deploy/tls` makes a
   self-signed pair for local use
 
@@ -56,6 +58,65 @@ curl -k https://localhost:8443/health/live
 The API's own port is not published. Everything goes through the proxy over
 TLS, because a plaintext route past the termination point is a control that
 exists and does not apply (§4).
+
+### Running it locally with no identity provider
+
+`OIDC_ISSUER` and `OIDC_METADATA_ADDRESS` have no defaults on purpose, so with
+no provider to point them at the stack will not start at all. There is an
+overlay that runs one — the same issuer the test suites use — **for local
+development only**.
+
+> **This is not an identity provider you may expose.** It mints a valid token
+> for any account it is asked for, with no password, because that is what makes
+> it useful in a test. On a laptop that is convenient; anywhere reachable it is
+> a complete authentication bypass. It lives in a separate file, and is
+> deliberately **not** in `docker-compose.yml`, so that using it is always a
+> choice someone typed.
+>
+> It changes nothing about the API. No check is disabled, no development bypass
+> is added, `RequireHttpsMetadata` stays at its secure default, and issuer,
+> audience, lifetime and signing key are all still validated — which is why the
+> issuer serves real HTTPS and hands the API a CA bundle rather than serving
+> plaintext. Nothing in `src/` knows it exists.
+
+**One line in `/etc/hosts` first**, and it is not optional:
+
+```bash
+echo '127.0.0.1 editor-oidc' | sudo tee -a /etc/hosts
+```
+
+An OIDC issuer is an absolute URL, and the browser, the API and the token's
+`iss` claim must agree on it exactly — the metadata document's `jwks_uri` is
+derived from it too. `localhost` cannot be that URL, because inside the API's
+container `localhost` is the API, so it would fetch signing keys from itself.
+One name that resolves to the issuer from the host *and* from inside the compose
+network is the only arrangement that works without weakening a check: on the
+host that name is this hosts entry, and inside the network it is a service
+alias.
+
+Then:
+
+```bash
+cp .env.example .env                     # then set POSTGRES_PASSWORD
+./scripts/dev-cert.sh deploy/tls         # covers localhost AND editor-oidc
+
+# in .env:
+#   OIDC_ISSUER=https://editor-oidc:9443
+#   OIDC_METADATA_ADDRESS=https://editor-oidc:9443/.well-known/openid-configuration
+
+docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml up --build
+```
+
+Open <https://localhost:8443>. Both the application and the issuer are served
+with the same self-signed certificate, so your browser will warn once per
+origin; accept it for `https://localhost:8443` and for `https://editor-oidc:9443`
+and sign-in will complete. Sign in as `alice` or `bob` — set `DEV_OIDC_ACCOUNTS`
+to change them. Two accounts rather than one, so two browser profiles can
+demonstrate two people editing the same document, which is the thing this
+project is.
+
+To go back to a real provider, drop the `-f` overlay and put your provider's
+values in `.env`. Nothing else changes.
 
 ## Working on it
 

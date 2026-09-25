@@ -1,0 +1,46 @@
+{
+  // The dev issuer's own project, because it cannot join the client's.
+  //
+  // client/tsconfig.json is `composite` with an `outDir` under client/, so a
+  // file above that directory fails with TS6059 — the include was tried and
+  // rejected. Its own project is the alternative, and it is wired into
+  // scripts/client-gates.sh so CI typechecks it: a TypeScript file in the tree
+  // that nothing typechecks is one that quietly stops compiling, and the first
+  // person to find out would be a developer trying to start the stack.
+  //
+  // The flags that matter are the client's, and for the same reasons.
+  // `erasableSyntaxOnly` is not a style preference here: this file is run by
+  // Node's own type stripping, with no transpiler, so syntax that stripping
+  // cannot erase would fail at startup rather than at build time.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+
+    // @types/node lives in client/node_modules, because the file this project
+    // typechecks imports the client's harness. Named explicitly: type resolution
+    // searches upward from this directory and would never look sideways into
+    // client/, which fails as "cannot find type definition file for 'node'"
+    // rather than as anything about where the types are.
+    "typeRoots": ["../../client/node_modules/@types"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["server.ts"]
+}

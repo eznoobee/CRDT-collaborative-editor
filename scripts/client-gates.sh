@@ -19,6 +19,15 @@ npm run --silent lint
 echo "==> typecheck"
 npm run --silent typecheck
 
+# The dev issuer's entrypoint, which has its own project because it sits above
+# client/ and client/tsconfig.json is composite with an outDir inside it
+# (TS6059). Checked here rather than left unchecked: a TypeScript file nothing
+# typechecks is one that quietly stops compiling, and the first person to find
+# out would be a developer trying to start the stack with
+# deploy/docker-compose.dev-oidc.yml.
+echo "==> typecheck (dev OIDC issuer)"
+npx --no-install tsc --noEmit -p ../deploy/oidc-dev/tsconfig.json
+
 echo "==> tests"
 npm run --silent test
 

@@ -1,0 +1,125 @@
+# An identity provider for a LOCAL DEVELOPMENT stack, and nothing else.
+#
+# WHY THIS IS A SEPARATE FILE. `docker-compose.yml` requires OIDC_ISSUER and
+# OIDC_METADATA_ADDRESS and supplies no default, on purpose (PROJECT_SPEC.md
+# §7): an issuer that falls back to something convenient produces a deployment
+# authenticating against the wrong provider, which looks exactly like one that
+# works. That is the right default and it is not being changed here. The cost it
+# imposes — a developer with no provider to hand cannot start the stack at all —
+# is what this overlay pays, for local use, by running one.
+#
+# Putting it in the default compose file would undo the property. A stack that
+# ships its own issuer is a stack that authenticates against a provider anyone
+# can mint tokens at, and the moment that is the default, "it worked locally" and
+# "it is configured correctly" stop being different statements.
+#
+# WHAT IS NOT DONE HERE, and this is the part worth reading. No check is
+# disabled and no bypass is added. The API keeps `RequireHttpsMetadata` at its
+# secure default, still validates issuer, audience, lifetime and signing key
+# (src/Editor.Api/Authentication/AuthenticationExtensions.cs), and still fetches
+# a JWKS over real TLS. Nothing in `src/` knows this file exists. The issuer is
+# `startOidc` — the same one the interop, walk and browser suites run against,
+# not a second implementation that could drift in the code deciding whether a
+# token is valid.
+#
+# WHY IT NEEDS AN /etc/hosts LINE. An OIDC issuer is an absolute URL, and the
+# browser, the API and the token's `iss` claim must all agree on it exactly —
+# the metadata document's `jwks_uri` is derived from it too. `localhost` cannot
+# be that URL: inside the api container it is the api container, so the API would
+# fetch signing keys from itself. One hostname that resolves to the issuer from
+# both sides is the only arrangement that works without weakening a check, so
+# the README's first step adds it. See deploy/oidc-dev/server.ts.
+services:
+  oidc:
+    build:
+      # The repository root, because the image copies the harness out of
+      # client/src. Same context as the API's image, for the same reason.
+      context: .
+      dockerfile: deploy/oidc-dev/Dockerfile
+
+    environment:
+      DEV_OIDC_PORT: "9443"
+
+      # The one hostname. It must match the /etc/hosts entry, the network alias
+      # below, a subjectAltName on the certificate, and OIDC_ISSUER in .env.
+      DEV_OIDC_HOST: ${DEV_OIDC_HOST:-editor-oidc}
+
+      # Where the application is, so the issuer can register its redirect URIs
+      # exactly. §7 treats a redirect URI echoed back unchecked as an open
+      # redirect, and the allow-list here is that check — it is an exact match,
+      # never a pattern.
+      DEV_OIDC_APP_ORIGIN: ${DEV_OIDC_APP_ORIGIN:-https://localhost:${HTTPS_PORT:-8443}}
+
+      # The accounts the chooser offers. Two by default, because one account
+      # cannot demonstrate two people editing the same document, which is the
+      # thing this project is.
+      DEV_OIDC_ACCOUNTS: ${DEV_OIDC_ACCOUNTS:-alice,bob}
+
+      # The certificate the developer already trusts for the application itself.
+      # Reused rather than generated per run: a fresh issuer key on every
+      # `docker compose up` means either trusting a new one each time or turning
+      # certificate validation off, and the second is what §7 forbids.
+      DEV_OIDC_CERT_FILE: /run/oidc/cert.pem
+      DEV_OIDC_KEY_FILE: /run/oidc/key.pem
+
+      # The system roots plus that certificate, for the API to trust. Written
+      # here rather than assembled by hand, because SSL_CERT_FILE names one file
+      # and a bundle holding only the dev certificate would leave the API unable
+      # to reach anything else.
+      DEV_OIDC_CA_OUT: /run/oidc-ca/ca-bundle.pem
+
+    volumes:
+      - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/run/oidc/cert.pem:ro
+      - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/run/oidc/key.pem:ro
+      - oidc-ca:/run/oidc-ca
+
+    networks:
+      default:
+        aliases:
+          # What the API resolves. The same name the browser resolves through
+          # /etc/hosts, which is the whole point.
+          - ${DEV_OIDC_HOST:-editor-oidc}
+
+    # Published, because a browser on the host has to reach it. Unlike the API's
+    # port this is not a plaintext route past the proxy: the issuer terminates
+    # its own TLS, and it is a different service from the one §4 puts behind the
+    # proxy.
+    ports:
+      - "9443:9443"
+
+    # Gates the API below. Without it the API can start, fetch metadata before
+    # the issuer is listening, and cache the failure.
+    # The certificate is VERIFIED here, not skipped. `rejectUnauthorized: false`
+    # would have been shorter and is the habit this repository does not have:
+    # the dev certificate carries IP:127.0.0.1 and this container already holds
+    # it, so the probe can name what it trusts. A liveness check is not a
+    # token-validation check, but a disabled check in the tree is a pattern
+    # somebody copies to somewhere it does matter.
+    healthcheck:
+      test: ["CMD", "node", "-e", "const{get}=require('node:https');const{readFileSync}=require('node:fs');get({host:'127.0.0.1',port:9443,path:'/jwks.json',ca:readFileSync('/run/oidc/cert.pem')},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    environment:
+      # The system roots plus the dev certificate — adds trust rather than
+      # replacing it, the same arrangement the walk overlay uses.
+      SSL_CERT_FILE: /run/oidc-ca/ca-bundle.pem
+    volumes:
+      - oidc-ca:/run/oidc-ca:ro
+    depends_on:
+      oidc:
+        condition: service_healthy
+
+# THE MIGRATOR IS DELIBERATELY UNTOUCHED, and the absence is the note. It builds
+# the same host and so validates the same Oidc configuration, which is why a
+# missing issuer fails there too — but that validation checks the options are
+# present, not that the provider answers. The metadata fetch is lazy, on the
+# first token, which the migrator never sees. Giving it the CA bundle and a
+# dependency on the issuer would add a startup edge and a mount that nothing
+# reads, so it has neither.
+
+volumes:
+  oidc-ca:

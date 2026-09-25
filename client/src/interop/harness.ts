@@ -174,6 +174,38 @@ export interface OidcOptions {
    * at startup; it fails at token validation, as an issuer mismatch.
    */
   readonly reachableAs?: string;
+
+  /**
+   * A fixed port, if an ephemeral one will not do.
+   *
+   * @remarks
+   * Tests take port 0 and read back what they got, which is right for them: a
+   * fixed port makes two runs collide. A container published at a known port
+   * cannot, because the port is part of the issuer URL and the URL has to be
+   * written into a `.env` before anything starts.
+   */
+  readonly port?: number;
+
+  /**
+   * A certificate to serve with, instead of generating one per run.
+   *
+   * @remarks
+   * <p>
+   * Generating per run is right for a test — nothing has to trust it twice, and
+   * Chromium is handed the pin on the command line. It is wrong for a stack a
+   * person drives by hand: a browser would meet a new untrusted issuer
+   * certificate on every `docker compose up`, and the only ways past that are
+   * to trust a fresh key each time or to turn certificate validation off. The
+   * second is what §7 forbids.
+   * </p><p>
+   * So a local stack passes the certificate the developer already trusts for
+   * the application itself, and there is one trust decision instead of a
+   * recurring one. Both halves must be given together.
+   * </p>
+   */
+  readonly certFile?: string;
+
+  readonly keyFile?: string;
 }
 
 /** A certificate for 127.0.0.1, so the metadata really is served over TLS. */
@@ -256,7 +288,17 @@ function challengeFor(verifier: string): string {
 /** Starts the issuer: discovery, JWKS, and a signer for this run only. */
 export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
   const directory = mkdtempSync(join(tmpdir(), 'editor-interop-'));
-  const { certFile, keyFile } = certificate(directory, options.sans ?? []);
+
+  // Supplied together or not at all: half a pair is a misconfiguration that
+  // would otherwise surface as a TLS handshake failure with no hint of why.
+  if ((options.certFile === undefined) !== (options.keyFile === undefined)) {
+    throw new Error('startOidc: certFile and keyFile must be supplied together');
+  }
+
+  const { certFile, keyFile } = options.certFile === undefined || options.keyFile === undefined
+    ? certificate(directory, options.sans ?? [])
+    : { certFile: options.certFile, keyFile: options.keyFile };
+
   const signing = keys();
 
   // The system roots plus this run's certificate. Replacing the system store
@@ -634,7 +676,10 @@ export async function startOidc(options: OidcOptions = {}): Promise<Oidc> {
   }
 
   const bind = options.bind ?? '127.0.0.1';
-  await new Promise<void>((done) => server.listen(0, bind, done));
+  await new Promise<void>((done) => server.listen(options.port ?? 0, bind, done));
+
+  // Read back rather than assumed, even when a port was asked for: the issuer
+  // URL has to be what the socket actually bound.
   const { port } = server.address() as AddressInfo;
 
   // The issuer URL a *client* uses, which is not always the bind address: the

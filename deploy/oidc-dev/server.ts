@@ -1,0 +1,125 @@
+/**
+ * The harness issuer, run as a service for a local stack. LOCAL DEVELOPMENT
+ * ONLY — see `deploy/docker-compose.dev-oidc.yml` for why that is not a
+ * disclaimer but a boundary.
+ *
+ * @remarks
+ * <p>
+ * <b>Why this exists.</b> `docker-compose.yml` requires `OIDC_ISSUER` and
+ * `OIDC_METADATA_ADDRESS` and supplies no default, deliberately: §7 forbids an
+ * issuer that falls back to something convenient, because a stack that comes up
+ * authenticating against the wrong provider looks exactly like one that works.
+ * The cost is that a developer with no identity provider to hand cannot start
+ * the stack at all, which is the gap this closes.
+ * </p><p>
+ * <b>What it does not do.</b> It adds no development bypass to the product and
+ * disables no check. The API keeps `RequireHttpsMetadata` at its secure
+ * default, validates issuer, audience, lifetime and signing key, and gets its
+ * keys from a JWKS fetched over real TLS — which is why this serves HTTPS and
+ * writes a CA bundle rather than serving plaintext and asking the API to be
+ * relaxed about it. Nothing in `src/` knows this service exists.
+ * </p><p>
+ * <b>The same issuer the test suites use</b>, `startOidc`, rather than a second
+ * implementation. A dev-only issuer written separately would be a copy that
+ * drifts, and the drift would be in exactly the code that decides whether a
+ * token is valid.
+ * </p>
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+
+import { startOidc } from '../../client/src/interop/harness.ts';
+
+/** Reads a variable that has no safe default. */
+function required(name: string): string {
+  const value = process.env[name];
+  if (value === undefined || value === '') {
+    throw new Error(`${name} is not set; deploy/docker-compose.dev-oidc.yml sets it`);
+  }
+
+  return value;
+}
+
+/**
+ * The accounts the chooser offers.
+ *
+ * @remarks
+ * A list, not a default subject. The harness issuer has no implicit identity on
+ * purpose — with one, signing out and signing back in returns the same person,
+ * and §7's account switch becomes untestable. The same property is worth having
+ * by hand: this stack can demonstrate two people sharing a document from two
+ * browser profiles.
+ */
+const accounts = (process.env['DEV_OIDC_ACCOUNTS'] ?? 'alice,bob')
+  .split(',')
+  .map((who) => who.trim())
+  .filter((who) => who !== '');
+
+const port = Number(required('DEV_OIDC_PORT'));
+if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+  throw new Error(`DEV_OIDC_PORT must be a port number, not ${JSON.stringify(process.env['DEV_OIDC_PORT'])}`);
+}
+
+const issuerHost = required('DEV_OIDC_HOST');
+const appOrigin = required('DEV_OIDC_APP_ORIGIN');
+
+const oidc = await startOidc({
+  // 0.0.0.0, because the whole point is that another container and a browser
+  // on the host both reach it.
+  bind: '0.0.0.0',
+  port,
+
+  // ONE hostname, resolving to this service from both sides of the container
+  // boundary. An OIDC issuer is an absolute URL that the browser, the API and
+  // the token's `iss` claim must all agree on exactly, and the metadata
+  // document's `jwks_uri` is derived from it — so a URL that only works from
+  // one side leaves the API fetching signing keys from itself. The README says
+  // which line goes in /etc/hosts and why there is no way around it.
+  reachableAs: issuerHost,
+
+  // The certificate the developer already trusts for the application. Not one
+  // generated per run: that would put an untrusted issuer in front of the
+  // browser on every `docker compose up`, and the ways past that are to trust
+  // a new key each time or to stop validating — the second being what §7
+  // forbids.
+  certFile: required('DEV_OIDC_CERT_FILE'),
+  keyFile: required('DEV_OIDC_KEY_FILE'),
+});
+
+// What a test sets programmatically, set here from configuration. These are
+// exact-match allow-lists in the issuer, not patterns: §7 treats a redirect URI
+// echoed back without checking as an open redirect, and that check is the same
+// one here.
+oidc.redirectUris.add(`${appOrigin}/callback`);
+oidc.redirectUris.add(`${appOrigin}/signed-out`);
+oidc.origins.add(appOrigin);
+
+for (const who of accounts) {
+  oidc.accounts.add(who);
+}
+
+// The system roots PLUS this certificate, which is what the API is pointed at
+// through SSL_CERT_FILE. `startOidc` already assembles it; this copies it to
+// the shared volume the API reads, because SSL_CERT_FILE names one file and
+// replacing the system store would leave the API unable to reach anything else.
+const bundle = required('DEV_OIDC_CA_OUT');
+writeFileSync(bundle, readFileSync(oidc.caFile));
+
+// eslint-disable-next-line no-console
+console.log(
+  [
+    'dev OIDC issuer — LOCAL DEVELOPMENT ONLY',
+    `  issuer     ${oidc.issuer}`,
+    `  metadata   ${oidc.metadataAddress}`,
+    `  accounts   ${accounts.join(', ')}`,
+    `  redirects  ${[...oidc.redirectUris].join(', ')}`,
+    `  ca bundle  ${bundle}`,
+  ].join('\n'),
+);
+
+// Nothing to wait for: the server holds the event loop open. A signal handler
+// so `docker compose down` is a clean close rather than a kill.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    void oidc.close().then(() => process.exit(0));
+  });
+}
