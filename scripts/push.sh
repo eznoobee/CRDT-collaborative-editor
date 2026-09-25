@@ -28,7 +28,19 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-REPO="${PUSH_REPO:-eznoobee/CRDT-collaborative-editor}"
+# Derived from the remote, not hardcoded. A literal owner/repo here is a second
+# place the name lives, and the day the account was renamed it was the stale one
+# — the push still worked, because git follows the redirect, while the API query
+# did not. One source of truth, overridable when the remote is not the right
+# answer.
+REPO="${PUSH_REPO:-$(git remote get-url origin 2>/dev/null \
+    | sed -E 's#^(https://[^/]+/|git@[^:]+:)##; s#\.git$##')}"
+
+if [[ -z "$REPO" || "$REPO" != */* ]]; then
+    echo "cannot work out owner/repo from 'git remote get-url origin'." >&2
+    echo "Set PUSH_REPO=owner/repo and rerun." >&2
+    exit 2
+fi
 API="https://api.github.com/repos/$REPO"
 
 # How long to wait for a run to appear, and how long for jobs to be scheduled
@@ -56,7 +68,30 @@ runs=""
 jobs=0
 
 while [[ $(date +%s) -lt $deadline ]]; do
-    read -r runs jobs empty < <(./scripts/ci-jobs-for-sha.py "$REPO" "$sha")
+    # A THIRD OUTCOME, AND IT IS NOT A VERDICT. The query can fail to happen at
+    # all — a renamed owner answering 301, a repository outside this
+    # environment's allow-list answering 403, a spent rate limit. That used to
+    # come back as "0 0 0", which this loop read as "no run at all", and the
+    # first time it did the commit was fine and CI was running. A gate may say a
+    # thing is broken or say it does not know; it may never say the first when
+    # it means the second.
+    if ! reading=$(./scripts/ci-jobs-for-sha.py "$REPO" "$sha" 2>&1); then
+        echo >&2
+        echo "PUSH NOT VERIFIED for ${sha:0:8} — could not ask GitHub." >&2
+        echo >&2
+        echo "  ${reading}" >&2
+        echo >&2
+        echo "This is NOT a report that CI failed to start; it is the absence of" >&2
+        echo "an answer. Likeliest causes: the owner or repository was renamed" >&2
+        echo "(the API answers 301 for the old name), or PUSH_REPO names one" >&2
+        echo "outside this environment's allow-list (403)." >&2
+        echo >&2
+        echo "Check the name with 'git remote -v', set PUSH_REPO if it differs," >&2
+        echo "and confirm the run by hand before treating this commit as green." >&2
+        exit 2
+    fi
+
+    read -r runs jobs empty <<<"$reading"
 
     # EVERY run must have jobs, not the total across them. This repository has
     # two workflows and the 7b.12 outage left one of them healthy, so every

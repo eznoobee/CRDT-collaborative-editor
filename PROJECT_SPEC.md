@@ -6497,3 +6497,51 @@ the generated ones. The pattern now names the e2e file.
 next green run will have proved. If the answer is "that it did not happen this
 time", the fix is not yet testable, and no number of green runs will change
 that.
+
+### 13.67 "I do not know" is not "it is broken"
+
+§13.66 is a check that could not fail. This is the same push gate failing when
+nothing was wrong, which is the other way the same instrument misleads.
+
+The gate asks GitHub, after every push, whether a run with jobs exists for that
+exact sha. The owner account was renamed. `api.github.com` began answering **301**
+for the old name, `ci-jobs-for-sha.py` swallowed every failure into `{}`, and the
+gate printed:
+
+> NO RUN AT ALL for this commit. Workflows disabled, quota spent, a paths: filter
+> excluding this change, or no workflow on this ref.
+
+CI was running the whole time. All fifteen jobs passed.
+
+> **A 301, a 403, a spent rate limit and a genuine absence of runs were one
+> answer**, because the only thing the fetch reported was the parsed body, and an
+> unparseable body and an empty one are both `{}`. The script's own docstring
+> already warned about "the failure mode of a checker that cries wolf" — written
+> about a different bug, in the same function, and the second instance arrived by
+> a route the warning did not cover.
+
+**Why this is worse than a missed detection, not better.** A gate that cries wolf
+gets read as noise, and the next time it says the same words it will be right.
+This one is the repository's only defence against a class of outage that went
+unnoticed four times; one false alarm is most of its credibility.
+
+Two repairs, and the second is the general one:
+
+- **Follow redirects, and send the token.** Mechanical.
+- **Exit differently when the question could not be asked.** Three numbers on
+  stdout and exit 0 means an answer; exit 3 with a reason on stderr means there
+  is none. `push.sh` reports that as "could not ask GitHub", names the likely
+  causes, and does not claim CI failed to start. A gate may say a thing is
+  broken, or say it does not know; it may never say the first when it means the
+  second.
+
+**And the name now comes from the remote.** It was a literal in `push.sh`, which
+made it a second place the repository's identity lived and the stale one the day
+the account was renamed — git followed the redirect and pushed fine, so only the
+API query broke, which is precisely the split that made the alarm look credible.
+
+**What this does not fix.** In the sandbox this project is developed in, the
+renamed owner is outside the environment's repository allow-list and answers 403,
+so the gate can report "could not ask" and cannot yet verify. That is an access
+setting, not a bug in the script, and the honest behaviour under it is the one
+now implemented: refuse to render a verdict.

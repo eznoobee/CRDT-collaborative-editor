@@ -24,38 +24,83 @@ quote in an f-string has to be escaped past two parsers; it was syntactically
 broken and the script would have reported "no jobs" for a healthy push, which
 is the failure mode of a checker that cries wolf.
 
+AND THE SECOND TIME IT CRIED WOLF, IT WAS THIS. The paragraph above was
+written about an embedded here-string and is kept because the lesson recurred by
+a different route: `fetch` returned `{}` for every failure, so a 301, a 403, a
+spent rate limit and a genuine absence of runs were one answer. The owner
+account was renamed, api.github.com began answering 301, and this printed
+`0 0 0` — which push.sh reads, correctly, as "NO RUN AT ALL". CI was running
+the whole time.
+
+So "asked and got nothing" and "could not ask" are now different exits. A gate
+may say a thing is broken, or say it does not know; it may never say the first
+when it means the second. Redirects are followed, and the diagnostic names the
+status so the next cause is visible rather than inferred.
+
   ci-jobs-for-sha.py <owner/repo> <sha>
+
+Exit 0 with three numbers on stdout, or exit 3 with a reason on stderr and
+nothing on stdout.
 """
 
 import json
+import os
 import subprocess
 import sys
 
 
+class Unreachable(Exception):
+    """The API did not answer with something countable."""
+
+
 def fetch(url: str) -> dict:
-    result = subprocess.run(["curl", "-sS", url], capture_output=True, text=True)
+    # -L because a renamed owner or repository answers 301 and the body of a
+    # redirect has no runs in it. -w to capture the final status: a checker that
+    # cannot see the status cannot tell empty from refused.
+    #
+    # The token when there is one. Unauthenticated works against a public
+    # repository and is rate-limited to sixty an hour, which this script can
+    # spend in one push — and a spent limit used to read as "no runs".
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    command = ["curl", "-sSL", "-w", "\n%{http_code}", url]
+    if token:
+        command[1:1] = ["-H", "Authorization: Bearer " + token]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Unreachable("curl failed for " + url + ": " + result.stderr.strip())
+
+    body, _, status = result.stdout.rpartition("\n")
+    if status.strip() != "200":
+        raise Unreachable("HTTP " + status.strip() + " for " + url)
+
     try:
-        return json.loads(result.stdout)
+        return json.loads(body)
     except (json.JSONDecodeError, ValueError):
-        return {}
+        raise Unreachable("unparseable JSON from " + url)
 
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("0 0 0")
+        print(__doc__.strip().splitlines()[-3], file=sys.stderr)
         return 2
 
     repo, sha = sys.argv[1], sys.argv[2]
     api = "https://api.github.com/repos/" + repo + "/actions"
 
-    runs = fetch(api + "/runs?per_page=30&head_sha=" + sha).get("workflow_runs", [])
-    jobs = 0
-    empty = 0
-    for run in runs:
-        mine = len(fetch(api + "/runs/" + str(run["id"]) + "/jobs?per_page=50").get("jobs", []))
-        jobs += mine
-        if mine == 0:
-            empty += 1
+    try:
+        runs = fetch(api + "/runs?per_page=30&head_sha=" + sha).get("workflow_runs", [])
+        jobs = 0
+        empty = 0
+        for run in runs:
+            mine = len(fetch(api + "/runs/" + str(run["id"]) + "/jobs?per_page=50").get("jobs", []))
+            jobs += mine
+            if mine == 0:
+                empty += 1
+    except Unreachable as why:
+        # NOT "0 0 0". That is a verdict, and this is an absence of one.
+        print("cannot determine CI state: " + str(why), file=sys.stderr)
+        return 3
 
     print(str(len(runs)) + " " + str(jobs) + " " + str(empty))
     return 0
