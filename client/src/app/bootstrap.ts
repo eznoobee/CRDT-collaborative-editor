@@ -48,10 +48,62 @@ export type Bootstrap =
  * sat there waiting for the first remount.
  * </p>
  */
+/**
+ * Says which origin a failed request was trying to reach.
+ *
+ * @remarks
+ * <p>
+ * <b>`fetch` tells the page nothing.</b> A cross-origin request to a host whose
+ * certificate the browser does not trust rejects with a bare
+ * <code>TypeError: Failed to fetch</code> — no URL, no status, no certificate
+ * prompt, and nothing in the console that names the host. That is deliberate on
+ * the browser's part; it is also why "Failed to fetch" on this page could mean
+ * the API, the issuer, or a network that is simply down.
+ * </p><p>
+ * <b>The page cannot learn what failed, but it knows who it was talking to.</b>
+ * Each step of the bootstrap has exactly one origin, and naming it turns an
+ * unactionable string into the one fact that shortens the search. The local
+ * development issuer is served with a self-signed certificate on a second
+ * origin, and accepting it for the application does not accept it for the
+ * issuer — so that case gets the sentence that resolves it.
+ * </p><p>
+ * Only network-shaped failures are rewritten. A <code>SignInRequired</code>, an
+ * HTTP error the API explained, or any other typed failure passes through
+ * untouched, because those already say more than this could add.
+ * </p>
+ */
+export async function reaching<T>(
+  origin: string,
+  kind: 'the application' | 'the identity provider',
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    // The shape a blocked, refused or untrusted request takes. Not an
+    // instanceof check on TypeError alone: the message is what distinguishes a
+    // transport failure from a programming error of the same class.
+    const transport = error instanceof TypeError
+      && /fetch|network|load failed/i.test(error.message);
+
+    if (!transport) {
+      throw error;
+    }
+
+    const hint = kind === 'the identity provider'
+      ? `\n\nIf ${origin} is the local development issuer, open it directly in`
+        + ' this browser and accept its certificate, then reload. A request to an'
+        + ' untrusted origin fails silently — the browser does not prompt.'
+      : '';
+
+    throw new Error(`Could not reach ${kind} at ${origin}.${hint}`, { cause: error });
+  }
+}
+
 export async function bootstrap(location: Location = window.location): Promise<Bootstrap> {
   try {
     const origin = location.origin;
-    const config = await loadConfiguration(origin);
+    const config = await reaching(origin, 'the application', () => loadConfiguration(origin));
 
     const auth = new PkceTokenSource({
       authority: config.issuer,
@@ -65,7 +117,10 @@ export async function bootstrap(location: Location = window.location): Promise<B
     // is an ordinary load.
     let path = location.pathname;
     if (path === CALLBACK_PATH) {
-      path = await auth.completeSignIn();
+      // The token exchange, which is a request to the issuer's origin rather
+      // than this one — and the step that fails when its certificate is not
+      // trusted.
+      path = await reaching(config.issuer, 'the identity provider', () => auth.completeSignIn());
     }
 
     // Where the issuer sends the browser after ending its session. Nothing is
@@ -83,7 +138,7 @@ export async function bootstrap(location: Location = window.location): Promise<B
     }
 
     try {
-      await auth.token();
+      await reaching(config.issuer, 'the identity provider', () => auth.token());
     } catch (error) {
       if (!(error instanceof SignInRequired)) {
         throw error;
@@ -95,7 +150,7 @@ export async function bootstrap(location: Location = window.location): Promise<B
     }
 
     const api = new DocumentApi(origin, auth);
-    const me = await api.me();
+    const me = await reaching(origin, 'the application', () => api.me());
     const leave = () => signOut({
       // Nothing local to erase: no document is open on the home page.
       forgetLocal: () => Promise.resolve(),

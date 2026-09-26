@@ -147,11 +147,19 @@ rm -rf deploy/tls
 ./scripts/dev-cert.sh deploy/tls
 ```
 
-Open <https://localhost:8443>. Both the application and the issuer are served
-with the same self-signed certificate, so your browser will warn once per
-origin; accept it for `https://localhost:8443` and for `https://editor-oidc:9443`
-and sign-in will complete. Sign in as `alice` or `bob` — set `DEV_OIDC_ACCOUNTS`
-to change them. Two accounts rather than one, so two browser profiles can
+**Accept the issuer's certificate before you sign in — this is a step, not
+troubleshooting.** Open <https://editor-oidc:9443/.well-known/openid-configuration>
+and accept the warning. You should see the discovery document.
+
+The application and the issuer share one certificate but are **two origins**,
+and a browser trusts them separately. Accepting it at `https://localhost:8443`
+does not accept it at `https://editor-oidc:9443`, and there is no second prompt:
+a `fetch` to an untrusted origin rejects silently. The page can only tell you
+which origin it was reaching, which it now does — it cannot ask the browser to
+trust it.
+
+Then open <https://localhost:8443>, accept that origin's warning too, and sign
+in as `alice` or `bob` — set `DEV_OIDC_ACCOUNTS` to change them. Two accounts rather than one, so two browser profiles can
 demonstrate two people editing the same document, which is the thing this
 project is.
 

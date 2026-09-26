@@ -2649,6 +2649,7 @@ written, not done).
 | 41 | A transient failure during `bootstrap` is a dead end | **9** | Found while explaining row 40, not looked for. `bootstrap` wraps sign-in, the token exchange, `GET /me` and the document open in one `try` and returns `{ kind: 'failed', message }`; the composed app renders the message and offers nothing else, so a connection that blips for one request leaves the user on a dead page with the API healthy behind it. Row 40's CI log is the evidence: `Failed to fetch`, unchanged for sixty seconds, while the stack served. **Deliberately not fixed in the close-out** — a retry in the bootstrap sequence has its own failure modes (looping on a genuine 401, re-entering the PKCE exchange on reload) and deserves a test that distinguishes them, not a patch on the last day. Closes when a transient failure at any step of `bootstrap` is recoverable without the user knowing to reload, and a test drives that from the browser | §7, §9, §13.64 |
 | 42 | Nothing required in CI builds the published image on purpose | **open** | §13.68's pin makes the format gate and the image agree today; it does not make the gate cover the image. `dotnet format` runs on the runner's SDK, the image is a separate build, and the only thing that compiles it in CI is the pair of compose suites — which build it incidentally, as setup for what they actually assert. A formatting or analyzer violation that only the image's SDK sees is therefore caught by a job whose name and purpose are about something else, and would be caught not at all if those suites were ever made to reuse a prebuilt image. **And the SDKs still differ.** §13.68's correction records that pinning the base tag did not align them: the gate's SDK comes from `actions/setup-dotnet` resolving `global.json`, the image's from its base tag, and a patch-level disagreement between the two is enough to break the image while the gate is green. Closing this row means a required job that builds the image; aligning the SDKs is a second, separate thing, and neither is done. **A second instance is already on file, latent.** A scan for the construct that broke — a comment between invocation arguments, not the object-initializer and attribute cases, which the newer band compiled without complaint — finds exactly one more: `tests/Editor.Api.Tests/Persistence/SnapshotSizeMetricTests.cs:101`. It is not in the image's project graph, so nothing has ever compiled it under 10.0.4xx, and `rollForward: latestPatch` now stops anyone reaching that band by accident. Recorded rather than rewritten: changing it would be speculative, since no compiler available here reports it. **Whoever bumps the pin should build `tests/` first and look there.** **Closes when a required CI job builds `src/Editor.Api/Dockerfile` as its stated purpose and fails on any warning**, so that bumping the pin is verified rather than hoped through | §3, §4, §12, §13.68 |
 | 43 | Whether the Windows checkout was ever CRLF is unresolved | **open** | §13.68's third explanation — `core.autocrlf` giving a Windows working tree CRLF where `.editorconfig` requires LF — is the only one that accounts for CI and the reporter disagreeing under the same pinned SDK. It is not confirmed. The diagnostic proposed for it, `git ls-files --eol`, shipped in the same commit as the `.gitattributes` that fixes it, so by the time it ran it printed `w/lf` with `attr/text=auto eol=lf` and could not distinguish "never was CRLF" from "was, and is now corrected". **Closes when someone establishes which it was** — `git config core.autocrlf` on the affected machine, or a checkout with `.gitattributes` removed — or when a Windows build reproduces the IDE0055 failure with LF confirmed, which would refute it. Until then the comment-lifting in `RedisConnectTicketStore`, `RedisExtensions` and `SecretRedaction` is a change whose necessity is unproven, kept because it costs nothing | §3, §13.68, §13.70 |
+| 44 | No test does what a person on a fresh clone does | **open, and it supersedes the setup half of 42 and 43** | Five setup failures in one sequence — `IDE0055` from a CRLF working tree, `dev-cert.sh` producing no certificate, `EISDIR` on a path that did not exist, `EACCES` on a root-owned volume, and a silent `fetch` failure to an untrusted issuer origin — none of them a product bug, every one a precondition nothing states and no suite covers (§13.72). CI checks out on Linux, generates its certificate from a harness rather than the script a human runs, writes its own `.env` instead of copying `.env.example`, and pins the certificate into the browser on the command line. Each is reasonable; together they mean **the suites exercise a path no person takes**. §13.27's walk was meant to be this and is not — it drives the harness's stack, not the README's. **Closes when one CI job starts from a clone and follows the README in its own order with nothing pre-arranged** — `cp .env.example .env`, `dev-cert.sh`, `docker compose up` with the overlay, reach the application — and fails when any step does. Every failure above would have been caught by it on the commit that introduced it | §4, §7, §12, §13.27, §13.68, §13.69, §13.70, §13.71, §13.72 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -6854,3 +6855,51 @@ precondition. When the thing being set up is slow — a twenty-minute image buil
 here — the cost of that ordering is the whole afternoon. Enumerating the
 preconditions is not more rigorous than running it; it is the same work in one
 pass instead of four.
+
+### 13.72 Every setup failure was a precondition nothing stated
+
+Five failures in a row getting one person from a fresh clone to a running
+editor, and they are one finding:
+
+| failure | precondition nobody wrote down |
+|---|---|
+| `IDE0055` in the image | the working tree is LF, whatever the platform does on checkout |
+| `dev-cert.sh` producing no certificate | openssl's arguments survive the shell running it |
+| `EISDIR` on the certificate | the path in `.env` denotes a file that exists |
+| `EACCES` on the CA bundle | the volume is writable by the user the container runs as |
+| `Failed to fetch` at sign-in | the browser trusts the issuer's origin, separately from the app's |
+
+None is a bug in the product. Every one is a condition the setup path depends
+on, that nothing states and no test covers. **The whole sequence was found by
+one person running it, and none of it by this repository's apparatus** — which
+is otherwise the most thoroughly checked thing here.
+
+> **CI never does what a person on a fresh clone does.** It checks out on Linux,
+> generates its certificate from a harness rather than the script a human runs,
+> writes its own `.env` instead of copying `.env.example`, and drives a browser
+> that is handed the certificate pin on the command line. Every one of those is
+> reasonable. Together they mean the suites exercise a path no person takes, and
+> the path every person takes has no coverage at all.
+
+This is the same gap register rows 42 and 43 name from two other directions —
+nothing required in CI builds the published image on purpose, and a Windows
+checkout's line endings were never established — and the same one §13.71
+complained about as a debugging method. **They are one row now: 44.**
+
+**What would actually close it** is not more tests of the kind already here. It
+is one job that starts from a clone and does what the README says, in the
+README's order, with nothing pre-arranged: copy `.env.example`, run
+`dev-cert.sh`, `docker compose up` with the overlay, and reach the application.
+Every failure above would have been caught by it, on the commit that introduced
+it, rather than by the person the repository was handed to.
+
+**Why it has not been written.** It needs Docker and a browser that will accept
+a self-signed certificate without a command-line pin, and the honest reason is
+that the close-out declared the project finished while this path had never been
+walked. §13.27's walk was supposed to be exactly this and is not: it drives the
+harness's stack, not the README's.
+
+**And the smallest piece of it is free.** The page now names the origin it could
+not reach, because `fetch` gives it nothing else and the browser does not
+prompt. That does not close the row; it means the next person loses minutes
+rather than an evening.
