@@ -177,18 +177,24 @@ public static class RedisExtensions
         // forget to call and so connect and disconnect are covered too.
         services.AddSingleton<Editor.Api.Logging.CorrelationHubFilter>();
 
+        // AddMessagePackProtocol is framing only (§6, §13.13a). The payload stays
+        // an opaque byte string in §6's format; MessagePack's object model is
+        // not used and must not be — a second encoding with its own
+        // canonical-form rules is where §13.11's bug came from.
+        //
+        // AddStackExchangeRedis gets its own connection rather than the
+        // application's: the backplane subscribes and publishes continuously,
+        // and sharing a multiplexer means one slow consumer stalls ticket
+        // redemption too.
+        //
+        // Both notes sit above the chain rather than between its links, where
+        // they used to be. A comment inside a multi-line expression is the one
+        // construct two Roslyn patches format differently, and it broke the
+        // published image while every gate stayed green (§13.68).
         services.AddSignalR(options =>
                 options.AddFilter<Editor.Api.Logging.CorrelationHubFilter>())
-            // Framing only (§6, §13.13a). The payload stays an opaque byte
-            // string in §6's format; MessagePack's object model is not used and
-            // must not be — a second encoding with its own canonical-form rules
-            // is where §13.11's bug came from.
             .AddMessagePackProtocol()
             .AddStackExchangeRedis(options => options.ConnectionFactory = writer =>
-                // Its own connection rather than the application's: the
-                // backplane subscribes and publishes continuously, and sharing
-                // a multiplexer means one slow consumer stalls ticket
-                // redemption too.
                 ConnectionMultiplexer.ConnectAsync(Parse(Configured(configuration)), writer)
                     .ContinueWith(
                         task => (IConnectionMultiplexer)task.GetAwaiter().GetResult(),

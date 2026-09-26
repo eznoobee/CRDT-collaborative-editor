@@ -2647,7 +2647,7 @@ written, not done).
 | 39 | The conformance corpus is the client's only placement oracle and is not in its default run | **CLOSED (9.1), and the fixture it planned was already in the repository** | Found by 7b.9's probe: inverting the sibling tie-break left the default client suite green, 213 of 213. The plan was to build a committed fixture from the C# runner. It was not needed — §9's nine committed traces in `tests/Conformance/traces/` script an execution in *user* terms and carry an `expected` block citing §5 or the paper, so they were already the oracle, and had been since Phase 2. They were excluded from `npm test` only because they shared a file with the *generated* corpus, which the C# runner must materialise first: a justification true about half a file's contents, applied to the file (§13.52). The fix is a split and no new artefact — `client/src/crdt/committedTraces.test.ts` runs by default and the inversion now turns **6** tests red there. Two vacuity guards, both sabotaged to prove they fire: the corpus count against a floor of nine rather than one, and every trace required to state a `text`, `oneOf` or `forbidden`. **The re-run also found a defect in the probe itself** — it counted a test that fails anyway as a detection, which was row 37 surfacing under full-suite load; `scripts/placement-probe.sh` now runs a baseline pass and reports the difference (§13.53) | §9, §11, §13.47, §13.52, §13.53 |
 | 40 | Row 31's offline-window suite is intermittent | **CLOSED (9.9), after the explanation and the repair were each wrong once** | **Named twice by the instrumentation.** `bdbf784`: `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for the host's network configuration changing under an in-flight request; the same job passed in one run of that commit and failed in another. `7be8c7a`, after a repair scoped to the sign-in prologue: `POST /documents`, four requests later, with the five preceding requests answered 200 and nginx logging 499. **The first explanation was falsified by the second sighting** — it blamed the stack starting, and the stack had been serving for a second. What survives: both failures land within the first two seconds of the browser's first navigation, the API answers either side of each, and `startWalk` launches the browser only after both health probes, so the stack's network is not being created under a running browser. Why a runner's network changes there is not visible from here, and the record stops there. **The repair was scoped to the evidence, not to a boundary** (§13.65), and is now the whole arrangement — everything before `setOffline` — rebuilt at most three times on a fresh context, on exactly that `errorText`. Nothing after `setOffline` retries for any reason. **Closed on the repair being exercised, not on a green run.** `01db35b` was green in all four runs and the rebuild never fired, which proves the fault absent rather than the repair working. The decision lives in `client/src/offline/networkChange.ts`, the default suite drives it through nine cases, and three sabotages confirmed each guard fails on its own. `docs/row-40-outcome.md` | §9, §12, §13.23, §13.29, §13.52, §13.55, §13.64, §13.65, §13.66 |
 | 41 | A transient failure during `bootstrap` is a dead end | **9** | Found while explaining row 40, not looked for. `bootstrap` wraps sign-in, the token exchange, `GET /me` and the document open in one `try` and returns `{ kind: 'failed', message }`; the composed app renders the message and offers nothing else, so a connection that blips for one request leaves the user on a dead page with the API healthy behind it. Row 40's CI log is the evidence: `Failed to fetch`, unchanged for sixty seconds, while the stack served. **Deliberately not fixed in the close-out** — a retry in the bootstrap sequence has its own failure modes (looping on a genuine 401, re-entering the PKCE exchange on reload) and deserves a test that distinguishes them, not a patch on the last day. Closes when a transient failure at any step of `bootstrap` is recoverable without the user knowing to reload, and a test drives that from the browser | §7, §9, §13.64 |
-| 42 | Nothing required in CI builds the published image on purpose | **open** | §13.68's pin makes the format gate and the image agree today; it does not make the gate cover the image. `dotnet format` runs on the runner's SDK, the image is a separate build, and the only thing that compiles it in CI is the pair of compose suites — which build it incidentally, as setup for what they actually assert. A formatting or analyzer violation that only the image's SDK sees is therefore caught by a job whose name and purpose are about something else, and would be caught not at all if those suites were ever made to reuse a prebuilt image. **A second instance is already on file, latent.** A scan for the construct that broke — a comment between invocation arguments, not the object-initializer and attribute cases, which the newer band compiled without complaint — finds exactly one more: `tests/Editor.Api.Tests/Persistence/SnapshotSizeMetricTests.cs:101`. It is not in the image's project graph, so nothing has ever compiled it under 10.0.4xx, and `rollForward: latestPatch` now stops anyone reaching that band by accident. Recorded rather than rewritten: changing it would be speculative, since no compiler available here reports it. **Whoever bumps the pin should build `tests/` first and look there.** **Closes when a required CI job builds `src/Editor.Api/Dockerfile` as its stated purpose and fails on any warning**, so that bumping the pin is verified rather than hoped through | §3, §4, §12, §13.68 |
+| 42 | Nothing required in CI builds the published image on purpose | **open** | §13.68's pin makes the format gate and the image agree today; it does not make the gate cover the image. `dotnet format` runs on the runner's SDK, the image is a separate build, and the only thing that compiles it in CI is the pair of compose suites — which build it incidentally, as setup for what they actually assert. A formatting or analyzer violation that only the image's SDK sees is therefore caught by a job whose name and purpose are about something else, and would be caught not at all if those suites were ever made to reuse a prebuilt image. **And the SDKs still differ.** §13.68's correction records that pinning the base tag did not align them: the gate's SDK comes from `actions/setup-dotnet` resolving `global.json`, the image's from its base tag, and a patch-level disagreement between the two is enough to break the image while the gate is green. Closing this row means a required job that builds the image; aligning the SDKs is a second, separate thing, and neither is done. **A second instance is already on file, latent.** A scan for the construct that broke — a comment between invocation arguments, not the object-initializer and attribute cases, which the newer band compiled without complaint — finds exactly one more: `tests/Editor.Api.Tests/Persistence/SnapshotSizeMetricTests.cs:101`. It is not in the image's project graph, so nothing has ever compiled it under 10.0.4xx, and `rollForward: latestPatch` now stops anyone reaching that band by accident. Recorded rather than rewritten: changing it would be speculative, since no compiler available here reports it. **Whoever bumps the pin should build `tests/` first and look there.** **Closes when a required CI job builds `src/Editor.Api/Dockerfile` as its stated purpose and fails on any warning**, so that bumping the pin is verified rather than hoped through | §3, §4, §12, §13.68 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -6601,6 +6601,48 @@ whose only verification is that the compose suites happen to build it. The day
 the pin is bumped, the same divergence is available again, and the thing that
 would catch it is a CI job that builds the image and is required — which the
 compose jobs do incidentally rather than as their purpose. Register row 42.
+
+**CORRECTION, from the next build. The feature-band explanation above was
+wrong, and the pin was not the fix.**
+
+With `sdk:10.0.103` pinned and in use, the image failed again — on different
+files. `RedisConnectTicketStore.cs` was gone, so the source change had worked,
+but `RedisExtensions.cs` and `SecretRedaction.cs` now failed the same way. The
+first build had stopped at `Editor.Infrastructure` and never compiled
+`Editor.Api`; fixing one file did not reveal a new fault so much as let the
+compiler reach the rest of the graph.
+
+That kills the band theory. **10.0.103 is in the same 1xx band the gate runs
+on**, and it still disagrees — with a clean local rebuild on 10.0.111 and with
+CI, both of which accept these files. The disagreement is between *patches*, not
+bands, so `rollForward: latestPatch` does not prevent it either. Both of those
+changes were reasoned from one sample and both were wrong about the mechanism.
+
+What survives, and it is smaller and more useful than what it replaces:
+
+- **A comment inside a multi-line expression is formatted differently by
+  different SDK patches.** Every instance so far is that construct — between
+  invocation arguments, between links of a fluent chain, inside an attribute's
+  argument list — and every fix has been to lift the comment out of the
+  expression, which no version objects to.
+- **`dotnet format --verify-no-changes` on one SDK cannot certify a build on
+  another**, and the two are different SDKs by construction: the gate's comes
+  from `actions/setup-dotnet` resolving `global.json`, the image's from its base
+  tag. Pinning the tag makes the image reproducible; it does not make the gate's
+  verdict transferable, because the gate still runs somewhere else.
+
+**The pin is kept anyway**, on its own merits: a reproducible image is worth
+having, and a floating base tag meant the same source built or did not depending
+on the day. It is simply not the fix for this, and the paragraphs above it
+claiming otherwise are left standing, corrected here rather than rewritten,
+because the reasoning that produced them is the thing worth seeing.
+
+**Twice now an explanation here has been falsified by the following build** —
+§13.65 was the same shape, on a different fault. The pattern in both: a single
+failure, a mechanism inferred from it that fitted every detail available, and a
+repair that followed from the mechanism rather than from the observation. The
+observation — *these five spans, around a comment, inside an expression* — was
+right both times. The mechanism was wrong both times.
 
 **A smaller thing worth saying plainly.** The runtime stage is still
 `aspnet:10.0`, also floating. That is a different risk and a more acceptable

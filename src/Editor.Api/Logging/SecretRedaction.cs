@@ -46,14 +46,19 @@ public static partial class SecretRedaction
     /// render one: <c>Authorization: x</c>, <c>Authorization=x</c>, or a
     /// structured pair rendered as <c>Authorization = x</c>.
     /// </summary>
+    // The value runs to the end of the field, not to the first space: an
+    // Authorization value is "Bearer <token>", and stopping at the space
+    // redacts the word "Bearer" and leaves the token.
+    //
+    // The whitespace after the separator is matched atomically so it cannot be
+    // given back: with an ordinary \s* the engine backtracks to match zero
+    // spaces, the lookahead then sees " [redacted]" rather than "[redacted]",
+    // and a second pass redacts its own placeholder.
+    //
+    // Above the attribute rather than inside its argument list, where it used
+    // to be: a comment inside a multi-line expression is what two Roslyn
+    // patches format differently (§13.68).
     [GeneratedRegex(
-        // The value runs to the end of the field, not to the first space: an
-        // Authorization value is "Bearer <token>", and stopping at the space
-        // redacts the word "Bearer" and leaves the token.
-        // The whitespace after the separator is matched atomically so it cannot
-        // be given back: with an ordinary \s* the engine backtracks to match
-        // zero spaces, the lookahead then sees " [redacted]" rather than
-        // "[redacted]", and a second pass redacts its own placeholder.
         @"(Authorization""?\s*[:=](?>[ \t]*))(?!\[redacted\])[^\r\n,;}\]""]+",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AuthorizationHeader();
