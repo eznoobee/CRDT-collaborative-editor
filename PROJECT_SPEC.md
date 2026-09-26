@@ -2648,6 +2648,7 @@ written, not done).
 | 40 | Row 31's offline-window suite is intermittent | **CLOSED (9.9), after the explanation and the repair were each wrong once** | **Named twice by the instrumentation.** `bdbf784`: `GET /me — net::ERR_NETWORK_CHANGED`, Chromium's error for the host's network configuration changing under an in-flight request; the same job passed in one run of that commit and failed in another. `7be8c7a`, after a repair scoped to the sign-in prologue: `POST /documents`, four requests later, with the five preceding requests answered 200 and nginx logging 499. **The first explanation was falsified by the second sighting** — it blamed the stack starting, and the stack had been serving for a second. What survives: both failures land within the first two seconds of the browser's first navigation, the API answers either side of each, and `startWalk` launches the browser only after both health probes, so the stack's network is not being created under a running browser. Why a runner's network changes there is not visible from here, and the record stops there. **The repair was scoped to the evidence, not to a boundary** (§13.65), and is now the whole arrangement — everything before `setOffline` — rebuilt at most three times on a fresh context, on exactly that `errorText`. Nothing after `setOffline` retries for any reason. **Closed on the repair being exercised, not on a green run.** `01db35b` was green in all four runs and the rebuild never fired, which proves the fault absent rather than the repair working. The decision lives in `client/src/offline/networkChange.ts`, the default suite drives it through nine cases, and three sabotages confirmed each guard fails on its own. `docs/row-40-outcome.md` | §9, §12, §13.23, §13.29, §13.52, §13.55, §13.64, §13.65, §13.66 |
 | 41 | A transient failure during `bootstrap` is a dead end | **9** | Found while explaining row 40, not looked for. `bootstrap` wraps sign-in, the token exchange, `GET /me` and the document open in one `try` and returns `{ kind: 'failed', message }`; the composed app renders the message and offers nothing else, so a connection that blips for one request leaves the user on a dead page with the API healthy behind it. Row 40's CI log is the evidence: `Failed to fetch`, unchanged for sixty seconds, while the stack served. **Deliberately not fixed in the close-out** — a retry in the bootstrap sequence has its own failure modes (looping on a genuine 401, re-entering the PKCE exchange on reload) and deserves a test that distinguishes them, not a patch on the last day. Closes when a transient failure at any step of `bootstrap` is recoverable without the user knowing to reload, and a test drives that from the browser | §7, §9, §13.64 |
 | 42 | Nothing required in CI builds the published image on purpose | **open** | §13.68's pin makes the format gate and the image agree today; it does not make the gate cover the image. `dotnet format` runs on the runner's SDK, the image is a separate build, and the only thing that compiles it in CI is the pair of compose suites — which build it incidentally, as setup for what they actually assert. A formatting or analyzer violation that only the image's SDK sees is therefore caught by a job whose name and purpose are about something else, and would be caught not at all if those suites were ever made to reuse a prebuilt image. **And the SDKs still differ.** §13.68's correction records that pinning the base tag did not align them: the gate's SDK comes from `actions/setup-dotnet` resolving `global.json`, the image's from its base tag, and a patch-level disagreement between the two is enough to break the image while the gate is green. Closing this row means a required job that builds the image; aligning the SDKs is a second, separate thing, and neither is done. **A second instance is already on file, latent.** A scan for the construct that broke — a comment between invocation arguments, not the object-initializer and attribute cases, which the newer band compiled without complaint — finds exactly one more: `tests/Editor.Api.Tests/Persistence/SnapshotSizeMetricTests.cs:101`. It is not in the image's project graph, so nothing has ever compiled it under 10.0.4xx, and `rollForward: latestPatch` now stops anyone reaching that band by accident. Recorded rather than rewritten: changing it would be speculative, since no compiler available here reports it. **Whoever bumps the pin should build `tests/` first and look there.** **Closes when a required CI job builds `src/Editor.Api/Dockerfile` as its stated purpose and fails on any warning**, so that bumping the pin is verified rather than hoped through | §3, §4, §12, §13.68 |
+| 43 | Whether the Windows checkout was ever CRLF is unresolved | **open** | §13.68's third explanation — `core.autocrlf` giving a Windows working tree CRLF where `.editorconfig` requires LF — is the only one that accounts for CI and the reporter disagreeing under the same pinned SDK. It is not confirmed. The diagnostic proposed for it, `git ls-files --eol`, shipped in the same commit as the `.gitattributes` that fixes it, so by the time it ran it printed `w/lf` with `attr/text=auto eol=lf` and could not distinguish "never was CRLF" from "was, and is now corrected". **Closes when someone establishes which it was** — `git config core.autocrlf` on the affected machine, or a checkout with `.gitattributes` removed — or when a Windows build reproduces the IDE0055 failure with LF confirmed, which would refute it. Until then the comment-lifting in `RedisConnectTicketStore`, `RedisExtensions` and `SecretRedaction` is a change whose necessity is unproven, kept because it costs nothing | §3, §13.68, §13.70 |
 
 **Rows 15–21 came from one walk** (§13.27), run at the end of Phase 4 against a
 cold start with nothing seeded. None of them was deferred; each was a step
@@ -6668,11 +6669,23 @@ every platform rather than only in the index. `git add --renormalize .` produced
 no changes, which is the evidence that this is a policy gap and not a content
 one: the committed bytes were always right.
 
-**Held as the leading explanation, not as proven.** It accounts for every
-observation the SDK theories could not — CI green and the same SDK red, the
-clustering being incidental rather than the signal — and it is confirmed by one
-command on the affected machine (`git ls-files --eol`, which prints `w/crlf`).
-It has not been run here, because no Windows checkout exists here.
+**INCONCLUSIVE, and the test proposed for it was worthless by the time it ran.**
+`git ls-files --eol` on the affected machine printed `i/lf w/lf` — but it also
+printed `attr/text=auto eol=lf`, which is the `.gitattributes` added in the same
+commit as the theory. That reading cannot distinguish "the working tree was
+never CRLF" from "it was CRLF and the fix corrected it".
+
+> **The diagnostic was invalidated by the repair it was meant to justify**, and
+> both shipped together. A check run after the fix it is testing for cannot
+> separate the two worlds, and nothing about its output says so — `w/lf` looks
+> like an answer.
+
+What the theory still has going for it: it is the only explanation offered that
+accounts for CI and the reporter disagreeing under the same pinned SDK. What it
+does not have is evidence. **Recorded as open, not as confirmed and not as
+falsified.** Settling it now needs the state from before the fix — a checkout
+with `.gitattributes` removed, or `core.autocrlf` inspected directly on the
+machine — and neither has been done.
 
 **The comment moves are kept**, and would be right even if this supersedes them:
 a comment inside a multi-line expression is genuinely formatted differently by
@@ -6737,3 +6750,58 @@ Phase 4.
 runs `dev-cert.sh` before composing, so the file always exists by the time
 Docker looks. The only path through this code that fails is the one a person
 takes by hand on a fresh clone — which is the path with no test at all.
+
+### 13.70 The script said nothing, and three fixes were built on the silence
+
+`scripts/dev-cert.sh` did not produce `cert.pem`. It had not for as long as
+anyone had run it on Windows, and it reported nothing at all.
+
+The mechanism, once the reporter had it: openssl generates and writes the key
+first, then fails. `set -euo pipefail` aborted the script at that point — before
+`chmod 600`, before the summary — and the reason went to `2>/dev/null`. So the
+directory held a key and no certificate, the script printed nothing, and its
+exit code was the only signal that anything had happened.
+
+The visible evidence was one permission bit. `key.pem` was `-rw-r--r--`, not
+`-rw-------`, which says the `chmod` never ran, which says the script aborted
+rather than completed. Nobody looked at that for three rounds.
+
+**What was built on top of the silence.** A missing `cert.pem` meant `.env`
+pointed at a path that did not exist; Docker created a directory there and
+mounted it; Node read a folder and threw `EISDIR` from inside `startOidc`. Each
+layer was diagnosed and repaired in turn — the issuer now explains a bad path,
+the bind mounts refuse to invent directories, `.env.example` no longer ships a
+plausible path to a file nobody has generated. **All three are worth having and
+none of them was the cause.** The cause was two layers below the first symptom
+and had been reporting itself as success.
+
+> **`2>/dev/null` on the one command a script exists to run.** It was there to
+> suppress openssl's progress dots. It suppressed the failure too, and the
+> failure was the only thing worth reading.
+
+The repair is the pair §13.15 has always asked for:
+
+- **The error is visible.** No redirection on the command whose output is the
+  point. Progress noise is a fair price for a reason.
+- **The effect is checked, not the control flow.** Both files exist and are
+  non-empty; both parse as a certificate and a key; and the certificate really
+  carries `DNS:editor-oidc`, because `-addext` doing nothing quietly would leave
+  a certificate that works for `localhost` and fails for the issuer, hours
+  later, somewhere else. The old script printed "Wrote ..." because control
+  reached the `echo`, which is true of a run that wrote one file of two.
+- **Git Bash is told not to rewrite the arguments.** `MSYS_NO_PATHCONV=1` and
+  `MSYS2_ARG_CONV_EXCL='*'`, so `-subj '/CN=localhost'` is not helpfully
+  converted into a Windows path. This is the suspected trigger and is no longer
+  load-bearing: if it is wrong, the error is now printed instead of hidden.
+
+**Five sabotages, one per check** — openssl failing, openssl succeeding and
+writing nothing, openssl writing only the key (the reported bug exactly), a
+certificate missing the SAN, and truncated PEMs — each confirmed to fail on its
+own.
+
+**The general form, and it is not the same as §13.15.** That entry is about a
+check that asserts the wrong thing. This is about a script with no check at all,
+whose *silence on success* and *silence on failure* were the same silence. A
+tool that can half-succeed without saying so does not merely fail to help; it
+sends everyone downstream to debug the consequences, and each consequence has a
+plausible local story that is wrong.
