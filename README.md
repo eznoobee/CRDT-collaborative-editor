@@ -132,12 +132,18 @@ cp .env.example .env
 docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml up --build
 ```
 
-**If you already ran this and got `EISDIR`**, Docker created directories where
-the certificate should be, and they have to go before a real one can be written:
+**If an earlier attempt failed**, clear what it left behind. Two different
+leftovers bite, and `down` alone removes neither:
 
 ```bash
-docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml down
-rm -rf deploy/tls/cert.pem deploy/tls/key.pem
+# -v as well as down: the oidc-ca volume keeps the ownership it was created
+# with, so a volume made before the image declared that directory stays
+# root-owned and the issuer cannot write its CA bundle into it.
+docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml down -v
+
+# Directories Docker invented where the certificate should be (the EISDIR case).
+rm -rf deploy/tls
+
 ./scripts/dev-cert.sh deploy/tls
 ```
 

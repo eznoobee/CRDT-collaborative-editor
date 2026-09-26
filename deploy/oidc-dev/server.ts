@@ -154,12 +154,70 @@ for (const who of accounts) {
   oidc.accounts.add(who);
 }
 
+/**
+ * Writes the CA bundle and then proves it is there.
+ *
+ * @remarks
+ * <p>
+ * <b>§13.15: the check is on the effect, not on control reaching the next
+ * line.</b> This write is the one thing this process does for anybody else —
+ * the API trusts the issuer's certificate through `SSL_CERT_FILE` pointing at
+ * it, and nothing else produces it. A write that fails quietly would leave the
+ * API with no bundle and surface, much later and somewhere else, as the API
+ * being unable to verify the issuer's TLS.
+ * </p><p>
+ * <b>EACCES is the expected failure, not an exotic one.</b> Docker initialises
+ * an empty named volume from the image's mount point, ownership included — so
+ * a volume created before the image had `/run/oidc-ca` is owned by root, this
+ * container runs as `node`, and the write is refused. The message says that,
+ * because the fix is a `down -v` that nobody guesses from `errno: -13`.
+ * </p>
+ */
+function writeBundle(target: string, contents: Buffer): void {
+  try {
+    writeFileSync(target, contents);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+      throw new Error(
+        `DEV_OIDC_CA_OUT=${target} is not writable by this container.\n`
+        + '  It is the `oidc-ca` named volume, and Docker gave it root ownership\n'
+        + '  because it was created before the image declared that directory.\n'
+        + '  This container runs as `node`, deliberately, so it cannot write there.\n'
+        + '\n'
+        + '  Recreate the volume once — `down -v` removes it, and the rebuilt\n'
+        + '  image creates it owned correctly:\n'
+        + '    docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml down -v\n'
+        + '    docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml up --build',
+        { cause: error },
+      );
+    }
+
+    throw error;
+  }
+
+  // READ IT BACK. A short write, a full filesystem or a path that silently
+  // resolved somewhere else all leave writeFileSync having returned normally.
+  const written = readFileSync(target);
+  if (written.length !== contents.length) {
+    throw new Error(
+      `${target} was written but holds ${written.length} bytes, not ${contents.length}.`,
+    );
+  }
+
+  if (!written.includes('BEGIN CERTIFICATE')) {
+    throw new Error(
+      `${target} was written and contains no certificate. The API would trust`
+      + ' nothing and fail to verify the issuer.',
+    );
+  }
+}
+
 // The system roots PLUS this certificate, which is what the API is pointed at
 // through SSL_CERT_FILE. `startOidc` already assembles it; this copies it to
 // the shared volume the API reads, because SSL_CERT_FILE names one file and
 // replacing the system store would leave the API unable to reach anything else.
 const bundle = required('DEV_OIDC_CA_OUT');
-writeFileSync(bundle, readFileSync(oidc.caFile));
+writeBundle(bundle, readFileSync(oidc.caFile));
 
 // eslint-disable-next-line no-console
 console.log(

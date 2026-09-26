@@ -26,6 +26,20 @@ WORKDIR /srv
 COPY --chown=node:node client/src/interop/harness.ts ./client/src/interop/harness.ts
 COPY --chown=node:node deploy/oidc-dev/server.ts ./deploy/oidc-dev/server.ts
 
+# THE CA BUNDLE'S DIRECTORY, CREATED HERE AND OWNED BY node. This one line is
+# what makes the named volume writable, and the mechanism is not obvious:
+# Docker initialises an EMPTY named volume from whatever is at the mount point
+# in the image, ownership included. With no /run/oidc-ca in the image there is
+# nothing to copy, so Docker creates the mount point itself — root:root, mode
+# 755 — and this container runs as `node`. The process then reads its
+# certificate successfully and dies with EACCES writing the bundle (§13.71).
+#
+# ONLY ON A FRESH VOLUME. An `oidc-ca` volume that already exists keeps the
+# ownership it was created with, so an existing stack needs
+# `docker compose ... down -v` once. The entrypoint says so when the write
+# fails, rather than leaving that to be rediscovered.
+RUN mkdir -p /run/oidc-ca && chown node:node /run/oidc-ca
+
 USER node
 
 # TypeScript is run directly, by Node's own type stripping — no transpiler and

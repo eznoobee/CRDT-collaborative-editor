@@ -6805,3 +6805,52 @@ whose *silence on success* and *silence on failure* were the same silence. A
 tool that can half-succeed without saying so does not merely fail to help; it
 sends everyone downstream to debug the consequences, and each consequence has a
 plausible local story that is wrong.
+
+### 13.71 Four rounds of one layer at a time
+
+`EISDIR`, then a missing certificate, then `EACCES`. Three errors, three
+sessions, each one the next layer of the same setup path, and each diagnosed
+only after the one above it was cleared. The reporter said it plainly: four
+rounds of one-layer-at-a-time, and would rather have had them all at once.
+
+The last of them: the issuer reads its certificate and dies writing the CA
+bundle. **Docker initialises an empty named volume from whatever is at that
+mount point in the image, ownership included.** There was no `/run/oidc-ca` in
+the image, so Docker created the mount point itself — `root:root`, mode 755 —
+and the container runs as `node`, deliberately. One `mkdir` and `chown` in the
+Dockerfile fixes it, and only for a volume that does not exist yet.
+
+**What was actually wrong with the method, not the code.** Each fix was correct
+and each was found by running the stack and reading the next exception. Nothing
+enumerated the set of things that had to be true before the first run: three
+mounts, one of them written to, by a non-root user, against paths supplied from
+a `.env` that a person fills in by hand. That list is short and could have been
+written down in one sitting.
+
+So this time the whole surface was enumerated rather than the current error
+fixed:
+
+| what | where | who | verdict |
+|---|---|---|---|
+| `cert.pem` | ro bind | read as `node` | fine |
+| `key.pem` | ro bind | read as `node` | fine |
+| `/tmp` mkdtemp + write | image | `node` | fine, 1777 |
+| system CA roots | image | read | fine |
+| `ca-bundle.pem` | `oidc-ca` volume | **written** as `node` | **EACCES** |
+
+**One write leaves the container, and it was the broken one.** The audit is
+worth more than the fix: it says there is no fifth round behind this one, which
+is a claim the previous three rounds could not make.
+
+**And the write now checks its effect** (§13.15). It reads the file back,
+compares the length, and confirms a certificate is in it — because this bundle
+is the only reason the API can verify the issuer's TLS, and a write that failed
+quietly would surface as a handshake error in a different container with no
+mention of a bundle at all.
+
+**The general form.** A setup path is a sequence of preconditions, and
+debugging it by running it tests them in order, one process start per
+precondition. When the thing being set up is slow — a twenty-minute image build
+here — the cost of that ordering is the whole afternoon. Enumerating the
+preconditions is not more rigorous than running it; it is the same work in one
+pass instead of four.
