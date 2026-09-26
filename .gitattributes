@@ -1,0 +1,28 @@
+# Line endings, enforced in the repository rather than left to each clone.
+#
+# WHY THIS EXISTS. `.editorconfig` has said `end_of_line = lf` since Phase 0,
+# and IDE0055 enforces it at build time under EnforceCodeStyleInBuild — but
+# `.editorconfig` describes what the file should contain, and nothing was making
+# a checkout produce it. Git for Windows defaults to `core.autocrlf=true`, so a
+# clone there rewrites every text file to CRLF on checkout. The index stays LF,
+# CI checks out on Linux and stays LF, and the repository looks consistent from
+# everywhere except the machine where it is not.
+#
+# That is where the published image broke: `docker build` sends the WORKING
+# TREE, so a Windows checkout hands the compiler CRLF sources while the same
+# commit builds clean in CI. A formatting rule the build enforces, a working
+# tree nothing normalised, and a gate that only ever ran on Linux (§13.68).
+#
+# `text=auto` lets Git detect binary files and leave them alone; `eol=lf` makes
+# the working tree LF on every platform, not just in the index. Existing Windows
+# checkouts need one re-normalisation to pick this up — the README says how.
+* text=auto eol=lf
+
+# Binary, named rather than detected, because a false positive here corrupts
+# the file rather than merely annoying someone.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

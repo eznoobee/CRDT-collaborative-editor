@@ -59,6 +59,24 @@ The API's own port is not published. Everything goes through the proxy over
 TLS, because a plaintext route past the termination point is a control that
 exists and does not apply (§4).
 
+### On Windows: check your line endings first
+
+`docker build` sends your **working tree**, not the index. Git for Windows
+defaults to `core.autocrlf=true`, which rewrites text files to CRLF on checkout,
+and `.editorconfig` requires LF — so a Windows clone can hand the compiler CRLF
+sources and fail `IDE0055` under `TreatWarningsAsErrors` on a commit that builds
+clean in CI. `.gitattributes` now pins LF for every clone, but an existing
+checkout needs one re-normalisation to pick it up:
+
+```bash
+git rm --cached -r . >/dev/null   # drop the index, keep the files
+git reset --hard                  # re-check-out under .gitattributes
+git ls-files --eol src/Editor.Api/Logging/SecretRedaction.cs
+```
+
+That last line should print `i/lf  w/lf`. If it prints `w/crlf`, the
+re-normalisation has not taken and the build will fail on formatting.
+
 ### Running it locally with no identity provider
 
 `OIDC_ISSUER` and `OIDC_METADATA_ADDRESS` have no defaults on purpose, so with

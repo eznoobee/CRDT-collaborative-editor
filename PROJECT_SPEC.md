@@ -6644,6 +6644,49 @@ repair that followed from the mechanism rather than from the observation. The
 observation — *these five spans, around a comment, inside an expression* — was
 right both times. The mechanism was wrong both times.
 
+**SECOND CORRECTION, and this one explains the contradiction the first could
+not.** CI built the image with the pinned `sdk:10.0.103` and passed. The same
+pinned SDK, on the reporter's machine, rejected two files. Same tag, same
+digest, opposite results — so the SDK was never the variable, and two rounds of
+reasoning about analyzer versions were reasoning about the wrong thing.
+
+The reporter is on Windows. **There was no `.gitattributes`.** Git for Windows
+defaults to `core.autocrlf=true`, so a clone there rewrites every text file to
+CRLF on checkout while the index stays LF. `.editorconfig` has required
+`end_of_line = lf` since Phase 0 and `EnforceCodeStyleInBuild` makes IDE0055
+enforce it — and **`docker build` sends the working tree, not the index**. So a
+Windows checkout hands the compiler CRLF sources, and the identical commit
+builds clean on every Linux checkout there has ever been.
+
+> **`.editorconfig` said what the file should contain and nothing made a
+> checkout produce it.** The rule was enforced at build time on one platform and
+> unenforced at checkout time on another, and the repository looked consistent
+> from everywhere except the machine where it was not.
+
+`.gitattributes` now pins `* text=auto eol=lf`, so the working tree is LF on
+every platform rather than only in the index. `git add --renormalize .` produced
+no changes, which is the evidence that this is a policy gap and not a content
+one: the committed bytes were always right.
+
+**Held as the leading explanation, not as proven.** It accounts for every
+observation the SDK theories could not — CI green and the same SDK red, the
+clustering being incidental rather than the signal — and it is confirmed by one
+command on the affected machine (`git ls-files --eol`, which prints `w/crlf`).
+It has not been run here, because no Windows checkout exists here.
+
+**The comment moves are kept**, and would be right even if this supersedes them:
+a comment inside a multi-line expression is genuinely formatted differently by
+different Roslyn versions, and lifting it costs nothing. But they are no longer
+believed to be the fix.
+
+**Three explanations, two of them wrong, one observation right throughout.** The
+failing spans were always end-of-line positions — which reads as
+comment-indentation if you are looking for an analyzer difference, and as a
+line-ending violation if you are looking for a checkout difference. The evidence
+did not distinguish them; what distinguished them was CI and the reporter
+disagreeing while running the same pinned SDK, and that fact was available
+before either wrong explanation was written.
+
 **A smaller thing worth saying plainly.** The runtime stage is still
 `aspnet:10.0`, also floating. That is a different risk and a more acceptable
 one — the runtime runs no analyzers, and a floating tag there collects security
