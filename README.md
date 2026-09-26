@@ -9,6 +9,21 @@ disagree about where a character goes.
 No CRDT library is used. [`PROJECT_SPEC.md`](PROJECT_SPEC.md) §1 forbids it, and
 that constraint is the point of the project rather than an obstacle to it.
 
+**If you are here to read rather than to run it**, the editor is not the
+interesting part. Start with [`docs/findings.md`](docs/findings.md) — a dozen
+ways verification turned out to be lying, each with the failure that exposed
+it. Then [what is open](#what-is-open), which is not a short list and is not
+meant to be.
+
+| I want to… | Go to |
+|---|---|
+| Understand what was learned | [`docs/findings.md`](docs/findings.md) |
+| Run it | [Running it](#running-it) |
+| Read the contract | [`PROJECT_SPEC.md`](PROJECT_SPEC.md) — §13 is the decision log |
+| See every known debt | the deferred register, at the end of §13 |
+| Know what is unfinished | [What is open](#what-is-open) |
+| Read the close-out | [`docs/phase-9-report.md`](docs/phase-9-report.md) |
+
 ## What is here
 
 | | |
@@ -186,26 +201,45 @@ and its eight invariants, §6 the storage and wire formats, §7 security, §8
 scalability with its four measured targets, §9 the client contract, §11 the
 phase table.
 
-**§13 is the decision log, and it is the most useful part of the repository.**
-Sixty entries, each one a thing that was believed and turned out to be wrong,
-with what was measured. A sample:
+**[`docs/findings.md`](docs/findings.md) is the place to start.** §13 of the
+spec is a decision log with seventy-three entries, written in the order things
+went wrong; `findings.md` is the dozen with the widest reach, grouped and with the
+concrete failure that produced each. If you read one thing here, read that.
 
-- §13.42 — a test whose expectation came from the implementation it is testing
-- §13.47 — a convergence assertion is invariant under any consistent ordering
-  rule, so none of them can detect a placement bug
-- §13.53 — an audit that counts failures counts the failures it did not cause
-- §13.54 — a test that supplies the configuration proves the mechanism, not the
-  product
-- §13.57 — a gate written from one failure checks that failure, not its class
+**§13 itself is the full log**, and it is the most useful part of the
+repository: each entry is something that was believed, turned out to be wrong,
+and what was measured. The through-line is that almost every entry is a *check
+that could not fail* — present, passing, plausible, and still green if the thing
+it named had been deleted.
 
-The **deferred register** in §13 tracks every known debt, open or settled, with
-the task that settled it.
+**The deferred register** lives at the end of §13. Forty-four rows, each a known
+debt with the task that settled it or the condition that would close it. It is
+the honest inventory: nothing here was quietly dropped, and the open rows below
+are taken from it.
 
 ### The phase reports
 
 - [Phase 7](docs/phase-7-report.md) — garbage collection and the offline window
 - [Phase 7b](docs/phase-7b-report.md) — the register, worked
 - [Phase 9](docs/phase-9-report.md) — the close-out
+
+### What is open
+
+Taken from the register in §13; none of it is tidied up to look finished.
+
+| | |
+|---|---|
+| **Row 41** | A transient failure during `bootstrap` leaves the user on a dead page with a healthy API behind it. The page now names the origin it could not reach; it still cannot recover |
+| **Row 42** | Nothing required in CI builds the published image *on purpose* — the compose suites build it incidentally, as setup for asserting something else |
+| **Row 43** | Whether the Windows checkout was ever CRLF is unresolved. The diagnostic shipped in the same commit as the fix and can no longer distinguish the two worlds |
+| **Row 44** | No test does what a person on a fresh clone does. Five setup failures, none a product bug, all invisible to CI. Supersedes the setup half of 42 and 43 |
+| **Row 38** | An interior placeholder is never collected and the fraction grows without bound. Measured, with a reversal condition; deliberately not fixed |
+| **§8 target 1** | **Missed: 28.0 ms against 25 ms**, across five runs agreeing within a tolerance fixed beforehand. A recorded miss, not a retune |
+| **§8 target 2** | Missed. The writer's own browser cannot keep up applying everyone else's operations — a different cause from the one recorded in Phase 7b |
+| **`ERR_NETWORK_CHANGED`** | Unexplained. The browser suite absorbs it; nobody understands why a runner's network changes at that moment. Two explanations were offered and both were falsified |
+
+Row 8's limit — that state-derived readings detect but do not localise — stands
+as originally written and has not been upgraded by any later report.
 
 ### The measurements
 
