@@ -6692,3 +6692,48 @@ before either wrong explanation was written.
 one — the runtime runs no analyzers, and a floating tag there collects security
 updates — but it is unpinned for a reason rather than by oversight, and this
 sentence is the reason.
+
+### 13.69 A helpful default that pointed at nothing
+
+`.env.example` shipped `TLS_CERT_FILE=./deploy/tls/cert.pem`. `deploy/tls/` is
+gitignored, so in a fresh clone that file does not exist — and the line reads
+like a filled-in default, so a `.env` copied unchanged looks complete.
+
+Three mechanisms then failed in sequence, each behaving exactly as designed:
+
+- **`${TLS_CERT_FILE:?...}` passed.** It checks the variable is *set*. The
+  variable was set; the path was empty. The guard that exists and does not apply.
+- **Docker created a directory** at the missing bind-mount source and mounted
+  it, which is its documented default.
+- **`readFileSync` read a folder** and threw `EISDIR` from inside `startOidc`,
+  naming neither the path, nor the variable, nor the reason a directory was
+  there.
+
+> **Every layer did the reasonable local thing, and the result was an error
+> message four layers from the cause.** The reporter had to read a Node stack
+> trace to discover that a certificate had never been generated.
+
+Three repairs, one per layer:
+
+- **`.env.example` blanks both paths**, so copying it unchanged fails at
+  `docker compose up` with the message that names `scripts/dev-cert.sh`. A blank
+  is more honest than a plausible path: `POSTGRES_PASSWORD` has always been
+  blank for the same reason, and nobody has ever lost an afternoon to it.
+- **`create_host_path: false` on every TLS bind mount**, in the base compose and
+  the overlay, so Docker refuses rather than inventing a directory. This also
+  covers the case the blank does not: a path that is set and wrong.
+- **The issuer validates its own inputs** and says which variable, which path,
+  what was found there and what to run (§13.23). An `EISDIR` stack trace is not
+  a diagnosis.
+
+**Why the guard fooled everyone, including its author.** `${VAR:?}` is the
+pattern this repository uses everywhere to refuse a missing value, and it is
+genuinely good at that. It says nothing about whether the value *denotes*
+anything. For a password that distinction does not exist; for a path it is the
+whole question, and the compose file had been treating both the same way since
+Phase 4.
+
+**CI never saw it**, and could not have: the walk harness writes its own env and
+runs `dev-cert.sh` before composing, so the file always exists by the time
+Docker looks. The only path through this code that fails is the one a person
+takes by hand on a fresh clone — which is the path with no test at all.

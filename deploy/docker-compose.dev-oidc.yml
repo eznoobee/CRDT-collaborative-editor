@@ -69,8 +69,26 @@ services:
       DEV_OIDC_CA_OUT: /run/oidc-ca/ca-bundle.pem
 
     volumes:
-      - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/run/oidc/cert.pem:ro
-      - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/run/oidc/key.pem:ro
+      # create_host_path: false, and this is the line that would have stopped
+      # the whole confusion. Docker's DEFAULT is to CREATE A DIRECTORY at a bind
+      # mount whose host path does not exist, and then mount it — so a .env
+      # naming a certificate nobody has generated does not fail as a missing
+      # file. It succeeds, and the process downstream reads a folder. The
+      # ${VAR:?} guard above does not catch it either: the variable is set, it
+      # is the path that is empty, which is the guard that exists and does not
+      # apply (§13.69).
+      - type: bind
+        source: ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}
+        target: /run/oidc/cert.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}
+        target: /run/oidc/key.pem
+        read_only: true
+        bind:
+          create_host_path: false
       - oidc-ca:/run/oidc-ca
 
     networks:

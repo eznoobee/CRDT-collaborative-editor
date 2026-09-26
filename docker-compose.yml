@@ -146,8 +146,26 @@ services:
       - "${HTTPS_PORT:-8443}:8443"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/cert.pem:ro
-      - ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}:/etc/nginx/tls/key.pem:ro
+      # create_host_path: false, and this is the line that would have stopped
+      # the whole confusion. Docker's DEFAULT is to CREATE A DIRECTORY at a bind
+      # mount whose host path does not exist, and then mount it — so a .env
+      # naming a certificate nobody has generated does not fail as a missing
+      # file. It succeeds, and the process downstream reads a folder. The
+      # ${VAR:?} guard above does not catch it either: the variable is set, it
+      # is the path that is empty, which is the guard that exists and does not
+      # apply (§13.69).
+      - type: bind
+        source: ${TLS_CERT_FILE:?set TLS_CERT_FILE in .env — scripts/dev-cert.sh makes one}
+        target: /etc/nginx/tls/cert.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TLS_KEY_FILE:?set TLS_KEY_FILE in .env — scripts/dev-cert.sh makes one}
+        target: /etc/nginx/tls/key.pem
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       # service_healthy, not service_started. The proxy fronting an instance
       # that cannot reach Postgres is a stack that answers requests and fails

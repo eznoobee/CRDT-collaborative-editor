@@ -115,14 +115,30 @@ alias.
 Then:
 
 ```bash
-cp .env.example .env                     # then set POSTGRES_PASSWORD
+# The certificate FIRST. TLS_CERT_FILE and TLS_KEY_FILE ship blank on purpose,
+# so a .env copied unchanged fails at `up` with a message rather than mounting
+# a path that does not exist (see below).
 ./scripts/dev-cert.sh deploy/tls         # covers localhost AND editor-oidc
 
-# in .env:
+cp .env.example .env
+
+# then in .env:
+#   POSTGRES_PASSWORD=...                (openssl rand -base64 24)
+#   TLS_CERT_FILE=./deploy/tls/cert.pem  (dev-cert.sh prints both)
+#   TLS_KEY_FILE=./deploy/tls/key.pem
 #   OIDC_ISSUER=https://editor-oidc:9443
 #   OIDC_METADATA_ADDRESS=https://editor-oidc:9443/.well-known/openid-configuration
 
 docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml up --build
+```
+
+**If you already ran this and got `EISDIR`**, Docker created directories where
+the certificate should be, and they have to go before a real one can be written:
+
+```bash
+docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml down
+rm -rf deploy/tls/cert.pem deploy/tls/key.pem
+./scripts/dev-cert.sh deploy/tls
 ```
 
 Open <https://localhost:8443>. Both the application and the issuer are served

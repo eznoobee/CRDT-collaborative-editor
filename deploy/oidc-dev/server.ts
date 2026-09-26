@@ -25,7 +25,7 @@
  * token is valid.
  * </p>
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 
 import { startOidc } from '../../client/src/interop/harness.ts';
 
@@ -37,6 +37,63 @@ function required(name: string): string {
   }
 
   return value;
+}
+
+/**
+ * A variable naming a file this process must be able to read.
+ *
+ * @remarks
+ * <p>
+ * <b>§13.23, and it cost a cycle to learn again.</b> Without this the first
+ * failure was an `EISDIR` stack trace out of `readFileSync` inside `startOidc`,
+ * which says that something, somewhere, read a directory — and names neither
+ * the path, nor the variable that supplied it, nor the reason a directory is
+ * there at all.
+ * </p><p>
+ * <b>A directory is the expected wrong answer, not an exotic one.</b> Docker
+ * creates a directory at a bind mount's source when the host path does not
+ * exist, and then mounts that. So a `.env` pointing at a certificate nobody has
+ * generated yet does not fail as "missing file"; it fails as "your certificate
+ * is a folder", several layers from the cause. The message below says which
+ * variable, which path inside the container, what was found there, and what to
+ * run.
+ * </p>
+ */
+function requiredFile(name: string): string {
+  const path = required(name);
+
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? 'nothing exists at that path'
+      : String(error);
+
+    throw new Error(
+      `${name}=${path} cannot be read: ${reason}.\n`
+      + '  This path is a bind mount from the host. Check the matching\n'
+      + '  TLS_CERT_FILE / TLS_KEY_FILE in your .env, and run\n'
+      + '  ./scripts/dev-cert.sh deploy/tls if you have not generated a\n'
+      + '  certificate yet.',
+    );
+  }
+
+  if (stats.isDirectory()) {
+    throw new Error(
+      `${name}=${path} is a DIRECTORY, not a certificate file.\n`
+      + '  Docker creates a directory at a bind mount whose host path does not\n'
+      + '  exist, so this almost always means TLS_CERT_FILE or TLS_KEY_FILE in\n'
+      + '  your .env points at a file that has not been generated.\n'
+      + '\n'
+      + '  Fix it on the host:\n'
+      + '    docker compose -f docker-compose.yml -f deploy/docker-compose.dev-oidc.yml down\n'
+      + '    rm -rf deploy/tls/cert.pem deploy/tls/key.pem   # the empty directories Docker made\n'
+      + '    ./scripts/dev-cert.sh deploy/tls',
+    );
+  }
+
+  return path;
 }
 
 /**
@@ -81,8 +138,8 @@ const oidc = await startOidc({
   // browser on every `docker compose up`, and the ways past that are to trust
   // a new key each time or to stop validating — the second being what §7
   // forbids.
-  certFile: required('DEV_OIDC_CERT_FILE'),
-  keyFile: required('DEV_OIDC_KEY_FILE'),
+  certFile: requiredFile('DEV_OIDC_CERT_FILE'),
+  keyFile: requiredFile('DEV_OIDC_KEY_FILE'),
 });
 
 // What a test sets programmatically, set here from configuration. These are
