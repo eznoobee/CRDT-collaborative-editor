@@ -46,7 +46,22 @@ RUN npm run build \
         exit 1; \
     fi
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# PINNED TO A FEATURE BAND, and this line is the fix for §13.68 rather than a
+# tidy-up. It was `sdk:10.0`, which floats: on 2026-09-25 it resolved to a
+# 10.0.1xx SDK and this image built; a day later the tag had moved to 10.0.401,
+# a different feature band with a newer Roslyn, and the same source failed
+# IDE0055 under TreatWarningsAsErrors. Nothing in the repository had changed.
+#
+# The format gate is pinned — actions/setup-dotnet resolves global.json — so it
+# ran a different compiler from the one that builds what ships, and agreement
+# between them was a coincidence of timing rather than a property. Same feature
+# band on both sides is what makes `dotnet format --verify-no-changes` a
+# statement about this image.
+#
+# global.json alone does not do it: `rollForward: latestFeature` explicitly
+# permits a newer band, so copying it in constrains nothing. It is now
+# `latestPatch`, which is the other half.
+FROM mcr.microsoft.com/dotnet/sdk:10.0.103 AS build
 WORKDIR /source
 
 # Restore first, on just the files that affect it, so a source-only change

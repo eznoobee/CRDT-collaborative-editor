@@ -73,14 +73,22 @@ public sealed class RedisConnectTicketStore : IConnectTicketStore
         cancellationToken.ThrowIfCancellationRequested();
 
         var ticket = NewTicket();
+
+        // A ticket that collided with a live one would silently replace it,
+        // logging the first holder out and handing the second a binding that is
+        // not theirs. At 256 bits this never happens; When.NotExists makes
+        // "never" a failure rather than an assumption.
+        //
+        // ABOVE THE CALL, NOT INSIDE ITS ARGUMENT LIST, where it used to be. A
+        // comment between arguments is formatted differently by different
+        // Roslyn feature bands, and this one passed `dotnet format` on the
+        // runner's SDK while failing IDE0055 under the newer SDK the published
+        // image builds with. Moving it removes the disputed construct rather
+        // than guessing at an indentation (§13.68).
         var stored = await _redis.GetDatabase().StringSetAsync(
             Key(ticket),
             Encode(binding),
             _options.Lifetime,
-            // A ticket that collided with a live one would silently replace it,
-            // logging the first holder out and handing the second a binding
-            // that is not theirs. At 256 bits this never happens; When.NotExists
-            // makes "never" a failure rather than an assumption.
             When.NotExists).ConfigureAwait(false);
 
         if (!stored)
